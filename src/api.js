@@ -1,9 +1,10 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseDataUrl } from './assets.js';
-import { cleanBible, cleanBrief, defaultBrief, trimSizes } from './books.js';
+import { bookKinds, briefFor, cleanBible, cleanBrief, trimSizes } from './books.js';
 import { emptyGraph, nodeTypes, templates, validateGraph } from './canvas.js';
 import { RequestError } from './generation.js';
 import { envNames } from './keys.js';
@@ -12,9 +13,10 @@ import { userMessage } from './providers/http.js';
 const staticTypes = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4',
 };
 const csp = [
-  "default-src 'self'", "img-src 'self' data: blob:", "style-src 'self' https://fonts.googleapis.com",
+  "default-src 'self'", "img-src 'self' data: blob:", "media-src 'self' blob:", "style-src 'self' https://fonts.googleapis.com",
   "font-src https://fonts.gstatic.com", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'",
 ].join('; ');
 const uuid = '([a-f0-9-]{36})';
@@ -185,9 +187,12 @@ export function createApiServer(ctx) {
 
   // ---------- Book Studio ----------
   const needPage = (id) => repo.pages.get(id) ?? (() => { throw new RequestError(404, 'Page not found.'); })();
-  const safeFileName = (title) => title.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'book';
+  const needChapter = (id) => repo.chapters.get(id) ?? (() => { throw new RequestError(404, 'Chapter not found.'); })();
+  const needBook = (id) => repo.books.get(id) ?? (() => { throw new RequestError(404, 'Book not found.'); })();
+  const safeFileName = (title) => title.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'book';
+  const text = (value, max) => (typeof value === 'string' ? value.slice(0, max) : undefined);
 
-  route('GET', '/api/book-options', () => ({ trimSizes, defaultBrief }));
+  route('GET', '/api/book-options', () => ({ trimSizes, bookKinds, briefs: Object.fromEntries(Object.keys(bookKinds).map((kind) => [kind, briefFor(kind)])) }));
   route('GET', `/api/projects/${uuid}/books`, (req, [projectId]) => {
     needProject(projectId);
     return { books: repo.books.listByProject(projectId) };
@@ -196,23 +201,28 @@ export function createApiServer(ctx) {
     needProject(projectId);
     const body = await readBody(req, 64 * 1024);
     const writer = typeof body.writer === 'string' && body.writer ? body.writer : null;
-    const book = repo.books.create({ projectId, title: body.title, brief: cleanBrief(body.brief), bible: cleanBible(body.bible), writer });
-    return { status: 201, body: { book } };
+    return { status: 201, body: { book: books.createBook({ projectId, title: body.title, kind: body.kind, brief: body.brief, bible: body.bible, writer }) } };
   });
   route('GET', `/api/books/${uuid}`, (req, [id]) => books.detail(id));
   route('PATCH', `/api/books/${uuid}`, async (req, [id]) => {
-    const book = repo.books.get(id) ?? (() => { throw new RequestError(404, 'Book not found.'); })();
+    const book = needBook(id);
     const body = await readBody(req, 256 * 1024);
+    if (body.coverAssetId && !repo.assets.get(body.coverAssetId)?.mimeType.startsWith('image/')) throw new RequestError(404, 'Cover image not found.');
     return {
       book: repo.books.update(id, {
         title: body.title, brief: body.brief ? cleanBrief(body.brief, book.brief) : undefined,
         bible: body.bible ? cleanBible(body.bible) : undefined, writer: body.writer === undefined ? undefined : body.writer || null,
+        coverAssetId: body.coverAssetId === undefined ? undefined : body.coverAssetId || null,
       }),
     };
   });
   route('DELETE', `/api/books/${uuid}`, (req, [id]) => ({ deleted: repo.books.remove(id) }));
   route('POST', `/api/books/${uuid}/bible`, async (req, [id]) => ({ book: await books.draftBible(id, await readBody(req, 4096)) }));
   route('POST', `/api/books/${uuid}/plan`, async (req, [id]) => books.planPages(id, await readBody(req, 4096)));
+  route('POST', `/api/books/${uuid}/outline`, async (req, [id]) => books.outline(id, await readBody(req, 4096)));
+  route('POST', `/api/books/${uuid}/cover`, async (req, [id]) => ({ status: 202, body: books.generateCover(id, await readBody(req, 4096)) }));
+
+  // Pages (picture books)
   route('POST', `/api/books/${uuid}/pages`, async (req, [id]) => {
     books.detail(id);
     const body = await readBody(req, 16_384);
@@ -224,13 +234,7 @@ export function createApiServer(ctx) {
     needPage(id);
     const body = await readBody(req, 64 * 1024);
     if (body.assetId && !repo.assets.get(body.assetId)) throw new RequestError(404, 'Image not found.');
-    return {
-      page: repo.pages.update(id, {
-        text: typeof body.text === 'string' ? body.text.slice(0, 4000) : undefined,
-        illustrationBrief: typeof body.illustrationBrief === 'string' ? body.illustrationBrief.slice(0, 2000) : undefined,
-        assetId: body.assetId === undefined ? undefined : body.assetId || null,
-      }),
-    };
+    return { page: repo.pages.update(id, { text: text(body.text, 4000), illustrationBrief: text(body.illustrationBrief, 2000), assetId: body.assetId === undefined ? undefined : body.assetId || null }) };
   });
   route('DELETE', `/api/pages/${uuid}`, (req, [id]) => {
     needPage(id);
@@ -247,37 +251,92 @@ export function createApiServer(ctx) {
   });
   route('POST', `/api/pages/${uuid}/revise`, async (req, [id]) => ({ page: await books.revisePage(id, await readBody(req, 16_384)) }));
   route('POST', `/api/pages/${uuid}/illustrate`, async (req, [id]) => ({ status: 202, body: books.illustratePage(id, await readBody(req, 4096)) }));
+  route('POST', `/api/pages/${uuid}/narrate`, async (req, [id]) => ({ status: 202, body: books.narrate(['page', id], await readBody(req, 4096)) }));
+  route('POST', `/api/pages/${uuid}/animate`, async (req, [id]) => ({ status: 202, body: books.animatePage(id, await readBody(req, 4096)) }));
 
-  async function sendDownload(res, bytes, type, name) {
-    res.writeHead(200, { 'content-type': type, 'content-length': bytes.length, 'content-disposition': `attachment; filename="${name}"`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  // Chapters (novels, nonfiction)
+  route('POST', `/api/books/${uuid}/chapters`, async (req, [id]) => {
+    books.detail(id);
+    const body = await readBody(req, 64 * 1024);
+    const count = repo.chapters.listByBook(id).length;
+    const position = Math.min(Math.max(1, Number(body.position) || count + 1), count + 1);
+    return { status: 201, body: { chapter: repo.chapters.insert(id, { position, title: text(body.title, 200) ?? '', summary: text(body.summary, 3000) ?? '' }) } };
+  });
+  route('PATCH', `/api/chapters/${uuid}`, async (req, [id]) => {
+    needChapter(id);
+    const body = await readBody(req, 1024 * 1024);
+    const beats = Array.isArray(body.beats) ? body.beats.map((b) => String(b).slice(0, 1000)).slice(0, 30) : undefined;
+    if (body.assetId && !repo.assets.get(body.assetId)) throw new RequestError(404, 'Image not found.');
+    return { chapter: repo.chapters.update(id, { title: text(body.title, 200), summary: text(body.summary, 3000), beats, text: text(body.text, 400_000), assetId: body.assetId === undefined ? undefined : body.assetId || null }) };
+  });
+  route('DELETE', `/api/chapters/${uuid}`, (req, [id]) => {
+    needChapter(id);
+    repo.chapters.remove(id);
+    return { deleted: true };
+  });
+  route('POST', `/api/chapters/${uuid}/move`, async (req, [id]) => {
+    needChapter(id);
+    return { chapter: repo.chapters.move(id, (await readBody(req, 1024)).direction === 'up' ? -1 : 1) };
+  });
+  route('GET', `/api/chapters/${uuid}/revisions`, (req, [id]) => {
+    needChapter(id);
+    return { revisions: repo.chapters.revisions(id) };
+  });
+  route('POST', `/api/chapters/${uuid}/draft`, async (req, [id]) => ({ chapter: await books.draftChapter(id, await readBody(req, 16_384)) }));
+  route('POST', `/api/chapters/${uuid}/revise`, async (req, [id]) => ({ chapter: await books.reviseChapter(id, await readBody(req, 16_384)) }));
+  route('POST', `/api/chapters/${uuid}/illustrate`, async (req, [id]) => ({ status: 202, body: books.illustrateChapter(id, await readBody(req, 4096)) }));
+  route('POST', `/api/chapters/${uuid}/narrate`, async (req, [id]) => ({ status: 202, body: books.narrate(['chapter', id], await readBody(req, 4096)) }));
+
+  // Exports
+  async function sendDownload(res, bytes, type, name, headers = {}) {
+    res.writeHead(200, {
+      'content-type': type, 'content-length': bytes.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+      'content-disposition': `attachment; filename="${name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`, ...headers,
+    });
     res.end(bytes);
   }
-  route('GET', `/api/books/${uuid}/export\\.pdf`, async (req, [id], url, res) => {
-    const { book } = books.detail(id);
-    const { pdf, skippedWebp } = await books.exportPdf(id, assetStore);
-    if (skippedWebp) res.setHeader('x-lumina-skipped-webp', String(skippedWebp));
-    return sendDownload(res, pdf, 'application/pdf', `${safeFileName(book.title)}.pdf`);
-  });
-  route('GET', `/api/books/${uuid}/export\\.md`, (req, [id], url, res) => {
-    const { book } = books.detail(id);
-    return sendDownload(res, Buffer.from(books.exportMarkdown(id)), 'text/markdown; charset=utf-8', `${safeFileName(book.title)}.md`);
+  route('GET', `/api/books/${uuid}/export\\.(pdf|epub|docx|md|audio)`, async (req, [id, format], url, res) => {
+    const book = needBook(id);
+    const name = safeFileName(book.title);
+    if (format === 'pdf') {
+      const { pdf, skippedWebp, missingScripts } = await books.exportPdf(id);
+      return sendDownload(res, pdf, 'application/pdf', `${name}.pdf`, { 'x-lumina-skipped-webp': String(skippedWebp), 'x-lumina-missing-scripts': missingScripts.join(',') });
+    }
+    if (format === 'epub') return sendDownload(res, await books.exportEpub(id), 'application/epub+zip', `${name}.epub`);
+    if (format === 'docx') return sendDownload(res, await books.exportDocx(id), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', `${name}.docx`);
+    if (format === 'md') return sendDownload(res, Buffer.from(books.exportMarkdown(id)), 'text/markdown; charset=utf-8', `${name}.md`);
+    const { audio, mime, missing } = await books.exportAudiobook(id);
+    return sendDownload(res, audio, mime, `${name}-audiobook.${mime === 'audio/wav' ? 'wav' : 'mp3'}`, { 'x-lumina-missing-narration': String(missing) });
   });
 
-  async function serveFile(res, rootDir, relative, extraHeaders = {}) {
+  async function serveFile(res, rootDir, relative, extraHeaders = {}, range = null) {
     const file = path.resolve(rootDir, relative);
     if (!file.startsWith(rootDir + path.sep)) return send(res, 404, { error: 'Not found' });
     try {
       const info = await stat(file);
       if (!info.isFile()) return send(res, 404, { error: 'Not found' });
       const ext = path.extname(file);
-      res.writeHead(200, {
-        'content-type': staticTypes[ext] || 'application/octet-stream', 'content-length': info.size, 'x-content-type-options': 'nosniff',
+      const headers = {
+        'content-type': staticTypes[ext] || 'application/octet-stream', 'x-content-type-options': 'nosniff', 'accept-ranges': 'bytes',
         'cache-control': ext === '.html' || ext === '.js' || ext === '.css' ? 'no-cache' : 'private, max-age=31536000, immutable',
         ...(ext === '.html' ? { 'content-security-policy': csp, 'referrer-policy': 'no-referrer' } : {}), ...extraHeaders,
-      });
-      res.end(await readFile(file));
+      };
+      // Byte ranges let audio/video players seek without downloading the whole file.
+      const match = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (match && (match[1] || match[2])) {
+        const start = match[1] ? Number(match[1]) : Math.max(0, info.size - Number(match[2]));
+        const end = match[1] && match[2] ? Math.min(Number(match[2]), info.size - 1) : info.size - 1;
+        if (start > end || start >= info.size) {
+          res.writeHead(416, { 'content-range': `bytes */${info.size}` });
+          return res.end();
+        }
+        res.writeHead(206, { ...headers, 'content-range': `bytes ${start}-${end}/${info.size}`, 'content-length': end - start + 1 });
+        return createReadStream(file, { start, end }).pipe(res);
+      }
+      res.writeHead(200, { ...headers, 'content-length': info.size });
+      return createReadStream(file).pipe(res);
     } catch {
-      send(res, 404, { error: 'Not found' });
+      return send(res, 404, { error: 'Not found' });
     }
   }
 
@@ -303,7 +362,7 @@ export function createApiServer(ctx) {
       }
       if (protectedPath && !authorized(req)) return send(res, 401, { error: 'Open Lumina from its launch link or desktop app.' });
 
-      if (url.pathname.startsWith('/assets/') && req.method === 'GET') return serveFile(res, assetStore.dir, decodeURIComponent(url.pathname.slice(8)));
+      if (url.pathname.startsWith('/assets/') && req.method === 'GET') return serveFile(res, assetStore.dir, decodeURIComponent(url.pathname.slice(8)), {}, req.headers.range);
       for (const r of routes) {
         if (r.method !== req.method) continue;
         const match = r.pattern.exec(url.pathname);

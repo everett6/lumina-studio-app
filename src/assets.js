@@ -4,8 +4,9 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export const imageTypes = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/webp', 'webp']]);
+const mediaTypes = new Map([...imageTypes, ['audio/mpeg', 'mp3'], ['audio/wav', 'wav'], ['video/mp4', 'mp4']]);
 export const maxUploadBytes = 8 * 1024 * 1024;
-const maxOutputBytes = 30 * 1024 * 1024;
+const maxOutputBytes = 400 * 1024 * 1024;
 
 // Trust the bytes, not the label a provider or browser attached to them.
 export function sniffImage(bytes) {
@@ -14,6 +15,45 @@ export function sniffImage(bytes) {
   if (bytes.length > 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
   return null;
 }
+
+export function sniffMedia(bytes) {
+  const image = sniffImage(bytes);
+  if (image) return image;
+  if (bytes.length > 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WAVE') return 'audio/wav';
+  if (bytes.length > 3 && (bytes.toString('latin1', 0, 3) === 'ID3' || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0))) return 'audio/mpeg';
+  if (bytes.length > 12 && bytes.toString('latin1', 4, 8) === 'ftyp') return 'video/mp4';
+  return null;
+}
+
+// Pixel size of a PNG/JPEG/WebP, for layout math in exports. Returns null when unknown.
+export function imageSize(bytes) {
+  const mime = sniffImage(bytes);
+  if (mime === 'image/png') return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  if (mime === 'image/jpeg') {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) { offset += 1; continue; }
+      const marker = bytes[offset + 1];
+      const length = bytes.readUInt16BE(offset + 2);
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+        return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
+      }
+      offset += 2 + length;
+    }
+  }
+  if (mime === 'image/webp') {
+    const format = bytes.toString('latin1', 12, 16);
+    if (format === 'VP8X') return { width: 1 + bytes.readUIntLE(24, 3), height: 1 + bytes.readUIntLE(27, 3) };
+    if (format === 'VP8 ') return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
+    if (format === 'VP8L') {
+      const bits = bytes.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+    }
+  }
+  return null;
+}
+
+export const kindForMime = (mime) => (mime.startsWith('audio/') ? 'audio' : mime.startsWith('video/') ? 'video' : null);
 
 export function parseDataUrl(dataUrl) {
   if (typeof dataUrl !== 'string') return null;
@@ -31,12 +71,12 @@ export function createAssetStore({ assetDir, repo }) {
   return {
     dir: assetDir,
     async save({ bytes, projectId, kind, label, generationId, parentAssetId }) {
-      const mimeType = sniffImage(bytes);
-      if (!mimeType) throw new Error('Output is not a PNG, JPEG or WebP image.');
-      if (bytes.length > maxOutputBytes) throw new Error('Image exceeded the storage limit.');
-      const file = `${randomUUID()}.${imageTypes.get(mimeType)}`;
+      const mimeType = sniffMedia(bytes);
+      if (!mimeType) throw new Error('Output is not a supported image, audio or video file.');
+      if (bytes.length > maxOutputBytes) throw new Error('Output exceeded the storage limit.');
+      const file = `${randomUUID()}.${mediaTypes.get(mimeType)}`;
       await writeFile(path.join(assetDir, file), bytes, { flag: 'wx' });
-      return repo.assets.create({ projectId, kind, mimeType, file, size: bytes.length, label, generationId, parentAssetId });
+      return repo.assets.create({ projectId, kind: kindForMime(mimeType) ?? kind, mimeType, file, size: bytes.length, label, generationId, parentAssetId });
     },
     async read(asset) {
       return { mime: asset.mimeType, bytes: await readFile(fileFor(asset)) };

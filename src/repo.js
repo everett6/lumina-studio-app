@@ -13,7 +13,8 @@ const toGeneration = (r) => r && {
   prompt: r.prompt, finalPrompt: r.final_prompt, director: r.director, params: parse(r.params, {}),
   inputAssetIds: parse(r.input_asset_ids, []), assetId: r.output_asset_id,
   assetPath: r.output_file ? `/assets/${r.output_file}` : null, errorCategory: r.error_category, userError: r.user_error,
-  usage: parse(r.usage, null), canvasRunId: r.canvas_run_id, nodeId: r.node_id, bookPageId: r.book_page_id, createdAt: r.created_at,
+  usage: parse(r.usage, null), canvasRunId: r.canvas_run_id, nodeId: r.node_id, bookPageId: r.book_page_id, bookTarget: r.book_target,
+  mimeType: r.output_mime ?? null, createdAt: r.created_at,
   startedAt: r.started_at, completedAt: r.completed_at, durationMs: r.duration_ms,
 };
 const toCanvas = (r) => r && {
@@ -25,7 +26,7 @@ const toRun = (r) => r && {
   createdAt: r.created_at, completedAt: r.completed_at,
 };
 
-const generationSelect = `SELECT g.*, a.file AS output_file FROM generations g LEFT JOIN assets a ON a.id = g.output_asset_id`;
+const generationSelect = `SELECT g.*, a.file AS output_file, a.mime_type AS output_mime FROM generations g LEFT JOIN assets a ON a.id = g.output_asset_id`;
 
 // Column names allowed in generation updates, keyed by their camelCase field.
 const generationColumns = {
@@ -72,15 +73,16 @@ export function createRepo(db) {
     get: (id) => toGeneration(db.prepare(`${generationSelect} WHERE g.id = ?`).get(id)),
     listByProject: (projectId, limit = 200) => db.prepare(`${generationSelect} WHERE g.project_id = ? ORDER BY g.created_at DESC LIMIT ?`)
       .all(projectId, limit).map(toGeneration),
+    listByTarget: (target) => db.prepare(`${generationSelect} WHERE g.book_target = ? ORDER BY g.created_at DESC`).all(target).map(toGeneration),
     listByPage: (pageId) => db.prepare(`${generationSelect} WHERE g.book_page_id = ? ORDER BY g.created_at DESC`).all(pageId).map(toGeneration),
     idsWithStatus: (status) => db.prepare('SELECT id FROM generations WHERE status = ? ORDER BY created_at').all(status).map((r) => r.id),
     create(fields) {
       const id = randomUUID();
       db.prepare(`INSERT INTO generations (id, project_id, status, operation, provider, model, prompt, director, params,
-        input_asset_ids, canvas_run_id, node_id, book_page_id, created_at) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        input_asset_ids, canvas_run_id, node_id, book_page_id, book_target, created_at) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, fields.projectId, fields.operation, fields.provider, fields.model, fields.prompt, fields.director ?? null,
           JSON.stringify(fields.params ?? {}), JSON.stringify(fields.inputAssetIds ?? []), fields.canvasRunId ?? null,
-          fields.nodeId ?? null, fields.bookPageId ?? null, now());
+          fields.nodeId ?? null, fields.bookPageId ?? null, fields.bookTarget ?? null, now());
       touch(fields.projectId);
       return generations.get(id);
     },
@@ -156,11 +158,12 @@ export function createRepo(db) {
       touch(projectId);
       return books.get(id);
     },
-    update(id, { title, brief, bible, writer }) {
+    update(id, { title, brief, bible, writer, coverAssetId }) {
       const current = books.get(id);
-      db.prepare('UPDATE books SET title = ?, brief = ?, bible = ?, writer = ?, updated_at = ? WHERE id = ?')
+      db.prepare('UPDATE books SET title = ?, brief = ?, bible = ?, writer = ?, cover_asset_id = ?, updated_at = ? WHERE id = ?')
         .run(title === undefined ? current.title : cleanName(title, current.title), JSON.stringify(brief ?? current.brief),
-          JSON.stringify(bible ?? current.bible), writer === undefined ? current.writer : writer, now(), id);
+          JSON.stringify(bible ?? current.bible), writer === undefined ? current.writer : writer,
+          coverAssetId === undefined ? current.coverAssetId : coverAssetId, now(), id);
       return books.get(id);
     },
     touch: (id) => db.prepare('UPDATE books SET updated_at = ? WHERE id = ?').run(now(), id),
@@ -229,17 +232,112 @@ export function createRepo(db) {
     },
     revisions: (id) => db.prepare('SELECT * FROM page_revisions WHERE page_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 50').all(id)
       .map((r) => ({ id: r.id, text: r.text, illustrationBrief: r.illustration_brief, source: r.source, createdAt: r.created_at })),
+    setMedia(id, { narrationAssetId, videoAssetId }) {
+      const current = pages.get(id);
+      db.prepare('UPDATE book_pages SET narration_asset_id = ?, video_asset_id = ?, updated_at = ? WHERE id = ?')
+        .run(narrationAssetId === undefined ? current.narrationAssetId : narrationAssetId, videoAssetId === undefined ? current.videoAssetId : videoAssetId, now(), id);
+      return pages.get(id);
+    },
   };
 
-  return { projects, assets, generations, canvases, runs, settings, books, pages };
+  const chapters = {
+    get: (id) => toChapter(db.prepare('SELECT * FROM book_chapters WHERE id = ?').get(id)),
+    listByBook: (bookId) => db.prepare('SELECT * FROM book_chapters WHERE book_id = ? ORDER BY position').all(bookId).map(toChapter),
+    renumber(bookId) {
+      const ids = db.prepare('SELECT id FROM book_chapters WHERE book_id = ? ORDER BY position, created_at').all(bookId).map((r) => r.id);
+      const set = db.prepare('UPDATE book_chapters SET position = ? WHERE id = ?');
+      ids.forEach((chapterId, index) => set.run(index + 1, chapterId));
+    },
+    revise(id, source) {
+      const c = chapters.get(id);
+      db.prepare('INSERT INTO chapter_revisions (id, chapter_id, title, summary, beats, text, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(randomUUID(), id, c.title, c.summary, JSON.stringify(c.beats), c.text, source, now());
+    },
+    insert(bookId, { position, title = '', summary = '', beats = [], text = '' }, source = 'edit') {
+      const id = randomUUID();
+      db.prepare('UPDATE book_chapters SET position = position + 1 WHERE book_id = ? AND position >= ?').run(bookId, position);
+      db.prepare('INSERT INTO book_chapters (id, book_id, position, title, summary, beats, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, bookId, position, title, summary, JSON.stringify(beats), text, now(), now());
+      chapters.revise(id, source);
+      books.touch(bookId);
+      return chapters.get(id);
+    },
+    replaceAll(bookId, list) {
+      db.prepare('DELETE FROM book_chapters WHERE book_id = ?').run(bookId);
+      list.forEach((chapter, index) => chapters.insert(bookId, { ...chapter, position: index + 1 }, 'outline'));
+      return chapters.listByBook(bookId);
+    },
+    // Every content change snapshots the new state into chapter_revisions.
+    update(id, fields, source = 'edit') {
+      const c = chapters.get(id);
+      const next = {
+        title: fields.title ?? c.title, summary: fields.summary ?? c.summary, beats: fields.beats ?? c.beats, text: fields.text ?? c.text,
+        assetId: fields.assetId === undefined ? c.assetId : fields.assetId,
+        narrationAssetId: fields.narrationAssetId === undefined ? c.narrationAssetId : fields.narrationAssetId,
+      };
+      db.prepare(`UPDATE book_chapters SET title = ?, summary = ?, beats = ?, text = ?, asset_id = ?, narration_asset_id = ?, updated_at = ? WHERE id = ?`)
+        .run(next.title, next.summary, JSON.stringify(next.beats), next.text, next.assetId, next.narrationAssetId, now(), id);
+      const changed = next.title !== c.title || next.summary !== c.summary || next.text !== c.text || JSON.stringify(next.beats) !== JSON.stringify(c.beats);
+      if (changed) chapters.revise(id, source);
+      books.touch(c.bookId);
+      return chapters.get(id);
+    },
+    move(id, direction) {
+      const c = chapters.get(id);
+      const neighbour = db.prepare(`SELECT id, position FROM book_chapters WHERE book_id = ? AND position ${direction < 0 ? '<' : '>'} ?
+        ORDER BY position ${direction < 0 ? 'DESC' : 'ASC'} LIMIT 1`).get(c.bookId, c.position);
+      if (!neighbour) return c;
+      db.prepare('UPDATE book_chapters SET position = ? WHERE id = ?').run(neighbour.position, id);
+      db.prepare('UPDATE book_chapters SET position = ? WHERE id = ?').run(c.position, neighbour.id);
+      books.touch(c.bookId);
+      return chapters.get(id);
+    },
+    remove(id) {
+      const c = chapters.get(id);
+      db.prepare('DELETE FROM book_chapters WHERE id = ?').run(id);
+      chapters.renumber(c.bookId);
+      books.touch(c.bookId);
+    },
+    revisions: (id) => db.prepare('SELECT * FROM chapter_revisions WHERE chapter_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 50').all(id)
+      .map((r) => ({ id: r.id, title: r.title, summary: r.summary, beats: parse(r.beats, []), text: r.text, source: r.source, createdAt: r.created_at })),
+  };
+
+  const oauth = {
+    getClient: (clientId) => parse(db.prepare('SELECT data FROM oauth_clients WHERE client_id = ?').get(clientId)?.data, undefined),
+    saveClient: (client) => db.prepare('INSERT OR REPLACE INTO oauth_clients (client_id, data, created_at) VALUES (?, ?, ?)').run(client.client_id, JSON.stringify(client), now()),
+    saveToken: ({ tokenHash, kind, clientId, scopes, resource, expiresAt }) => db.prepare(`INSERT INTO oauth_tokens
+      (token_hash, kind, client_id, scopes, resource, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(tokenHash, kind, clientId, JSON.stringify(scopes ?? []), resource ?? null, expiresAt, now()),
+    getToken(tokenHash) {
+      const r = db.prepare('SELECT * FROM oauth_tokens WHERE token_hash = ?').get(tokenHash);
+      return r && { kind: r.kind, clientId: r.client_id, scopes: parse(r.scopes, []), resource: r.resource, expiresAt: r.expires_at };
+    },
+    deleteToken: (tokenHash) => db.prepare('DELETE FROM oauth_tokens WHERE token_hash = ?').run(tokenHash),
+    revokeAll() {
+      db.prepare('DELETE FROM oauth_tokens').run();
+      db.prepare('DELETE FROM oauth_clients').run();
+    },
+    stats: () => ({
+      clients: db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get().n,
+      activeTokens: db.prepare("SELECT COUNT(*) AS n FROM oauth_tokens WHERE kind = 'access' AND expires_at > ?").get(Date.now()).n,
+    }),
+  };
+
+  return { projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth };
 }
+
+const toChapter = (r) => r && {
+  id: r.id, bookId: r.book_id, position: r.position, title: r.title, summary: r.summary, beats: parse(r.beats, []), text: r.text,
+  assetId: r.asset_id, narrationAssetId: r.narration_asset_id, createdAt: r.created_at, updatedAt: r.updated_at,
+};
 
 const toBook = (r) => r && {
   id: r.id, projectId: r.project_id, title: r.title, kind: r.kind, brief: parse(r.brief, {}), bible: parse(r.bible, {}),
-  writer: r.writer, createdAt: r.created_at, updatedAt: r.updated_at,
+  writer: r.writer, coverAssetId: r.cover_asset_id, createdAt: r.created_at, updatedAt: r.updated_at,
 };
 const toPage = (r) => r && {
   id: r.id, bookId: r.book_id, position: r.position, text: r.text, illustrationBrief: r.illustration_brief, assetId: r.asset_id,
+  narrationAssetId: r.narration_asset_id, videoAssetId: r.video_asset_id,
   assetPath: r.asset_file ? `/assets/${r.asset_file}` : null, createdAt: r.created_at, updatedAt: r.updated_at,
 };
 

@@ -100,6 +100,46 @@ const migrations = [
    );
    CREATE INDEX page_revisions_page ON page_revisions(page_id, created_at DESC);
    ALTER TABLE generations ADD COLUMN book_page_id TEXT;`,
+  `CREATE TABLE book_chapters (
+     id TEXT PRIMARY KEY,
+     book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+     position INTEGER NOT NULL,
+     title TEXT NOT NULL DEFAULT '',
+     summary TEXT NOT NULL DEFAULT '',
+     beats TEXT NOT NULL DEFAULT '[]',
+     text TEXT NOT NULL DEFAULT '',
+     asset_id TEXT,
+     narration_asset_id TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE INDEX book_chapters_book ON book_chapters(book_id, position);
+   CREATE TABLE chapter_revisions (
+     id TEXT PRIMARY KEY,
+     chapter_id TEXT NOT NULL REFERENCES book_chapters(id) ON DELETE CASCADE,
+     title TEXT NOT NULL,
+     summary TEXT NOT NULL,
+     beats TEXT NOT NULL,
+     text TEXT NOT NULL,
+     source TEXT NOT NULL,
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX chapter_revisions_chapter ON chapter_revisions(chapter_id, created_at DESC);
+   ALTER TABLE books ADD COLUMN cover_asset_id TEXT;
+   ALTER TABLE book_pages ADD COLUMN narration_asset_id TEXT;
+   ALTER TABLE book_pages ADD COLUMN video_asset_id TEXT;
+   ALTER TABLE generations ADD COLUMN book_target TEXT;
+   CREATE INDEX generations_book_target ON generations(book_target);
+   CREATE TABLE oauth_clients (client_id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL);
+   CREATE TABLE oauth_tokens (
+     token_hash TEXT PRIMARY KEY,
+     kind TEXT NOT NULL,
+     client_id TEXT NOT NULL,
+     scopes TEXT NOT NULL DEFAULT '[]',
+     resource TEXT,
+     expires_at INTEGER NOT NULL,
+     created_at TEXT NOT NULL
+   );`,
 ];
 
 function migrate(db) {

@@ -5,7 +5,7 @@ const crcTable = Array.from({ length: 256 }, (_, n) => {
   for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
   return c >>> 0;
 });
-function crc32(buffer) {
+export function crc32(buffer) {
   let c = 0xffffffff;
   for (const byte of buffer) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;

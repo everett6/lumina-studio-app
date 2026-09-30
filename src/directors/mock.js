@@ -22,6 +22,26 @@ export function mockCompletion({ task, prompt }) {
       })),
     })}`;
   }
+  if (task === 'outline') {
+    const count = Number(/CHAPTER_COUNT=(\d+)/.exec(prompt)?.[1] ?? 3);
+    return JSON.stringify({
+      chapters: Array.from({ length: count }, (_, i) => ({
+        title: `The ${['Arrival', 'Storm', 'Crossing', 'Return', 'Reckoning'][i % 5]} ${i + 1}`,
+        summary: `Chapter ${i + 1} moves the story forward as Pip faces a new test.`,
+        beats: [`Scene ${i + 1}a: Pip arrives at the lake.`, `Scene ${i + 1}b: Grandma Owl gives advice.`, `Scene ${i + 1}c: A choice is made.`],
+      })),
+    });
+  }
+  if (task === 'draft') {
+    const words = Number(/TARGET_WORDS=(\d+)/.exec(prompt)?.[1] ?? 300);
+    const sentence = 'Pip stood at the edge of the cold water and listened to the reeds whisper.';
+    const paragraphs = Array.from({ length: Math.max(3, Math.round(words / 60)) }, () => Array(4).fill(sentence).join(' '));
+    return paragraphs.join('\n\n');
+  }
+  if (task === 'revise-chapter') {
+    const instruction = /INSTRUCTION:\s*(.*)/.exec(prompt)?.[1] ?? 'revised';
+    return `Revised (${instruction}). ${'The lake was quiet, and Pip felt brave at last. '.repeat(12)}\n\n${'Grandma Owl smiled from the branch above. '.repeat(10)}`;
+  }
   if (task === 'revise') {
     const instruction = /INSTRUCTION:\s*(.*)/.exec(prompt)?.[1] ?? 'revised';
     return JSON.stringify({ text: `Revised (${instruction}): Pip splashed happily in the lake.`, illustrationBrief: 'Pip splashing in shallow water, golden light.' });

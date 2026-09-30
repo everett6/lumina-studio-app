@@ -30,7 +30,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       const provider = providers.get(job.provider);
       if (!provider) throw Object.assign(new Error('Provider unavailable'), { category: 'invalid_request' });
       let prompt = job.prompt;
-      if (job.director) {
+      if (job.director && job.operation !== 'speech') {
         const [directorId, model] = job.director.split(':');
         const director = directors.get(directorId);
         if (!director) throw Object.assign(new Error('Director unavailable'), { category: 'invalid_request' });
@@ -43,10 +43,16 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         if (!asset) throw Object.assign(new Error('An input image was deleted.'), { category: 'invalid_request' });
         images.push(await assetStore.read(asset));
       }
-      const output = await provider.run({
-        key: provider.keyless ? null : keys.get(provider.id), model: job.model, prompt,
-        size: job.params.size, quality: job.params.quality, images,
-      });
+      const key = provider.keyless ? null : keys.get(provider.id);
+      const { params } = job;
+      let output;
+      if (job.operation === 'speech') {
+        output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style });
+      } else if (job.operation === 'video') {
+        output = await provider.video({ key, model: job.model, prompt, image: images[0] ?? null, duration: params.duration, aspect: params.aspect });
+      } else {
+        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images });
+      }
       const asset = await assetStore.save({
         bytes: output.bytes, projectId: job.projectId, kind: 'generation', generationId: id, parentAssetId: job.inputAssetIds[0] ?? null,
       });
