@@ -46,6 +46,7 @@
           <label class="field-label" for="prompt" id="prompt-label">WHAT DO YOU WANT TO CREATE?</label>
           <textarea id="prompt" maxlength="4000" rows="5" placeholder="A sun-drenched coastal villa at golden hour, linen curtains drifting in the breeze…"></textarea>
           <div class="prompt-footer"><span class="muted">Ctrl+Enter to generate</span><span id="char-count">0 / 4000</span></div>
+          <div class="applied-presets" id="applied-presets"></div>
 
           <div class="control-grid">
             <label><span class="field-label">MODEL</span><select id="model-select"></select></label>
@@ -88,9 +89,17 @@
             <button class="button secondary small" id="use-input-btn">Use as input</button>
             <button class="button secondary small" id="variation-btn">Variation</button>
             <button class="button secondary small" id="add-canvas-btn">Add to canvas</button>
+            <button class="button secondary small" id="animate-btn">Animate</button>
+            <button class="button secondary small" id="remix-btn">Remix</button>
           </div>
         </section>
       </div>
+
+      <section class="preset-section" id="preset-section">
+        <div class="history-head"><div><span class="step-number">✦</span><span class="section-title">Presets</span></div>
+          <div class="segmented" id="preset-groups" aria-label="Preset group"></div></div>
+        <div class="preset-grid" id="preset-grid"></div>
+      </section>
 
       <section class="history-section">
         <div class="history-head"><div><span class="step-number">03</span><span class="section-title">Recent generations</span><span class="history-count" id="history-count">0</span></div></div>

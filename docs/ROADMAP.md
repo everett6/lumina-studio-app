@@ -25,6 +25,11 @@
 - Video (Veo 3.1, Kling 3 Pro): Create video mode, a canvas video node, animated picture-book pages.
 - Remote MCP endpoint for claude.ai and ChatGPT: OAuth, pairing codes, through your own tunnel.
 
+## Done (v0.5)
+
+- Preset gallery on Create: camera moves, effects and styles with animated preview tiles; Animate and Remix on results;
+  presets in MCP (`list_presets`, `presets` on generate_image / generate_video).
+
 ## Next
 
 1. **Verify with real accounts.** Adapters are tested against faked HTTP only. Run one low-cost call per provider
@@ -33,7 +38,8 @@
    narration), multi-voice dialogue narration, and a built-in tunnel option.
 3. **Image tools.** Upscale, background removal, inpainting with a mask editor, outpainting.
 4. **Reusable subjects.** Named character and product reference sets that can be attached to any generation.
-5. **Presets.** Saved style, prompt and model combinations; canvas templates saved from your own graphs.
+5. **Your own presets.** Save style, prompt and model combinations; canvas templates saved from your own graphs;
+   presets on canvas nodes.
 6. **Hosted relay** for remote access without running a tunnel yourself (needs hosting).
 7. **Cost visibility.** Provider-reported usage per generation, plus an estimate before running a canvas.
 8. **Collaboration.** Shared projects, which depend on the hosted option.

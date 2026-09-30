@@ -1,4 +1,5 @@
 import { $, api, downloadAsset, emit, h, modelsFor, on, pickAsset, state, toast, uploadReference } from './lib.js';
+import { applyPresets, initPresets, presetModeChanged, selectedPresets } from './presets.js';
 
 const local = { inputs: [], shown: null, polling: new Set(), operation: 'generate', mode: 'image' };
 const modeCopy = {
@@ -80,6 +81,7 @@ function setMode(mode) {
     local.inputs = local.inputs.slice(0, 1);
     renderInputs();
   }
+  presetModeChanged(mode);
   renderModelOptions();
 }
 
@@ -143,7 +145,7 @@ function showGeneration(generation) {
     ['failed', 'interrupted'].includes(generation.status) ? h('button.button.secondary.small', { onclick: () => retry(generation) }, 'Retry') : null,
   ].filter(Boolean));
   $('#preview-actions').classList.toggle('hidden', !done);
-  for (const id of ['#use-input-btn', '#variation-btn', '#add-canvas-btn']) $(id).classList.toggle('hidden', !isImage);
+  for (const id of ['#use-input-btn', '#variation-btn', '#add-canvas-btn', '#animate-btn']) $(id).classList.toggle('hidden', !isImage);
   const caption = generation.finalPrompt && generation.finalPrompt !== generation.prompt ? `${generation.prompt}  →  ${generation.finalPrompt}` : generation.prompt;
   $('#preview-caption').textContent = caption;
 }
@@ -179,7 +181,7 @@ async function poll(id) {
       if (!['queued', 'running'].includes(generation.status)) {
         if (generation.status === 'completed') {
           emit('assets-changed');
-          if (generation.finalPrompt && generation.finalPrompt !== generation.prompt) toast('Creative director refined your prompt.');
+          if (generation.director && generation.finalPrompt && generation.finalPrompt !== generation.prompt) toast('Creative director refined your prompt.');
         } else toast(generation.userError || 'Generation failed.', 'error');
         return;
       }
@@ -205,6 +207,7 @@ async function generate() {
     projectId: state.project.id, prompt, provider: provider.id, model: model.id, size: $('#size-select').value,
     quality: model.qualities.length ? $('#quality-select').value : null, director: mode === 'speech' ? null : $('#director-select').value || null,
     inputAssetIds: mode === 'speech' ? [] : local.inputs.map((a) => a.id), operation: mode === 'image' ? local.operation : mode,
+    presets: mode === 'speech' ? [] : selectedPresets(),
     duration: $('#duration-select').value, aspect: $('#aspect-select').value, voice: $('#voice-select').value, style: $('#style-input').value,
   } });
   local.operation = 'generate';
@@ -255,6 +258,23 @@ export function initCreate() {
     renderModelOptions();
   }));
   $('#add-canvas-btn').addEventListener('click', () => emit('add-to-canvas', outputAsset()));
+  $('#animate-btn').addEventListener('click', () => {
+    const asset = outputAsset();
+    setMode('video');
+    addInput(asset);
+    $('#prompt').value = '';
+    $('#prompt').focus();
+    toast('Describe the motion, and pick a camera move below.');
+  });
+  $('#remix-btn').addEventListener('click', () => {
+    const g = local.shown;
+    setMode(g.operation === 'speech' || g.operation === 'video' ? g.operation : 'image');
+    $('#prompt').value = g.prompt;
+    $('#prompt').dispatchEvent(new Event('input'));
+    applyPresets(g.params?.presets);
+    $('#prompt').focus();
+  });
+  initPresets();
 
   on('catalog', () => { renderModelOptions(); renderDirectors(); });
   on('project', (detail) => {

@@ -1,3 +1,5 @@
+import { checkPresets } from './presets.js';
+
 export class RequestError extends Error {
   constructor(status, message) {
     super(message);
@@ -57,6 +59,14 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
       const size = model.sizes.includes(input.size) ? input.size : model.sizes[0];
       const quality = model.qualities.length ? (model.qualities.includes(input.quality) ? input.quality : model.qualities[Math.min(1, model.qualities.length - 1)]) : null;
       params = { size, quality };
+    }
+    if (operation !== 'speech') {
+      try {
+        const chosen = checkPresets(input.presets, operation);
+        if (chosen.length) params.presets = chosen;
+      } catch (error) {
+        throw new RequestError(400, error.message);
+      }
     }
     const generation = repo.generations.create({
       projectId: project.id, operation, provider: provider.id, model: model.id, prompt, director: media === 'speech' ? null : resolveDirector(input.director),

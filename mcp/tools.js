@@ -22,7 +22,7 @@ export function registerLuminaTools(server, client) {
   function summarizeGeneration(g) {
     return {
       id: g.id, status: g.status, operation: g.operation, provider: g.provider, model: g.model, prompt: g.prompt,
-      finalPrompt: g.finalPrompt, assetId: g.assetId, error: g.userError ?? undefined, createdAt: g.createdAt,
+      presets: g.params?.presets, finalPrompt: g.finalPrompt, assetId: g.assetId, error: g.userError ?? undefined, createdAt: g.createdAt,
     };
   }
 
@@ -70,6 +70,17 @@ export function registerLuminaTools(server, client) {
     }));
   }));
 
+  server.registerTool('list_presets', {
+    title: 'List presets',
+    description: 'List Lumina\'s creative presets: camera moves (video only), effects (time, weather, atmosphere) and styles. Pass preset ids as `presets` to generate_image or generate_video; at most one per group.',
+    inputSchema: { mode: z.enum(['image', 'video']).optional().describe('Only presets that work for this mode') },
+  }, safe(async ({ mode }) => {
+    const { presets } = await client.call('GET', '/api/presets');
+    return ok(text(presets.filter((p) => !mode || p.modes.includes(mode)).map(({ id, group, label, blurb, modes }) => ({ id, group, label, blurb, modes }))));
+  }));
+
+  const presetsArg = z.array(z.string()).max(3).optional().describe('Preset ids from list_presets, e.g. ["dolly-in", "cinematic"]; one per group');
+
   server.registerTool('generate_image', {
     title: 'Generate or edit an image',
     description: 'Generate an image in a Lumina project using the user\'s own provider keys. Pass inputAssetIds to edit or combine existing images. Waits for the result by default and returns the image. Costs money on the user\'s provider account.',
@@ -82,6 +93,7 @@ export function registerLuminaTools(server, client) {
       quality: z.enum(['low', 'medium', 'high']).optional(),
       inputAssetIds: z.array(z.string()).max(4).optional().describe('Asset ids to edit or use as references'),
       director: z.string().optional().describe('Optional creative director, e.g. "anthropic:claude-opus-5-5"'),
+      presets: presetsArg,
       wait: z.boolean().optional().describe('Wait for completion (default true)'),
     },
   }, safe(async (args) => {
@@ -336,10 +348,10 @@ export function registerLuminaTools(server, client) {
   server.registerTool('generate_video', {
     title: 'Generate video',
     description: 'Generate a short video clip from a prompt, optionally animating an image (inputAssetId). Slow (minutes) and more expensive than images — confirm with the user first.',
-    inputSchema: { projectId: z.string(), prompt: z.string().min(1).max(4000), inputAssetId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), duration: z.number().int().optional(), aspect: z.string().optional() },
-  }, safe(async ({ projectId, prompt, inputAssetId, provider, model, duration, aspect }) => {
+    inputSchema: { projectId: z.string(), prompt: z.string().min(1).max(4000), inputAssetId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), duration: z.number().int().optional(), aspect: z.string().optional(), presets: presetsArg },
+  }, safe(async ({ projectId, prompt, inputAssetId, provider, model, duration, aspect, presets }) => {
     const choice = await pickModel('video', provider, model);
-    const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'video', prompt, inputAssetIds: inputAssetId ? [inputAssetId] : [], duration, aspect, ...choice });
+    const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'video', prompt, inputAssetIds: inputAssetId ? [inputAssetId] : [], duration, aspect, presets, ...choice });
     return waitAndShow(generation);
   }));
 

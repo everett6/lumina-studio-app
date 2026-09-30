@@ -17,6 +17,7 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `list_projects` | Projects, most recently updated first. |
 | `create_project` | Create a project. |
 | `list_models` | Providers, whether each has a key, and each model's capabilities; creative directors. |
+| `list_presets` | Camera moves, effects and styles; pass their ids as `presets` to `generate_image` / `generate_video`. |
 | `generate_image` | Generate, or edit when `inputAssetIds` is given. Waits and returns the image by default. **Spends money on your provider account.** |
 | `get_generation` | Status of a generation, with the image when complete. |
 | `list_assets` | Images and canvases in a project. |

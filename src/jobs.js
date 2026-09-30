@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { composePrompt } from './presets.js';
 import { userMessage } from './providers/http.js';
 
 // Durable image job runner. Generation rows are the queue: 'queued' rows survive restarts and resume;
@@ -29,12 +30,12 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     try {
       const provider = providers.get(job.provider);
       if (!provider) throw Object.assign(new Error('Provider unavailable'), { category: 'invalid_request' });
-      let prompt = job.prompt;
+      let prompt = composePrompt(job.prompt, job.params?.presets);
       if (job.director && job.operation !== 'speech') {
         const [directorId, model] = job.director.split(':');
         const director = directors.get(directorId);
         if (!director) throw Object.assign(new Error('Director unavailable'), { category: 'invalid_request' });
-        prompt = await director.refine({ key: director.keyless ? null : keys.get(director.keyProvider), model, idea: job.prompt });
+        prompt = await director.refine({ key: director.keyless ? null : keys.get(director.keyProvider), model, idea: prompt });
         repo.generations.update(id, { finalPrompt: prompt });
       }
       const images = [];

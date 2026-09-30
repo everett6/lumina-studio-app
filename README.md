@@ -12,6 +12,7 @@ database and folder.
 | Area | Status |
 | --- | --- |
 | Generate and edit images | Text-to-image, edits with up to 4 input images, variations, retry on failure. |
+| Presets | 45 original presets with animated preview tiles: 20 camera moves (dolly, orbit, crane, FPV, dolly zoom…), 9 effects (slow motion, time-lapse, rain, fog…) and 16 styles (cinematic, noir, anime, clay…). One click adds them to an image or video prompt. **Animate** and **Remix** buttons on every result. |
 | Video | Text-to-video and image-to-video: Google Veo 3.1 (standard, Fast, Lite) and fal.ai Kling 3 Pro. Animate picture-book pages. (OpenAI's video API was shut down in September 2026.) |
 | Voice | Text to speech for any text, and narration of book pages and chapters: OpenAI gpt-4o-mini-tts and Gemini 3.8 TTS. Audiobook export. |
 | Providers | OpenAI, fal.ai, Google Gemini, Replicate (images); OpenAI, Anthropic Claude, NVIDIA Nemotron (writing). Tested against faked provider responses; **not yet run against the live APIs** (see below). |
@@ -20,7 +21,7 @@ database and folder.
 | Projects and library | SQLite storage, reusable references, audio and video in the library, rename, export to a folder, delete. |
 | Canvas | Prompt, reference, director, generate, edit, video and output nodes. Drag to connect, pan and zoom, autosave, templates, run all or up to one node. |
 | Desktop app | Electron `.deb` and AppImage. Keys encrypted with your system keyring. |
-| Claude Code / Claude Desktop | Local stdio MCP server with 27 tools (images, video, voice, canvas, books). See [docs/MCP.md](docs/MCP.md). |
+| Claude Code / Claude Desktop | Local stdio MCP server with 28 tools (images, video, voice, presets, canvas, books). See [docs/MCP.md](docs/MCP.md). |
 | claude.ai / ChatGPT | Remote MCP endpoint with OAuth and pairing-code approval. You expose it through an HTTPS tunnel you run (Cloudflare Tunnel, Tailscale Funnel, ngrok…). Tested end to end with an MCP client over HTTP; **not yet tried from claude.ai or ChatGPT themselves**. |
 
 Every flow in the table has been exercised with the built-in offline mock providers (image, voice, video, writer), in

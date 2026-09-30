@@ -8,6 +8,7 @@ import { bookKinds, briefFor, cleanBible, cleanBrief, trimSizes } from './books.
 import { emptyGraph, nodeTypes, templates, validateGraph } from './canvas.js';
 import { RequestError } from './generation.js';
 import { envNames } from './keys.js';
+import { presetGroups, presets } from './presets.js';
 import { userMessage } from './providers/http.js';
 
 const staticTypes = {
@@ -76,6 +77,7 @@ export function createApiServer(ctx) {
 
   route('GET', '/api/health', () => ({ ok: true, version: info.version, mode: info.mode, jobs: jobs.stats() }));
   route('GET', '/api/catalog', catalog);
+  route('GET', '/api/presets', () => ({ groups: presetGroups, presets }));
 
   route('GET', '/api/projects', () => ({ projects: repo.projects.list() }));
   route('POST', '/api/projects', async (req) => ({ status: 201, body: { project: repo.projects.create((await readBody(req, 16_384)).name) } }));

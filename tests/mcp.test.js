@@ -20,7 +20,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     const names = tools.map((tool) => tool.name);
     for (const name of ['list_projects', 'create_project', 'list_models', 'generate_image', 'get_generation', 'list_assets', 'add_to_canvas', 'run_canvas',
       'create_book', 'list_books', 'get_book', 'update_book', 'draft_bible', 'plan_pages', 'edit_page', 'revise_page', 'generate_illustration',
-      'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book']) {
+      'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -35,12 +35,18 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     assert.equal(image.mimeType, 'image/png');
     assert.ok(Buffer.from(image.data, 'base64').subarray(1, 4).toString() === 'PNG');
 
+    const presets = parse(await client.callTool({ name: 'list_presets', arguments: { mode: 'image' } }));
+    assert.ok(presets.some((p) => p.id === 'noir') && !presets.some((p) => p.group === 'camera'));
+    const styled = parse(await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'a lighthouse', provider: 'mock', model: 'mock-image', presets: ['noir'] } }));
+    assert.deepEqual(styled.presets, ['noir']);
+    assert.match(styled.finalPrompt, /film noir/);
+
     const edited = parse(await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'make it red', provider: 'mock', model: 'mock-image', inputAssetIds: [summary.assetId] } }));
     assert.equal(edited.operation, 'edit');
 
     const placed = parse(await client.callTool({ name: 'add_to_canvas', arguments: { projectId: project.id, assetId: summary.assetId } }));
     const listed = parse(await client.callTool({ name: 'list_assets', arguments: { projectId: project.id } }));
-    assert.equal(listed.assets.length, 2);
+    assert.equal(listed.assets.length, 3);
     assert.equal(listed.canvases[0].id, placed.canvasId);
 
     const run = parse(await client.callTool({ name: 'run_canvas', arguments: { canvasId: placed.canvasId } }));
