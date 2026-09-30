@@ -6,7 +6,10 @@ import { startLumina } from '../src/app.js';
 let lumina = null;
 let win = null;
 
-if (!app.requestSingleInstanceLock()) app.quit();
+// A second launch only focuses the running window; it must not start another backend (which would
+// overwrite endpoint.json while the first instance is still serving).
+const primary = app.requestSingleInstanceLock();
+if (!primary) app.exit(0);
 
 // Encrypt keys with the OS keyring (libsecret/kwallet). Electron's 'basic_text' fallback is not real
 // encryption, so treat it as unavailable and let the UI say keys are stored unencrypted.
@@ -56,6 +59,7 @@ app.on('second-instance', () => {
 });
 
 app.whenReady().then(async () => {
+  if (!primary) return;
   try {
     lumina = await startLumina({
       dataRoot: process.env.LUMINA_DATA_DIR || app.getPath('userData'),
