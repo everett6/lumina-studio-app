@@ -71,27 +71,30 @@ async function generate({ sourceAssetId = null, operation = 'generate' } = {}) {
   $('#generate-btn').disabled = true; $('#generate-btn').innerHTML = '<span class="button-spark">✳</span><span>Creating your image…</span>';
   $('#empty-state').classList.add('hidden'); $('#result-image').classList.add('hidden'); $('#image-overlay').classList.add('hidden'); $('#loading-state').classList.remove('hidden');
   try {
-    const request = { projectId: state.project.id, prompt: promptText, size: state.selectedSize, quality: $('#quality').value, enhance: true, sourceAssetId, operation, referenceDataUrl: state.references[0] || null };
+    const request = { projectId: state.project.id, prompt: promptText, size: state.selectedSize, quality: $('#quality').value, enhance: true, sourceAssetId, operation, referenceAssetId: state.references[0]?.id || null };
     const { generation } = await api('/api/generate', { method: 'POST', body: JSON.stringify(request) });
     state.generations.unshift(generation); showGeneration(generation); renderHistory(); $('#preview-caption').textContent = generation.prompt;
     if (generation.enhanced) toast('Creative director refined your prompt.');
     $('#reference-preview').innerHTML = ''; state.references = [];
   } catch (error) {
     $('#loading-state').classList.add('hidden'); if (state.latest) showGeneration(state.latest); else $('#empty-state').classList.remove('hidden'); toast(error.message);
-  } finally { $('#generate-btn').disabled = false; $('#generate-btn').innerHTML = '<span class="button-spark">✳</span><span>Generate image</span><span class="button-credit">1 credit</span>'; }
+  } finally { $('#generate-btn').disabled = false; $('#generate-btn').innerHTML = '<span class="button-spark">✳</span><span>Generate image</span><span class="button-credit" id="model-label">GPT Image</span>'; }
 }
 $('#prompt').addEventListener('input', () => { $('#char-count').textContent = `${$('#prompt').value.length} / 4000`; });
 $('#format-options').addEventListener('click', (event) => { const button = event.target.closest('button[data-size]'); if (!button) return; state.selectedSize = button.dataset.size; $('#format-options').querySelectorAll('button').forEach((item) => item.classList.toggle('selected', item === button)); });
 $('#reference-file').addEventListener('change', async (event) => {
   const file = event.target.files?.[0]; if (!file) return;
-  try { const dataUrl = await readImageFile(file); state.references = [dataUrl]; $('#reference-preview').innerHTML = `<img src="${dataUrl}" alt="Reference image">`; }
+  try {
+    const dataUrl = await readImageFile(file);
+    const { asset } = await api('/api/projects/assets', { method: 'POST', body: JSON.stringify({ projectId: state.project.id, dataUrl }) });
+    state.references = [asset]; $('#reference-preview').innerHTML = `<img src="${asset.path}" alt="Reference image">`;
+  }
   catch (error) { toast(error.message); }
   event.target.value = '';
 });
 $('#generate-btn').addEventListener('click', () => generate());
 $('#variation-btn').addEventListener('click', () => { if (!state.latest) return; $('#prompt').value = state.latest.prompt; $('#char-count').textContent = `${$('#prompt').value.length} / 4000`; generate({ sourceAssetId: state.latest.assetId, operation: 'variation' }); });
 $('#download-btn').addEventListener('click', () => { if (!state.latest) return; const link = document.createElement('a'); link.href = state.latest.assetPath; link.download = `lumina-${state.latest.id}.png`; link.click(); });
-$('#add-canvas-btn').addEventListener('click', () => { setTab('canvas'); toast('Image added to your canvas.'); });
 $('#canvas-create-link').addEventListener('click', () => setTab('create'));
 document.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => setTab(button.dataset.tab)));
 document.querySelectorAll('.tiny-plus').forEach((button) => button.addEventListener('click', createProject));

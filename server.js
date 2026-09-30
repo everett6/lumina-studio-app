@@ -11,6 +11,8 @@ const assetDir = path.join(root, 'storage', 'assets');
 const allowedMime = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/webp', 'webp']]);
 const maxUploadBytes = 8 * 1024 * 1024;
 const rateWindows = new Map();
+const defaultImageModel = 'gpt-image-2.5-flare';
+const staticTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
 
 await mkdir(dataDir, { recursive: true });
 await mkdir(assetDir, { recursive: true });
@@ -83,7 +85,7 @@ async function saveImage(b64, projectId, kind = 'generation') {
 async function openAIImage({ prompt, size, quality, image }) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error('OPENAI_API_KEY is not configured.');
-  const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
+  const model = process.env.OPENAI_IMAGE_MODEL || defaultImageModel;
   let response;
   if (image) {
     const form = new FormData();
@@ -127,12 +129,13 @@ async function createProject(name = 'Untitled campaign') {
 }
 async function serveStatic(pathname, res) {
   const relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
-  const rootDir = relative.startsWith('assets/') ? path.join(root, 'storage') : path.join(root, 'public');
-  const file = path.resolve(rootDir, relative.startsWith('assets/') ? relative.slice(7) : relative);
+  const isAsset = relative.startsWith('assets/');
+  const rootDir = isAsset ? assetDir : path.join(root, 'public');
+  const file = path.resolve(rootDir, isAsset ? relative.slice(7) : relative);
   if (!file.startsWith(rootDir + path.sep)) return json(res, 404, { error: 'Not found' });
   try {
     const info = await stat(file); if (!info.isFile()) return json(res, 404, { error: 'Not found' });
-    const ext = path.extname(file); const type = ext === '.html' ? 'text/html; charset=utf-8' : ext === '.css' ? 'text/css; charset=utf-8' : ext === '.js' ? 'text/javascript; charset=utf-8' : 'image/png';
+    const ext = path.extname(file); const type = staticTypes[ext] || 'application/octet-stream';
     res.writeHead(200, { 'content-type': type, 'content-length': info.size, 'x-content-type-options': 'nosniff', 'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=3600' });
     res.end(await readFile(file));
   } catch { json(res, 404, { error: 'Not found' }); }
@@ -181,13 +184,13 @@ const server = http.createServer(async (req, res) => {
       const quality = ['low', 'medium', 'high'].includes(body.quality) ? body.quality : 'medium';
       const baseImage = typeof body.sourceAssetId === 'string' ? (await store.assets()).find((a) => a.id === body.sourceAssetId && a.projectId === projectId) : null;
       if (body.sourceAssetId && !baseImage) return json(res, 404, { error: 'Source image not found in this project.' });
+      const refAsset = typeof body.referenceAssetId === 'string' ? (await store.assets()).find((a) => a.id === body.referenceAssetId && a.projectId === projectId) : null;
+      if (body.referenceAssetId && !refAsset) return json(res, 404, { error: 'Reference image not found in this project.' });
       let image = validImageData(body.referenceDataUrl);
-      if (!image && baseImage) {
-        const file = path.basename(baseImage.path); const ext = path.extname(file).slice(1); const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
-        image = { mime, bytes: await readFile(path.join(assetDir, file)) };
-      }
+      const fileAsset = refAsset || baseImage;
+      if (!image && fileAsset) image = { mime: fileAsset.mimeType, bytes: await readFile(path.join(assetDir, path.basename(fileAsset.path))) };
       if (body.referenceDataUrl && !image) return json(res, 400, { error: 'Reference must be PNG, JPEG or WebP and under 8 MB.' });
-      const jobId = randomUUID(); const generation = { id: jobId, projectId, prompt: idea, status: 'processing', operation: baseImage ? (body.operation === 'variation' ? 'variation' : 'edit') : 'generate', provider: 'openai', model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1', createdAt: new Date().toISOString() };
+      const jobId = randomUUID(); const generation = { id: jobId, projectId, prompt: idea, status: 'processing', operation: fileAsset ? (baseImage && body.operation === 'variation' ? 'variation' : 'edit') : 'generate', provider: 'openai', model: process.env.OPENAI_IMAGE_MODEL || defaultImageModel, createdAt: new Date().toISOString() };
       const generations = await store.generations(); generations.unshift(generation); await writeStore('generations.json', generations);
       try {
         let finalPrompt = idea; let enhanced = false;
@@ -219,4 +222,4 @@ const server = http.createServer(async (req, res) => {
     return json(res, error.status || 500, { error: error.status === 413 ? 'Request is too large.' : 'The request could not be completed.' });
   }
 });
-server.listen(port, '0.0.0.0', () => console.log(`Lumina Studio listening on http://localhost:${port}`));
+server.listen(port, '127.0.0.1', () => console.log(`Lumina Studio listening on http://localhost:${port}`));
