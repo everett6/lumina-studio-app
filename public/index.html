@@ -1,11 +1,140 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="#11110f"><title>Lumina Studio — Creative workspace</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"></head>
-<body><div class="app-shell"><aside class="sidebar"><a class="brand" href="#"><span class="brand-mark">L</span><span>Lumina<span class="brand-light">Studio</span></span></a><div class="side-label">WORKSPACE <button class="tiny-plus" title="New project">+</button></div><nav class="side-nav"><button class="nav-item active" data-tab="create"><span class="nav-icon">◈</span>Create<span class="nav-shortcut">⌘ 1</span></button><button class="nav-item" data-tab="canvas"><span class="nav-icon">▦</span>Canvas<span class="nav-shortcut">⌘ 2</span></button><button class="nav-item" data-tab="library"><span class="nav-icon">▧</span>Library</button></nav><div class="side-label project-label">PROJECTS <button class="tiny-plus" title="New project">+</button></div><div class="project-list" id="project-list"></div><div class="sidebar-bottom"></div></aside>
-<main class="main-area"><header class="topbar"><div class="breadcrumbs"><span>Projects</span><span class="crumb-slash">/</span><strong id="active-project-name">Untitled campaign</strong></div></header>
-<section class="create-view" id="create-view"><div class="hero-heading"><div class="eyebrow"><span class="eyebrow-dot"></span>YOUR CREATIVE WORKSPACE</div><h1>Ideas into <em>images.</em></h1><p>Describe the feeling. Lumina will shape the details.</p></div><div class="studio-grid"><section class="prompt-panel"><div class="panel-topline"><div><span class="step-number">01</span><span class="section-title">Start with an idea</span></div><button class="model-select" id="model-select"><span class="model-dot"></span> GPT Image <span class="caret">⌄</span></button></div><label class="prompt-label" for="prompt">WHAT DO YOU WANT TO CREATE?</label><textarea id="prompt" maxlength="4000" placeholder="A sun-drenched coastal villa at golden hour, linen curtains drifting in the breeze..." rows="4"></textarea><div class="prompt-footer"><span class="prompt-tip"><span class="spark">✳</span> Be as detailed or as open-ended as you like</span><span id="char-count">0 / 4000</span></div><div class="prompt-divider"></div><div class="controls-row"><div><span class="control-label">FORMAT</span><div class="segmented" id="format-options"><button class="selected" data-size="1024x1024"><span class="format-square"></span>Square</button><button data-size="1536x1024"><span class="format-landscape"></span>Landscape</button><button data-size="1024x1536"><span class="format-portrait"></span>Portrait</button></div></div><div><span class="control-label">QUALITY</span><div class="quality-select"><span class="quality-dot"></span><select id="quality"><option value="medium">Medium</option><option value="high">High</option><option value="low">Low</option></select><span class="caret">⌄</span></div></div></div><div class="reference-row"><div class="reference-icon">⌁</div><div class="reference-copy"><b>Reference images</b><small>Guide the look with an image</small></div><label class="upload-btn" for="reference-file">Add image <span>＋</span></label><input type="file" id="reference-file" accept="image/png,image/jpeg,image/webp" hidden></div><div class="reference-preview" id="reference-preview"></div><button class="generate-btn" id="generate-btn"><span class="button-spark">✳</span><span>Generate image</span><span class="button-credit" id="model-label">GPT Image</span></button><div class="secure-note"><span>▣</span> Stored locally on this computer</div></section>
-<section class="preview-panel"><div class="preview-top"><div><span class="step-number">02</span><span class="section-title">Your canvas</span></div><button class="expand-btn" title="Expand canvas">⤢</button></div><div class="canvas-stage" id="canvas-stage"><div class="canvas-grid"></div><div class="empty-state" id="empty-state"><div class="empty-illustration"><span class="ill-sun"></span><span class="ill-mountain back"></span><span class="ill-mountain front"></span><span class="ill-frame"></span><span class="ill-star star-one">✳</span><span class="ill-star star-two">✦</span></div><span class="empty-title">Your next idea starts here</span><span class="empty-subtitle">Write a prompt and let the creative process unfold.</span></div><div class="loading-state hidden" id="loading-state"><div class="loader-art"><span></span><span></span><span></span></div><b>Bringing your idea to life</b><small>Usually takes around 30 seconds</small></div><img id="result-image" class="result-image hidden" alt="Generated artwork"><div class="image-overlay hidden" id="image-overlay"><span class="image-tag">LATEST GENERATION</span><div class="image-tools"><button id="download-btn" title="Download">↓</button></div></div></div><div class="preview-bottom"><span id="preview-caption">Nothing here yet — your first creation is one prompt away.</span><button id="variation-btn" class="text-action hidden">Create variation ↗</button></div></section></div><section class="history-section"><div class="history-head"><div><span class="step-number">03</span><span class="section-title">Recent generations</span><span class="history-count" id="history-count">0</span></div><button class="view-all" data-tab="library">View library <span>→</span></button></div><div class="history-grid" id="history-grid"><div class="history-empty">Your generated images will appear here.</div></div></section></section>
-<section id="canvas-view" class="secondary-view hidden"><div class="secondary-heading"><div class="eyebrow"><span class="eyebrow-dot"></span>VISUAL WORKFLOW</div><h1>Think in <em>possibilities.</em></h1><p>Connect ideas, references and generations into one living canvas.</p></div><div class="workflow-canvas"><div class="workflow-grid"></div><div class="workflow-empty"><span>▦</span><b>Your canvas is ready</b><p>Add a generation to turn it into a workflow.</p><button id="canvas-create-link" class="subtle-button">Start creating</button></div></div></section>
-<section id="library-view" class="secondary-view hidden"><div class="secondary-heading"><div class="eyebrow"><span class="eyebrow-dot"></span>YOUR ASSETS</div><h1>Made to <em>keep.</em></h1><p>Every image you create, gathered in one place.</p></div><div class="library-grid" id="library-grid"></div></section></main></div><div class="toast hidden" id="toast"></div><script src="/app.js" type="module"></script></body></html>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#11110f">
+  <title>Lumina Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">L</span><span>Lumina<span class="brand-light">Studio</span></span></div>
+    <nav class="side-nav" aria-label="Sections">
+      <button class="nav-item active" data-tab="create"><span class="nav-icon">◈</span>Create<span class="nav-shortcut">Ctrl 1</span></button>
+      <button class="nav-item" data-tab="canvas"><span class="nav-icon">▦</span>Canvas<span class="nav-shortcut">Ctrl 2</span></button>
+      <button class="nav-item" data-tab="library"><span class="nav-icon">▧</span>Library<span class="nav-shortcut">Ctrl 3</span></button>
+      <button class="nav-item" data-tab="settings"><span class="nav-icon">⚙</span>Settings</button>
+    </nav>
+    <div class="side-label">PROJECTS <button class="tiny-plus" id="new-project" title="New project" aria-label="New project">+</button></div>
+    <div class="project-list" id="project-list"></div>
+    <div class="sidebar-bottom" id="provider-status"></div>
+  </aside>
+
+  <main class="main-area">
+    <header class="topbar">
+      <div class="breadcrumbs"><span>Projects</span><span class="crumb-slash">/</span><strong id="active-project-name">…</strong></div>
+      <div class="top-actions">
+        <button class="text-button" id="rename-project">Rename</button>
+        <button class="text-button" id="export-project">Export</button>
+        <button class="text-button danger" id="delete-project">Delete</button>
+      </div>
+    </header>
+
+    <section class="view" id="create-view">
+      <div class="studio-grid">
+        <section class="panel prompt-panel">
+          <div class="panel-topline"><div><span class="step-number">01</span><span class="section-title">Describe it</span></div></div>
+          <label class="field-label" for="prompt">WHAT DO YOU WANT TO CREATE?</label>
+          <textarea id="prompt" maxlength="4000" rows="5" placeholder="A sun-drenched coastal villa at golden hour, linen curtains drifting in the breeze…"></textarea>
+          <div class="prompt-footer"><span class="muted">Ctrl+Enter to generate</span><span id="char-count">0 / 4000</span></div>
+
+          <div class="control-grid">
+            <label><span class="field-label">MODEL</span><select id="model-select"></select></label>
+            <label><span class="field-label">FORMAT</span>
+              <select id="size-select">
+                <option value="1024x1024">Square</option><option value="1536x1024">Landscape</option><option value="1024x1536">Portrait</option>
+              </select></label>
+            <label id="quality-field"><span class="field-label">QUALITY</span><select id="quality-select"></select></label>
+            <label><span class="field-label">CREATIVE DIRECTOR</span><select id="director-select"></select></label>
+          </div>
+          <p class="model-note muted" id="model-note"></p>
+
+          <div class="reference-row">
+            <div><b>Input images</b><small id="reference-hint">Add images to edit or guide the result</small></div>
+            <div class="row-actions">
+              <button class="button secondary small" id="pick-reference">Choose…</button>
+              <label class="button secondary small">Upload<input type="file" id="reference-file" accept="image/png,image/jpeg,image/webp" hidden></label>
+            </div>
+          </div>
+          <div class="reference-tray" id="reference-tray"></div>
+          <button class="button primary wide" id="generate-btn">Generate image</button>
+          <p class="muted small-note">Runs on your own provider key. Images are stored on this computer.</p>
+        </section>
+
+        <section class="panel preview-panel">
+          <div class="panel-topline"><div><span class="step-number">02</span><span class="section-title">Result</span></div></div>
+          <div class="preview-stage" id="preview-stage">
+            <div class="empty-state" id="empty-state"><span class="empty-title">Your next idea starts here</span><span class="muted">Write a prompt and generate.</span></div>
+            <img id="result-image" class="result-image hidden" alt="Generated image">
+            <div class="preview-status hidden" id="preview-status"></div>
+          </div>
+          <p class="preview-caption" id="preview-caption"></p>
+          <div class="preview-actions hidden" id="preview-actions">
+            <button class="button secondary small" id="download-btn">Download</button>
+            <button class="button secondary small" id="use-input-btn">Use as input</button>
+            <button class="button secondary small" id="variation-btn">Variation</button>
+            <button class="button secondary small" id="add-canvas-btn">Add to canvas</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="history-section">
+        <div class="history-head"><div><span class="step-number">03</span><span class="section-title">Recent generations</span><span class="history-count" id="history-count">0</span></div></div>
+        <div class="history-grid" id="history-grid"></div>
+      </section>
+    </section>
+
+    <section class="view hidden" id="canvas-view">
+      <div class="canvas-toolbar">
+        <select id="canvas-select" aria-label="Canvas"></select>
+        <button class="button secondary small" id="canvas-new">New canvas</button>
+        <select id="canvas-template" aria-label="New from template"><option value="">From template…</option></select>
+        <span class="toolbar-sep"></span>
+        <div class="add-node-group" id="add-node-group"></div>
+        <span class="toolbar-sep"></span>
+        <button class="button secondary small" id="canvas-rename">Rename</button>
+        <button class="button secondary small danger" id="canvas-delete">Delete</button>
+        <span class="save-indicator muted" id="canvas-save-state"></span>
+        <button class="button primary small" id="canvas-run">Run all</button>
+      </div>
+      <div class="canvas-stage" id="canvas-stage" tabindex="0">
+        <div class="canvas-world" id="canvas-world">
+          <svg class="canvas-edges" id="canvas-edges"></svg>
+        </div>
+        <div class="canvas-empty hidden" id="canvas-empty">
+          <b>No canvas yet</b><p class="muted">Start blank or from a template. Nodes connect prompts, references and models into a workflow you can re-run.</p>
+          <button class="button primary small" id="canvas-empty-new">Create a canvas</button>
+        </div>
+        <div class="canvas-help muted">Drag the background to pan · scroll to zoom · drag from an output dot to an input dot to connect · click a line to remove it</div>
+      </div>
+    </section>
+
+    <section class="view hidden" id="library-view">
+      <div class="view-head">
+        <h1>Library</h1>
+        <div class="segmented" id="library-filter">
+          <button class="selected" data-filter="project">This project</button>
+          <button data-filter="references">All references</button>
+        </div>
+      </div>
+      <div class="library-grid" id="library-grid"></div>
+    </section>
+
+    <section class="view hidden" id="settings-view">
+      <div class="view-head"><h1>Settings</h1></div>
+      <p class="muted" id="key-storage-note"></p>
+      <div class="settings-grid" id="settings-grid"></div>
+      <h2 class="settings-subhead">Connect Claude (MCP)</h2>
+      <p class="muted">Lumina includes a local MCP server so Claude Code or Claude Desktop can list projects, generate images and add them to canvases while Lumina is open. See <code>docs/MCP.md</code> for setup.</p>
+    </section>
+  </main>
+</div>
+<div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
+<script src="/app.js" type="module"></script>
+</body>
+</html>

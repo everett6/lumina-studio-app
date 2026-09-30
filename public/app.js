@@ -1,103 +1,112 @@
-const $ = (selector) => document.querySelector(selector);
-const state = { project: null, projects: [], generations: [], references: [], selectedSize: '1024x1024', latest: null, toastTimer: null };
-const titleFromPrompt = (prompt) => prompt.trim().split(/\s+/).slice(0, 5).join(' ').replace(/[.,!?;:]$/, '') || 'Untitled campaign';
-const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
-function toast(message) { const node = $('#toast'); node.textContent = message; node.classList.remove('hidden'); clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => node.classList.add('hidden'), 3400); }
-async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { ...(options.body ? { 'content-type': 'application/json' } : {}), ...options.headers } });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || 'Something went wrong.');
-  return body;
+import { $, $$, api, emit, h, on, state, toast } from './lib.js';
+import { initCreate } from './create.js';
+import { initCanvas } from './canvas.js';
+import { initLibrary } from './library.js';
+import { initSettings } from './settings.js';
+
+const views = ['create', 'canvas', 'library', 'settings'];
+
+export function setTab(tab) {
+  $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.tab === tab));
+  for (const view of views) $(`#${view}-view`).classList.toggle('hidden', view !== tab);
+  emit('tab', tab);
 }
-async function readImageFile(file) {
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 8 * 1024 * 1024) throw new Error('Choose a PNG, JPEG or WebP image under 8 MB.');
-  return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Could not read this image.')); reader.readAsDataURL(file); });
+
+async function loadCatalog() {
+  state.catalog = await api('/api/catalog');
+  const ready = state.catalog.providers.filter((p) => p.ready && !p.keyless);
+  $('#provider-status').replaceChildren(
+    h('div.provider-box', {},
+      h('span.field-label', {}, 'PROVIDERS'),
+      ready.length ? h('p', {}, ready.map((p) => p.label).join(', ')) : h('p.muted', {}, 'No keys yet'),
+      h('button.text-button', { onclick: () => setTab('settings') }, ready.length ? 'Manage keys →' : 'Add an API key →')));
+  emit('catalog', state.catalog);
 }
-async function ensureProject() {
-  const projects = await api('/api/projects'); state.projects = projects.projects;
-  const previous = localStorage.getItem('lumina-project-id');
-  state.project = state.projects.find((p) => p.id === previous) || state.projects[0] || (await api('/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Untitled campaign' }) })).project;
-  localStorage.setItem('lumina-project-id', state.project.id);
-  await loadProject(); renderProjects();
-}
-async function loadProject() {
-  const result = await api(`/api/projects/${state.project.id}`); state.project = result.project; state.generations = result.generations.filter((g) => g.status === 'completed');
-  $('#active-project-name').textContent = state.project.name;
-  renderHistory();
-  if (state.generations[0]) showGeneration(state.generations[0]);
-}
+
 function renderProjects() {
-  const list = $('#project-list'); list.innerHTML = '';
-  state.projects.forEach((project) => {
-    const row = document.createElement('button'); row.className = `project-row ${project.id === state.project.id ? 'active' : ''}`; row.innerHTML = `<span class="project-dot"></span><span>${escapeHtml(project.name)}</span>`;
-    row.addEventListener('click', async () => { state.project = project; state.latest = null; localStorage.setItem('lumina-project-id', project.id); await loadProject(); renderProjects(); }); list.append(row);
-  });
+  $('#project-list').replaceChildren(...state.projects.map((project) => h(`button.project-row${project.id === state.project?.id ? '.active' : ''}`,
+    { onclick: () => selectProject(project.id) }, h('span.project-dot'), h('span', {}, project.name))));
+  $('#active-project-name').textContent = state.project?.name ?? '';
 }
-function renderHistory() {
-  $('#history-count').textContent = state.generations.length;
-  const grid = $('#history-grid'); grid.innerHTML = '';
-  if (!state.generations.length) { grid.innerHTML = '<div class="history-empty">Your generated images will appear here.</div>'; return; }
-  state.generations.slice(0, 5).forEach((generation) => {
-    const card = document.createElement('button'); card.className = 'history-card'; card.innerHTML = `<div class="history-thumb"><img src="${generation.assetPath}" alt=""></div><b>${escapeHtml(generation.prompt)}</b><small>${new Date(generation.createdAt).toLocaleDateString()}</small>`;
-    card.addEventListener('click', () => showGeneration(generation)); grid.append(card);
-  });
+
+export async function refreshProject() {
+  state.detail = await api(`/api/projects/${state.project.id}`);
+  state.project = state.detail.project;
+  emit('project', state.detail);
 }
-function showGeneration(generation) {
-  state.latest = generation;
-  const image = $('#result-image'); image.src = generation.assetPath; image.classList.remove('hidden');
-  $('#empty-state').classList.add('hidden'); $('#loading-state').classList.add('hidden'); $('#image-overlay').classList.remove('hidden');
-  $('#preview-caption').textContent = generation.prompt; $('#variation-btn').classList.remove('hidden');
+
+async function selectProject(id) {
+  state.project = state.projects.find((p) => p.id === id) ?? state.projects[0];
+  try { localStorage.setItem('lumina-project-id', state.project.id); } catch { /* storage may be unavailable */ }
+  renderProjects();
+  await refreshProject();
 }
-function renderLibrary() {
-  const grid = $('#library-grid'); grid.innerHTML = '';
-  if (!state.generations.length) { grid.innerHTML = '<div class="history-empty">Create your first image to fill your library.</div>'; return; }
-  for (const generation of state.generations) {
-    const card = document.createElement('article'); card.className = 'library-card'; card.innerHTML = `<img src="${generation.assetPath}" alt="${escapeHtml(generation.prompt)}"><b>${escapeHtml(generation.prompt)}</b><small>${new Date(generation.createdAt).toLocaleString()}</small>`; grid.append(card);
-  }
+
+async function loadProjects(preferId) {
+  state.projects = (await api('/api/projects')).projects;
+  if (!state.projects.length) state.projects = [(await api('/api/projects', { method: 'POST', body: { name: 'My first project' } })).project];
+  let remembered = null;
+  try { remembered = localStorage.getItem('lumina-project-id'); } catch { /* ignore */ }
+  const id = [preferId, remembered].find((candidate) => state.projects.some((p) => p.id === candidate)) ?? state.projects[0].id;
+  await selectProject(id);
 }
-function setTab(tab) {
-  document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.tab === tab));
-  $('#create-view').classList.toggle('hidden', tab !== 'create'); $('#canvas-view').classList.toggle('hidden', tab !== 'canvas'); $('#library-view').classList.toggle('hidden', tab !== 'library');
-  if (tab === 'library') renderLibrary();
-}
+
 async function createProject() {
-  const name = prompt('Name this project'); if (!name?.trim()) return;
-  try { const result = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name }) }); state.projects.unshift(result.project); state.project = result.project; localStorage.setItem('lumina-project-id', state.project.id); await loadProject(); renderProjects(); setTab('create'); }
-  catch (error) { toast(error.message); }
+  const name = prompt('Name this project');
+  if (!name?.trim()) return;
+  const { project } = await api('/api/projects', { method: 'POST', body: { name } });
+  await loadProjects(project.id);
+  setTab('create');
 }
-async function generate({ sourceAssetId = null, operation = 'generate' } = {}) {
-  const promptText = $('#prompt').value.trim();
-  if (!promptText) { $('#prompt').focus(); toast('Add an idea to get started.'); return; }
-  $('#generate-btn').disabled = true; $('#generate-btn').innerHTML = '<span class="button-spark">✳</span><span>Creating your image…</span>';
-  $('#empty-state').classList.add('hidden'); $('#result-image').classList.add('hidden'); $('#image-overlay').classList.add('hidden'); $('#loading-state').classList.remove('hidden');
-  try {
-    const request = { projectId: state.project.id, prompt: promptText, size: state.selectedSize, quality: $('#quality').value, enhance: true, sourceAssetId, operation, referenceAssetId: state.references[0]?.id || null };
-    const { generation } = await api('/api/generate', { method: 'POST', body: JSON.stringify(request) });
-    state.generations.unshift(generation); showGeneration(generation); renderHistory(); $('#preview-caption').textContent = generation.prompt;
-    if (generation.enhanced) toast('Creative director refined your prompt.');
-    $('#reference-preview').innerHTML = ''; state.references = [];
-  } catch (error) {
-    $('#loading-state').classList.add('hidden'); if (state.latest) showGeneration(state.latest); else $('#empty-state').classList.remove('hidden'); toast(error.message);
-  } finally { $('#generate-btn').disabled = false; $('#generate-btn').innerHTML = '<span class="button-spark">✳</span><span>Generate image</span><span class="button-credit" id="model-label">GPT Image</span>'; }
+
+async function renameProject() {
+  const name = prompt('Rename project', state.project.name);
+  if (!name?.trim()) return;
+  await api(`/api/projects/${state.project.id}`, { method: 'PATCH', body: { name } });
+  await loadProjects(state.project.id);
 }
-$('#prompt').addEventListener('input', () => { $('#char-count').textContent = `${$('#prompt').value.length} / 4000`; });
-$('#format-options').addEventListener('click', (event) => { const button = event.target.closest('button[data-size]'); if (!button) return; state.selectedSize = button.dataset.size; $('#format-options').querySelectorAll('button').forEach((item) => item.classList.toggle('selected', item === button)); });
-$('#reference-file').addEventListener('change', async (event) => {
-  const file = event.target.files?.[0]; if (!file) return;
-  try {
-    const dataUrl = await readImageFile(file);
-    const { asset } = await api('/api/projects/assets', { method: 'POST', body: JSON.stringify({ projectId: state.project.id, dataUrl }) });
-    state.references = [asset]; $('#reference-preview').innerHTML = `<img src="${asset.path}" alt="Reference image">`;
-  }
-  catch (error) { toast(error.message); }
-  event.target.value = '';
+
+async function exportProject() {
+  const result = await api(`/api/projects/${state.project.id}/export`, { method: 'POST', body: {} });
+  toast(`Exported ${result.assets} image(s) to ${result.folder}`);
+}
+
+async function deleteProject() {
+  if (!confirm(`Delete "${state.project.name}" and all of its images and canvases? This cannot be undone.`)) return;
+  await api(`/api/projects/${state.project.id}`, { method: 'DELETE' });
+  try { localStorage.removeItem('lumina-project-id'); } catch { /* ignore */ }
+  await loadProjects();
+}
+
+const guard = (fn) => async (...args) => {
+  try { await fn(...args); } catch (error) { toast(error.message, 'error'); }
+};
+
+$$('[data-tab]').forEach((button) => button.addEventListener('click', () => setTab(button.dataset.tab)));
+$('#new-project').addEventListener('click', guard(createProject));
+$('#rename-project').addEventListener('click', guard(renameProject));
+$('#export-project').addEventListener('click', guard(exportProject));
+$('#delete-project').addEventListener('click', guard(deleteProject));
+document.addEventListener('keydown', (event) => {
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const tab = { 1: 'create', 2: 'canvas', 3: 'library' }[event.key];
+  if (tab) { event.preventDefault(); setTab(tab); }
 });
-$('#generate-btn').addEventListener('click', () => generate());
-$('#variation-btn').addEventListener('click', () => { if (!state.latest) return; $('#prompt').value = state.latest.prompt; $('#char-count').textContent = `${$('#prompt').value.length} / 4000`; generate({ sourceAssetId: state.latest.assetId, operation: 'variation' }); });
-$('#download-btn').addEventListener('click', () => { if (!state.latest) return; const link = document.createElement('a'); link.href = state.latest.assetPath; link.download = `lumina-${state.latest.id}.png`; link.click(); });
-$('#canvas-create-link').addEventListener('click', () => setTab('create'));
-document.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => setTab(button.dataset.tab)));
-document.querySelectorAll('.tiny-plus').forEach((button) => button.addEventListener('click', createProject));
-$('#prompt').addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') generate(); });
-document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key === '1') setTab('create'); if ((event.metaKey || event.ctrlKey) && event.key === '2') setTab('canvas'); });
-ensureProject().catch((error) => toast(`Could not load workspace: ${error.message}`));
+on('keys-changed', guard(loadCatalog));
+on('open-tab', setTab);
+on('assets-changed', guard(refreshProject));
+on('refresh-project', guard(refreshProject));
+
+initCreate();
+initCanvas();
+initLibrary();
+initSettings();
+
+(async () => {
+  try {
+    await loadCatalog();
+    await loadProjects();
+  } catch (error) {
+    toast(error.status === 401 ? 'Open Lumina from the launch link printed in the terminal, or from the desktop app.' : `Could not load workspace: ${error.message}`, 'error');
+  }
+})();

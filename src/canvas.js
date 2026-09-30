@@ -170,7 +170,7 @@ export function createCanvasRunner({ repo, generations, jobs, directors, keys })
         } else if (node.type === 'reference') {
           if (!data.assetId || !repo.assets.get(data.assetId)) throw new RequestError(400, 'Reference node has no image.');
           result = { assetIds: [data.assetId] };
-          state[node.id] = { status: 'completed', assetId: data.assetId };
+          state[node.id] = { status: 'completed', assetId: data.assetId, assetPath: repo.assets.get(data.assetId).path };
         } else if (node.type === 'director') {
           const [idea] = await Promise.all(inputsFor(node.id, 'text'));
           if (!idea) throw new RequestError(400, 'Connect a prompt to the director.');
@@ -201,7 +201,7 @@ export function createCanvasRunner({ repo, generations, jobs, directors, keys })
           const [image] = await Promise.all(inputsFor(node.id, 'image'));
           if (!image) throw new RequestError(400, 'Connect an image to the output.');
           result = image;
-          state[node.id] = { status: 'completed', assetId: image.assetIds[0] };
+          state[node.id] = { status: 'completed', assetId: image.assetIds[0], assetPath: repo.assets.get(image.assetIds[0])?.path ?? null };
         }
         save();
         return result;
