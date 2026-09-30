@@ -13,7 +13,7 @@ const toGeneration = (r) => r && {
   prompt: r.prompt, finalPrompt: r.final_prompt, director: r.director, params: parse(r.params, {}),
   inputAssetIds: parse(r.input_asset_ids, []), assetId: r.output_asset_id,
   assetPath: r.output_file ? `/assets/${r.output_file}` : null, errorCategory: r.error_category, userError: r.user_error,
-  usage: parse(r.usage, null), canvasRunId: r.canvas_run_id, nodeId: r.node_id, createdAt: r.created_at,
+  usage: parse(r.usage, null), canvasRunId: r.canvas_run_id, nodeId: r.node_id, bookPageId: r.book_page_id, createdAt: r.created_at,
   startedAt: r.started_at, completedAt: r.completed_at, durationMs: r.duration_ms,
 };
 const toCanvas = (r) => r && {
@@ -72,14 +72,15 @@ export function createRepo(db) {
     get: (id) => toGeneration(db.prepare(`${generationSelect} WHERE g.id = ?`).get(id)),
     listByProject: (projectId, limit = 200) => db.prepare(`${generationSelect} WHERE g.project_id = ? ORDER BY g.created_at DESC LIMIT ?`)
       .all(projectId, limit).map(toGeneration),
+    listByPage: (pageId) => db.prepare(`${generationSelect} WHERE g.book_page_id = ? ORDER BY g.created_at DESC`).all(pageId).map(toGeneration),
     idsWithStatus: (status) => db.prepare('SELECT id FROM generations WHERE status = ? ORDER BY created_at').all(status).map((r) => r.id),
     create(fields) {
       const id = randomUUID();
       db.prepare(`INSERT INTO generations (id, project_id, status, operation, provider, model, prompt, director, params,
-        input_asset_ids, canvas_run_id, node_id, created_at) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        input_asset_ids, canvas_run_id, node_id, book_page_id, created_at) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, fields.projectId, fields.operation, fields.provider, fields.model, fields.prompt, fields.director ?? null,
           JSON.stringify(fields.params ?? {}), JSON.stringify(fields.inputAssetIds ?? []), fields.canvasRunId ?? null,
-          fields.nodeId ?? null, now());
+          fields.nodeId ?? null, fields.bookPageId ?? null, now());
       touch(fields.projectId);
       return generations.get(id);
     },
@@ -144,8 +145,103 @@ export function createRepo(db) {
       .run(key, JSON.stringify(value)),
   };
 
-  return { projects, assets, generations, canvases, runs, settings };
+  const books = {
+    get: (id) => toBook(db.prepare('SELECT * FROM books WHERE id = ?').get(id)),
+    listByProject: (projectId) => db.prepare(`SELECT b.*, (SELECT COUNT(*) FROM book_pages p WHERE p.book_id = b.id) AS page_count
+      FROM books b WHERE project_id = ? ORDER BY updated_at DESC`).all(projectId).map((r) => ({ ...toBook(r), pageCount: r.page_count })),
+    create({ projectId, title, kind = 'picture_book', brief = {}, bible = {}, writer = null }) {
+      const id = randomUUID();
+      db.prepare('INSERT INTO books (id, project_id, title, kind, brief, bible, writer, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, projectId, cleanName(title, 'Untitled book'), kind, JSON.stringify(brief), JSON.stringify(bible), writer, now(), now());
+      touch(projectId);
+      return books.get(id);
+    },
+    update(id, { title, brief, bible, writer }) {
+      const current = books.get(id);
+      db.prepare('UPDATE books SET title = ?, brief = ?, bible = ?, writer = ?, updated_at = ? WHERE id = ?')
+        .run(title === undefined ? current.title : cleanName(title, current.title), JSON.stringify(brief ?? current.brief),
+          JSON.stringify(bible ?? current.bible), writer === undefined ? current.writer : writer, now(), id);
+      return books.get(id);
+    },
+    touch: (id) => db.prepare('UPDATE books SET updated_at = ? WHERE id = ?').run(now(), id),
+    remove: (id) => db.prepare('DELETE FROM books WHERE id = ?').run(id).changes > 0,
+  };
+
+  const pageSelect = 'SELECT p.*, a.file AS asset_file FROM book_pages p LEFT JOIN assets a ON a.id = p.asset_id';
+  const pages = {
+    get: (id) => toPage(db.prepare(`${pageSelect} WHERE p.id = ?`).get(id)),
+    listByBook: (bookId) => db.prepare(`${pageSelect} WHERE p.book_id = ? ORDER BY p.position`).all(bookId).map(toPage),
+    // Positions are kept dense (1..n) so reordering is a simple swap.
+    renumber(bookId) {
+      const ids = db.prepare('SELECT id FROM book_pages WHERE book_id = ? ORDER BY position, created_at').all(bookId).map((r) => r.id);
+      const set = db.prepare('UPDATE book_pages SET position = ? WHERE id = ?');
+      ids.forEach((pageId, index) => set.run(index + 1, pageId));
+    },
+    insert(bookId, { position, text = '', illustrationBrief = '' }) {
+      const id = randomUUID();
+      db.prepare('UPDATE book_pages SET position = position + 1 WHERE book_id = ? AND position >= ?').run(bookId, position);
+      db.prepare('INSERT INTO book_pages (id, book_id, position, text, illustration_brief, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, bookId, position, text, illustrationBrief, now(), now());
+      books.touch(bookId);
+      return pages.get(id);
+    },
+    replaceAll(bookId, list) {
+      db.prepare('DELETE FROM book_pages WHERE book_id = ?').run(bookId);
+      const insert = db.prepare('INSERT INTO book_pages (id, book_id, position, text, illustration_brief, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      const revision = db.prepare('INSERT INTO page_revisions (id, page_id, text, illustration_brief, source, created_at) VALUES (?, ?, ?, ?, ?, ?)');
+      list.forEach((page, index) => {
+        const id = randomUUID();
+        insert.run(id, bookId, index + 1, page.text, page.illustrationBrief, now(), now());
+        revision.run(randomUUID(), id, page.text, page.illustrationBrief, 'plan', now());
+      });
+      books.touch(bookId);
+      return pages.listByBook(bookId);
+    },
+    // Text edits keep the previous version in page_revisions.
+    update(id, { text, illustrationBrief, assetId }, source = 'edit') {
+      const current = pages.get(id);
+      const nextText = text ?? current.text;
+      const nextBrief = illustrationBrief ?? current.illustrationBrief;
+      if (nextText !== current.text || nextBrief !== current.illustrationBrief) {
+        db.prepare('INSERT INTO page_revisions (id, page_id, text, illustration_brief, source, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(randomUUID(), id, nextText, nextBrief, source, now());
+      }
+      db.prepare('UPDATE book_pages SET text = ?, illustration_brief = ?, asset_id = ?, updated_at = ? WHERE id = ?')
+        .run(nextText, nextBrief, assetId === undefined ? current.assetId : assetId, now(), id);
+      books.touch(current.bookId);
+      return pages.get(id);
+    },
+    move(id, direction) {
+      const page = pages.get(id);
+      const neighbour = db.prepare(`SELECT id, position FROM book_pages WHERE book_id = ? AND position ${direction < 0 ? '<' : '>'} ?
+        ORDER BY position ${direction < 0 ? 'DESC' : 'ASC'} LIMIT 1`).get(page.bookId, page.position);
+      if (!neighbour) return page;
+      db.prepare('UPDATE book_pages SET position = ? WHERE id = ?').run(neighbour.position, id);
+      db.prepare('UPDATE book_pages SET position = ? WHERE id = ?').run(page.position, neighbour.id);
+      books.touch(page.bookId);
+      return pages.get(id);
+    },
+    remove(id) {
+      const page = pages.get(id);
+      db.prepare('DELETE FROM book_pages WHERE id = ?').run(id);
+      pages.renumber(page.bookId);
+      books.touch(page.bookId);
+    },
+    revisions: (id) => db.prepare('SELECT * FROM page_revisions WHERE page_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 50').all(id)
+      .map((r) => ({ id: r.id, text: r.text, illustrationBrief: r.illustration_brief, source: r.source, createdAt: r.created_at })),
+  };
+
+  return { projects, assets, generations, canvases, runs, settings, books, pages };
 }
+
+const toBook = (r) => r && {
+  id: r.id, projectId: r.project_id, title: r.title, kind: r.kind, brief: parse(r.brief, {}), bible: parse(r.bible, {}),
+  writer: r.writer, createdAt: r.created_at, updatedAt: r.updated_at,
+};
+const toPage = (r) => r && {
+  id: r.id, bookId: r.book_id, position: r.position, text: r.text, illustrationBrief: r.illustration_brief, assetId: r.asset_id,
+  assetPath: r.asset_file ? `/assets/${r.asset_file}` : null, createdAt: r.created_at, updatedAt: r.updated_at,
+};
 
 function cleanName(name, fallback) {
   return String(name ?? '').trim().slice(0, 80) || fallback;

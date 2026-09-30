@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApiServer } from './api.js';
 import { createAssetStore } from './assets.js';
+import { createBookService } from './books.js';
 import { createCanvasRunner } from './canvas.js';
 import { openDatabase } from './db.js';
 import { createDirectors } from './directors/index.js';
@@ -36,6 +37,8 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const jobs = createJobRunner({ repo, assetStore, providers, directors, keys, log });
   const generations = createGenerationService({ repo, providers, directors, keys, jobs });
   const canvasRunner = createCanvasRunner({ repo, generations, jobs, directors, keys });
+  const books = createBookService({ repo, directors, keys, generations, providers });
+  jobs.events.on('update', books.onGenerationUpdate);
   const tokenFile = path.join(dataDir, 'api-token');
   const token = loadToken(tokenFile);
 
@@ -44,7 +47,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   if (recovered.interrupted || recovered.resumed) log.info?.('Recovered jobs', recovered);
 
   const server = createApiServer({
-    repo, assetStore, providers, directors, keys, generations, canvasRunner, jobs, token,
+    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, jobs, token,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
   });
   await new Promise((resolve, reject) => {

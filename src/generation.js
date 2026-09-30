@@ -43,7 +43,7 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
     const quality = model.qualities.length ? (model.qualities.includes(input.quality) ? input.quality : model.qualities[Math.min(1, model.qualities.length - 1)]) : null;
     const generation = repo.generations.create({
       projectId: project.id, operation, provider: provider.id, model: model.id, prompt, director: resolveDirector(input.director),
-      params: { size, quality }, inputAssetIds, canvasRunId: input.canvasRunId, nodeId: input.nodeId,
+      params: { size, quality }, inputAssetIds, canvasRunId: input.canvasRunId, nodeId: input.nodeId, bookPageId: input.bookPageId,
     });
     jobs.enqueue(generation.id);
     return generation;

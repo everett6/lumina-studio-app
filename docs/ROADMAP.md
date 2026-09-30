@@ -10,8 +10,16 @@
 - Linux desktop app (.deb, AppImage) with keyring-encrypted keys.
 - Local MCP server for Claude Code and Claude Desktop.
 
+## Done (v0.3): Book Studio MVP
+
+- Picture books: brief → story bible → page plan → per-page editing, AI revision and history → consistent
+  illustrations (character canon in every prompt, reference images sent to edit-capable models) → PDF and Markdown
+  export. Book tools in MCP.
+
 ## Next
 
+0. **Book Studio, continued.** Novel and nonfiction modes (outline → chapters → scenes), EPUB and DOCX export,
+   print bleed and embedded fonts for non-Latin scripts, spread layouts, narration and video.
 1. **Real-provider verification.** Each adapter is tested against faked HTTP only. Run one low-cost generation per
    provider with real keys and fix any schema drift.
 2. **Video.** A video capability (`image-to-video`, `text-to-video`) in the provider contract, video nodes on the
@@ -29,3 +37,6 @@
 - Canvas runs are not cancellable once started (jobs finish or fail on their own).
 - The dev server keeps keys unencrypted (0600 file). Use the desktop app for keyring encryption.
 - No undo in the canvas.
+- Book PDFs use the standard PDF fonts, so Latin-script text only (no CJK, Arabic and so on), with no bleed. WebP
+  illustrations are skipped in the PDF.
+- Book writing calls wait for the writer model (up to a few minutes for long plans), with no streaming progress.

@@ -13,9 +13,10 @@ database and folder.
 | --- | --- |
 | Generate and edit images | Works. Text-to-image, edits with up to 4 input images, variations, retry on failure. |
 | Providers | OpenAI GPT Image 2.5 (Flare, Sunburst), fal.ai FLUX schnell and Kontext pro, Gemini 3.x image models, Replicate FLUX (schnell, 1.1 pro, Kontext pro). Tested against faked provider responses; **not yet run against the live APIs** (see below). |
-| Creative director | Optional prompt refinement with OpenAI, Anthropic Claude or NVIDIA Nemotron. |
+| Writers and creative director | OpenAI, Anthropic Claude or NVIDIA Nemotron write book pages and story bibles, and can optionally refine image prompts. |
 | Projects and library | SQLite storage, uploaded references reusable across projects, rename, export to a folder, delete. |
 | Canvas | Prompt, reference, director, generate, edit and output nodes. Drag to connect, pan and zoom, autosave, templates, run all or up to one node, duplicate to branch. |
+| Book Studio (picture books) | Book brief → AI-drafted story bible (characters with fixed looks and reference images, setting, voice, style) → AI page plan → edit or AI-revise each page with version history → illustrate pages with consistent characters → export a print-layout PDF (title page, art above real text) or Markdown. Novels, EPUB and DOCX are not built yet. |
 | Desktop app | Electron `.deb` and AppImage. Keys encrypted with your system keyring. |
 | Claude (MCP) | Local stdio MCP server for Claude Code and Claude Desktop. See [docs/MCP.md](docs/MCP.md). |
 | claude.ai / ChatGPT connectors | Not built. They need a remote HTTPS gateway; the design is in [docs/MCP.md](docs/MCP.md). |
@@ -37,13 +38,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.2.0_amd64.deb
+sudo apt install ./dist/lumina-studio_0.3.0_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.2.0.AppImage"
+chmod +x "dist/Lumina Studio-0.3.0.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.

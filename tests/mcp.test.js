@@ -17,7 +17,10 @@ test('MCP tools drive a running Lumina app end to end', async () => {
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [serverPath], env: { ...process.env, LUMINA_DATA_DIR: t.dataRoot }, stderr: 'ignore' }));
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), ['add_to_canvas', 'create_project', 'generate_image', 'get_generation', 'list_assets', 'list_models', 'list_projects', 'run_canvas']);
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'add_to_canvas', 'create_book', 'create_project', 'draft_bible', 'edit_page', 'export_book', 'generate_illustration', 'generate_image',
+      'get_book', 'get_generation', 'list_assets', 'list_books', 'list_models', 'list_projects', 'plan_pages', 'revise_page', 'run_canvas', 'update_book',
+    ]);
 
     const project = parse(await client.callTool({ name: 'create_project', arguments: { name: 'From Claude' } }));
     const models = parse(await client.callTool({ name: 'list_models', arguments: {} }));
@@ -47,6 +50,34 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     const missing = await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'x', provider: 'openai', model: 'gpt-image-2.5-flare' } });
     assert.equal(missing.isError, true);
     assert.match(missing.content[0].text, /API key/);
+  } finally {
+    await client.close();
+    await t.close();
+  }
+});
+
+test('MCP book tools: create → bible → plan → revise → illustrate → export PDF', async () => {
+  const t = await startTestApp();
+  const client = new Client({ name: 'lumina-test', version: '1.0.0' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [serverPath], env: { ...process.env, LUMINA_DATA_DIR: t.dataRoot }, stderr: 'ignore' }));
+  try {
+    const project = parse(await client.callTool({ name: 'create_project', arguments: { name: 'Book via Claude' } }));
+    const created = parse(await client.callTool({ name: 'create_book', arguments: { projectId: project.id, title: 'Moon Fox', writer: 'mock:mock-director', pageCount: 3 } }));
+    assert.equal(created.brief.pageCount, 3);
+    const withBible = parse(await client.callTool({ name: 'draft_bible', arguments: { bookId: created.id } }));
+    assert.equal(withBible.bible.characters[0].name, 'Pip');
+    const planned = parse(await client.callTool({ name: 'plan_pages', arguments: { bookId: created.id } }));
+    assert.equal(planned.pages.length, 3);
+    const revised = parse(await client.callTool({ name: 'revise_page', arguments: { pageId: planned.pages[0].id, instruction: 'rhyme it' } }));
+    assert.match(revised.text, /rhyme it/);
+    const illustrated = await client.callTool({ name: 'generate_illustration', arguments: { pageId: planned.pages[0].id, provider: 'mock', model: 'mock-image' } });
+    assert.equal(parse(illustrated).status, 'completed');
+    assert.ok(illustrated.content.some((c) => c.type === 'image'));
+    const exported = parse(await client.callTool({ name: 'export_book', arguments: { bookId: created.id } }));
+    assert.match(exported.file, /Moon-Fox\.pdf$/);
+    assert.equal(readFileSync(exported.file).subarray(0, 5).toString(), '%PDF-');
+    const book = parse(await client.callTool({ name: 'get_book', arguments: { bookId: created.id } }));
+    assert.equal(book.pages[0].hasIllustration, true);
   } finally {
     await client.close();
     await t.close();

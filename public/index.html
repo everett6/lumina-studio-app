@@ -17,7 +17,8 @@
     <nav class="side-nav" aria-label="Sections">
       <button class="nav-item active" data-tab="create"><span class="nav-icon">◈</span>Create<span class="nav-shortcut">Ctrl 1</span></button>
       <button class="nav-item" data-tab="canvas"><span class="nav-icon">▦</span>Canvas<span class="nav-shortcut">Ctrl 2</span></button>
-      <button class="nav-item" data-tab="library"><span class="nav-icon">▧</span>Library<span class="nav-shortcut">Ctrl 3</span></button>
+      <button class="nav-item" data-tab="books"><span class="nav-icon">❏</span>Books<span class="nav-shortcut">Ctrl 3</span></button>
+      <button class="nav-item" data-tab="library"><span class="nav-icon">▧</span>Library<span class="nav-shortcut">Ctrl 4</span></button>
       <button class="nav-item" data-tab="settings"><span class="nav-icon">⚙</span>Settings</button>
     </nav>
     <div class="side-label">PROJECTS <button class="tiny-plus" id="new-project" title="New project" aria-label="New project">+</button></div>
@@ -112,6 +113,18 @@
         </div>
         <div class="canvas-help muted">Drag the background to pan · scroll to zoom · drag from an output dot to an input dot to connect · click a line to remove it</div>
       </div>
+    </section>
+
+    <section class="view hidden" id="books-view">
+      <div class="view-head">
+        <h1>Books</h1>
+        <div class="row-actions">
+          <select id="book-select" aria-label="Book" class="hidden"></select>
+          <button class="button secondary small" id="book-new">New book</button>
+          <button class="button secondary small danger hidden" id="book-delete">Delete</button>
+        </div>
+      </div>
+      <div id="book-editor"></div>
     </section>
 
     <section class="view hidden" id="library-view">

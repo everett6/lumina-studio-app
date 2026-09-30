@@ -22,6 +22,15 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `list_assets` | Images and canvases in a project. |
 | `add_to_canvas` | Add an image to a canvas as a reference node. |
 | `run_canvas` | Run a canvas (or only what one node needs) and report each node's result. |
+| `create_book` / `list_books` / `get_book` / `update_book` | Create a picture book from a brief; read or edit its brief, story bible and pages. |
+| `draft_bible` | Writer model drafts the story bible from the brief. |
+| `plan_pages` | Writer model writes every page (text plus illustration brief). `replace: true` overwrites existing pages. |
+| `edit_page` / `revise_page` | Set a page's text directly, or have the writer revise it from an instruction. History is kept. |
+| `generate_illustration` | Illustrate one page with the bible's character looks and reference images. **Spends money.** |
+| `export_book` | Save a print-layout PDF or Markdown file and return its path. |
+
+Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft
+the bible and pages, show me the text, then illustrate page 1."*
 
 ## Set up
 

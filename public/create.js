@@ -84,10 +84,11 @@ function showGeneration(generation) {
   if (done) image.src = generation.assetPath;
   status.classList.toggle('hidden', done);
   status.dataset.status = generation.status;
-  status.replaceChildren(
+  status.replaceChildren(...[
     h('b', {}, statusLabels[generation.status] ?? generation.status),
     generation.userError ? h('span', {}, generation.userError) : h('span.muted', {}, `${generation.provider} · ${generation.model}`),
-    ['failed', 'interrupted'].includes(generation.status) ? h('button.button.secondary.small', { onclick: () => retry(generation) }, 'Retry') : null);
+    ['failed', 'interrupted'].includes(generation.status) ? h('button.button.secondary.small', { onclick: () => retry(generation) }, 'Retry') : null,
+  ].filter(Boolean));
   $('#preview-actions').classList.toggle('hidden', !done);
   const caption = generation.finalPrompt && generation.finalPrompt !== generation.prompt ? `${generation.prompt}  →  ${generation.finalPrompt}` : generation.prompt;
   $('#preview-caption').textContent = caption;

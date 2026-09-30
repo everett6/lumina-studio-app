@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseDataUrl } from './assets.js';
+import { cleanBible, cleanBrief, defaultBrief, trimSizes } from './books.js';
 import { emptyGraph, nodeTypes, templates, validateGraph } from './canvas.js';
 import { RequestError } from './generation.js';
 import { envNames } from './keys.js';
@@ -50,7 +51,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, jobs, token, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, jobs, token, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -182,6 +183,86 @@ export function createApiServer(ctx) {
   });
   route('GET', `/api/canvas-runs/${uuid}`, (req, [id]) => ({ run: repo.runs.get(id) ?? (() => { throw new RequestError(404, 'Run not found.'); })() }));
 
+  // ---------- Book Studio ----------
+  const needPage = (id) => repo.pages.get(id) ?? (() => { throw new RequestError(404, 'Page not found.'); })();
+  const safeFileName = (title) => title.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'book';
+
+  route('GET', '/api/book-options', () => ({ trimSizes, defaultBrief }));
+  route('GET', `/api/projects/${uuid}/books`, (req, [projectId]) => {
+    needProject(projectId);
+    return { books: repo.books.listByProject(projectId) };
+  });
+  route('POST', `/api/projects/${uuid}/books`, async (req, [projectId]) => {
+    needProject(projectId);
+    const body = await readBody(req, 64 * 1024);
+    const writer = typeof body.writer === 'string' && body.writer ? body.writer : null;
+    const book = repo.books.create({ projectId, title: body.title, brief: cleanBrief(body.brief), bible: cleanBible(body.bible), writer });
+    return { status: 201, body: { book } };
+  });
+  route('GET', `/api/books/${uuid}`, (req, [id]) => books.detail(id));
+  route('PATCH', `/api/books/${uuid}`, async (req, [id]) => {
+    const book = repo.books.get(id) ?? (() => { throw new RequestError(404, 'Book not found.'); })();
+    const body = await readBody(req, 256 * 1024);
+    return {
+      book: repo.books.update(id, {
+        title: body.title, brief: body.brief ? cleanBrief(body.brief, book.brief) : undefined,
+        bible: body.bible ? cleanBible(body.bible) : undefined, writer: body.writer === undefined ? undefined : body.writer || null,
+      }),
+    };
+  });
+  route('DELETE', `/api/books/${uuid}`, (req, [id]) => ({ deleted: repo.books.remove(id) }));
+  route('POST', `/api/books/${uuid}/bible`, async (req, [id]) => ({ book: await books.draftBible(id, await readBody(req, 4096)) }));
+  route('POST', `/api/books/${uuid}/plan`, async (req, [id]) => books.planPages(id, await readBody(req, 4096)));
+  route('POST', `/api/books/${uuid}/pages`, async (req, [id]) => {
+    books.detail(id);
+    const body = await readBody(req, 16_384);
+    const count = repo.pages.listByBook(id).length;
+    const position = Math.min(Math.max(1, Number(body.position) || count + 1), count + 1);
+    return { status: 201, body: { page: repo.pages.insert(id, { position, text: String(body.text ?? '').slice(0, 4000), illustrationBrief: String(body.illustrationBrief ?? '').slice(0, 2000) }) } };
+  });
+  route('PATCH', `/api/pages/${uuid}`, async (req, [id]) => {
+    needPage(id);
+    const body = await readBody(req, 64 * 1024);
+    if (body.assetId && !repo.assets.get(body.assetId)) throw new RequestError(404, 'Image not found.');
+    return {
+      page: repo.pages.update(id, {
+        text: typeof body.text === 'string' ? body.text.slice(0, 4000) : undefined,
+        illustrationBrief: typeof body.illustrationBrief === 'string' ? body.illustrationBrief.slice(0, 2000) : undefined,
+        assetId: body.assetId === undefined ? undefined : body.assetId || null,
+      }),
+    };
+  });
+  route('DELETE', `/api/pages/${uuid}`, (req, [id]) => {
+    needPage(id);
+    repo.pages.remove(id);
+    return { deleted: true };
+  });
+  route('POST', `/api/pages/${uuid}/move`, async (req, [id]) => {
+    needPage(id);
+    return { page: repo.pages.move(id, (await readBody(req, 1024)).direction === 'up' ? -1 : 1) };
+  });
+  route('GET', `/api/pages/${uuid}/revisions`, (req, [id]) => {
+    needPage(id);
+    return { revisions: repo.pages.revisions(id) };
+  });
+  route('POST', `/api/pages/${uuid}/revise`, async (req, [id]) => ({ page: await books.revisePage(id, await readBody(req, 16_384)) }));
+  route('POST', `/api/pages/${uuid}/illustrate`, async (req, [id]) => ({ status: 202, body: books.illustratePage(id, await readBody(req, 4096)) }));
+
+  async function sendDownload(res, bytes, type, name) {
+    res.writeHead(200, { 'content-type': type, 'content-length': bytes.length, 'content-disposition': `attachment; filename="${name}"`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.end(bytes);
+  }
+  route('GET', `/api/books/${uuid}/export\\.pdf`, async (req, [id], url, res) => {
+    const { book } = books.detail(id);
+    const { pdf, skippedWebp } = await books.exportPdf(id, assetStore);
+    if (skippedWebp) res.setHeader('x-lumina-skipped-webp', String(skippedWebp));
+    return sendDownload(res, pdf, 'application/pdf', `${safeFileName(book.title)}.pdf`);
+  });
+  route('GET', `/api/books/${uuid}/export\\.md`, (req, [id], url, res) => {
+    const { book } = books.detail(id);
+    return sendDownload(res, Buffer.from(books.exportMarkdown(id)), 'text/markdown; charset=utf-8', `${safeFileName(book.title)}.md`);
+  });
+
   async function serveFile(res, rootDir, relative, extraHeaders = {}) {
     const file = path.resolve(rootDir, relative);
     if (!file.startsWith(rootDir + path.sep)) return send(res, 404, { error: 'Not found' });
@@ -227,7 +308,8 @@ export function createApiServer(ctx) {
         if (r.method !== req.method) continue;
         const match = r.pattern.exec(url.pathname);
         if (!match) continue;
-        const result = await r.handler(req, match.slice(1), url);
+        const result = await r.handler(req, match.slice(1), url, res);
+        if (res.headersSent) return undefined;
         return result?.status ? send(res, result.status, result.body) : send(res, 200, result);
       }
       if (protectedPath) return send(res, 404, { error: 'Not found' });

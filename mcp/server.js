@@ -3,6 +3,7 @@
 // It talks to the app's local HTTP API using the endpoint and token files the app writes on start.
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -120,7 +121,7 @@ async function pickModel(operation, provider, model) {
   return options[0];
 }
 
-const server = new McpServer({ name: 'lumina-studio', version: '0.2.0' });
+const server = new McpServer({ name: 'lumina-studio', version: '0.3.0' });
 
 server.registerTool('list_projects', {
   title: 'List projects',
@@ -223,6 +224,115 @@ server.registerTool('run_canvas', {
   }
   const nodes = Object.fromEntries(Object.entries(run.nodeState).map(([id, s]) => [id, { status: s.status, assetId: s.assetId, error: s.error }]));
   return { content: [text({ runId: run.id, status: run.status, nodes })], isError: run.status === 'failed' };
+}));
+
+// ---------- Book Studio ----------
+
+const briefShape = {
+  premise: z.string().max(4000).optional(), audience: z.string().max(200).optional(), language: z.string().max(80).optional(),
+  genre: z.string().max(120).optional(), tone: z.string().max(200).optional(), pageCount: z.number().int().min(1).max(48).optional(),
+  trimSize: z.enum(['8x8', '8.5x11', '10x8', '6x9']).optional(), illustrationStyle: z.string().max(1000).optional(), author: z.string().max(120).optional(),
+};
+
+function bookSummary({ book, pages }) {
+  return {
+    id: book.id, title: book.title, projectId: book.projectId, writer: book.writer, brief: book.brief, bible: book.bible,
+    pages: pages.map((p) => ({ id: p.id, position: p.position, text: p.text, illustrationBrief: p.illustrationBrief, hasIllustration: Boolean(p.assetId), illustrationStatus: p.illustrations[0]?.status ?? null })),
+  };
+}
+
+server.registerTool('create_book', {
+  title: 'Create picture book',
+  description: 'Create a picture book in a Lumina project from a brief. Next steps: draft_bible, plan_pages, then generate_illustration per page and export_book.',
+  inputSchema: { projectId: z.string(), title: z.string().min(1).max(80), writer: z.string().optional().describe('Writer model as "provider:model" (see list_models directors), e.g. "anthropic:claude-opus-5-5"'), ...briefShape },
+}, safe(async ({ projectId, title, writer, ...brief }) => {
+  const { book } = await call('POST', `/api/projects/${projectId}/books`, { title, writer, brief });
+  return ok(text(bookSummary(await call('GET', `/api/books/${book.id}`))));
+}));
+
+server.registerTool('get_book', {
+  title: 'Get book',
+  description: 'Read a book: brief, story bible and every page\'s text, illustration brief and illustration status. Use list_books to find ids.',
+  inputSchema: { bookId: z.string() },
+}, safe(async ({ bookId }) => ok(text(bookSummary(await call('GET', `/api/books/${bookId}`))))));
+
+server.registerTool('list_books', {
+  title: 'List books',
+  description: 'List books in a project.',
+  inputSchema: { projectId: z.string() },
+}, safe(async ({ projectId }) => ok(text((await call('GET', `/api/projects/${projectId}/books`)).books.map(({ id, title, pageCount, updatedAt }) => ({ id, title, pageCount, updatedAt }))))));
+
+server.registerTool('update_book', {
+  title: 'Update book brief or story bible',
+  description: 'Edit a book\'s title, brief fields, writer, or story bible (characters with name/description/visual, setting, voice, styleNotes). Pass the whole bible object when changing it.',
+  inputSchema: {
+    bookId: z.string(), title: z.string().max(80).optional(), writer: z.string().optional(), brief: z.object(briefShape).optional(),
+    bible: z.object({
+      characters: z.array(z.object({ name: z.string(), description: z.string().optional(), visual: z.string().optional(), referenceAssetIds: z.array(z.string()).max(4).optional() })).optional(),
+      setting: z.string().optional(), voice: z.string().optional(), styleNotes: z.string().optional(), styleReferenceAssetIds: z.array(z.string()).max(4).optional(),
+    }).optional(),
+  },
+}, safe(async ({ bookId, ...changes }) => {
+  await call('PATCH', `/api/books/${bookId}`, changes);
+  return ok(text(bookSummary(await call('GET', `/api/books/${bookId}`))));
+}));
+
+server.registerTool('draft_bible', {
+  title: 'Draft story bible',
+  description: 'Have the book\'s writer model draft the story bible (characters, setting, voice, visual style) from the brief. Replaces the current bible; uses the user\'s text-model credits.',
+  inputSchema: { bookId: z.string(), writer: z.string().optional() },
+}, safe(async ({ bookId, writer }) => {
+  await call('POST', `/api/books/${bookId}/bible`, { writer });
+  return ok(text(bookSummary(await call('GET', `/api/books/${bookId}`))));
+}));
+
+server.registerTool('plan_pages', {
+  title: 'Plan pages',
+  description: 'Have the writer model write every page (text + illustration brief) from the brief and story bible. Set replace=true to overwrite existing pages — ask the user first.',
+  inputSchema: { bookId: z.string(), writer: z.string().optional(), replace: z.boolean().optional() },
+}, safe(async ({ bookId, writer, replace }) => ok(text(bookSummary(await call('POST', `/api/books/${bookId}/plan`, { writer, replace }))))));
+
+server.registerTool('edit_page', {
+  title: 'Edit page',
+  description: 'Set a page\'s text and/or illustration brief directly (previous version kept in history).',
+  inputSchema: { pageId: z.string(), text: z.string().max(4000).optional(), illustrationBrief: z.string().max(2000).optional() },
+}, safe(async ({ pageId, ...changes }) => ok(text((await call('PATCH', `/api/pages/${pageId}`, changes)).page))));
+
+server.registerTool('revise_page', {
+  title: 'Revise page with the writer',
+  description: 'Ask the writer model to revise one page following an instruction, keeping it consistent with the story bible and neighbouring pages.',
+  inputSchema: { pageId: z.string(), instruction: z.string().min(1).max(2000), writer: z.string().optional() },
+}, safe(async (args) => ok(text((await call('POST', `/api/pages/${args.pageId}/revise`, args)).page))));
+
+server.registerTool('generate_illustration', {
+  title: 'Illustrate page',
+  description: 'Generate an illustration for one page using its brief plus the story bible\'s character looks and reference images. Waits and returns the image. Costs money on the user\'s image provider — confirm with the user before illustrating many pages.',
+  inputSchema: { pageId: z.string(), provider: z.string().optional(), model: z.string().optional(), wait: z.boolean().optional() },
+}, safe(async ({ pageId, provider, model, wait = true }) => {
+  const choice = await pickModel('generate', provider, model);
+  const { generation, droppedReferences } = await call('POST', `/api/pages/${pageId}/illustrate`, choice);
+  const note = droppedReferences ? `${droppedReferences} reference image(s) not sent: this model does not accept input images.` : undefined;
+  if (!wait) return ok(text({ ...summarizeGeneration(generation), note }));
+  const done = (await call('POST', `/api/generations/${generation.id}/wait`, { timeoutMs: 600_000 })).generation;
+  if (done.status !== 'completed') return { content: [text(summarizeGeneration(done))], isError: true };
+  return ok(text({ ...summarizeGeneration(done), note }), ...(await imageContent(done.assetPath)));
+}));
+
+server.registerTool('export_book', {
+  title: 'Export book',
+  description: 'Export a book as a print-layout PDF (title page, one page per book page, art above real text) or as Markdown text. Saves the file on this computer and returns its path.',
+  inputSchema: { bookId: z.string(), format: z.enum(['pdf', 'md']).optional(), outputPath: z.string().optional().describe('Absolute file path; defaults to the Lumina exports folder') },
+}, safe(async ({ bookId, format = 'pdf', outputPath }) => {
+  await ensureRunning();
+  const { url, token, root } = connection();
+  const response = await fetch(`${url}/api/books/${bookId}/export.${format}`, { headers: { authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Export failed (HTTP ${response.status})`);
+  const name = /filename="([^"]+)"/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? `book.${format}`;
+  const target = outputPath ? path.resolve(outputPath) : path.join(root, 'exports', name);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, Buffer.from(await response.arrayBuffer()));
+  const skipped = Number(response.headers.get('x-lumina-skipped-webp') ?? 0);
+  return ok(text({ file: target, format, note: skipped ? `${skipped} WebP illustration(s) could not be embedded in the PDF.` : undefined }));
 }));
 
 await server.connect(new StdioServerTransport());

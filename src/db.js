@@ -67,6 +67,39 @@ const migrations = [
      completed_at TEXT
    );
    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+  `CREATE TABLE books (
+     id TEXT PRIMARY KEY,
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     title TEXT NOT NULL,
+     kind TEXT NOT NULL DEFAULT 'picture_book',
+     brief TEXT NOT NULL DEFAULT '{}',
+     bible TEXT NOT NULL DEFAULT '{}',
+     writer TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE INDEX books_project ON books(project_id, updated_at DESC);
+   CREATE TABLE book_pages (
+     id TEXT PRIMARY KEY,
+     book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+     position INTEGER NOT NULL,
+     text TEXT NOT NULL DEFAULT '',
+     illustration_brief TEXT NOT NULL DEFAULT '',
+     asset_id TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE INDEX book_pages_book ON book_pages(book_id, position);
+   CREATE TABLE page_revisions (
+     id TEXT PRIMARY KEY,
+     page_id TEXT NOT NULL REFERENCES book_pages(id) ON DELETE CASCADE,
+     text TEXT NOT NULL,
+     illustration_brief TEXT NOT NULL,
+     source TEXT NOT NULL,
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX page_revisions_page ON page_revisions(page_id, created_at DESC);
+   ALTER TABLE generations ADD COLUMN book_page_id TEXT;`,
 ];
 
 function migrate(db) {
