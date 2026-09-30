@@ -13,14 +13,19 @@ async function render() {
     return;
   }
   grid.replaceChildren(...assets.map((asset) => {
-    const caption = prompts.get(asset.id) ?? asset.label ?? (asset.kind === 'reference' ? 'Reference image' : 'Generated image');
+    const kindLabel = { reference: 'Reference', generation: 'Generated', audio: 'Audio', video: 'Video' }[asset.kind] ?? asset.kind;
+    const caption = prompts.get(asset.id) ?? asset.label ?? `${kindLabel} file`;
+    const isImage = asset.mimeType.startsWith('image/');
+    const preview = isImage ? h('img', { src: asset.path, alt: caption, loading: 'lazy' })
+      : asset.mimeType.startsWith('video/') ? h('video', { src: asset.path, controls: true, preload: 'metadata' })
+        : h('div.audio-card', {}, h('span', {}, '♪'), h('audio', { src: asset.path, controls: true, preload: 'none' }));
     return h('article.library-card', {},
-      h('img', { src: asset.path, alt: caption, loading: 'lazy' }),
-      h('div.library-meta', {}, h('span.badge', {}, asset.kind === 'reference' ? 'Reference' : 'Generated'), h('b', {}, caption),
+      preview,
+      h('div.library-meta', {}, h('span.badge', {}, kindLabel), h('b', {}, caption.length > 160 ? `${caption.slice(0, 160)}…` : caption),
         h('small', {}, new Date(asset.createdAt).toLocaleString())),
       h('div.library-actions', {},
-        h('button.text-button', { onclick: () => emit('use-as-input', asset) }, 'Use as input'),
-        h('button.text-button', { onclick: () => emit('add-to-canvas', asset) }, 'Add to canvas'),
+        isImage ? h('button.text-button', { onclick: () => emit('use-as-input', asset) }, 'Use as input') : null,
+        isImage ? h('button.text-button', { onclick: () => emit('add-to-canvas', asset) }, 'Add to canvas') : null,
         h('button.text-button', { onclick: () => downloadAsset(asset.path, asset.file) }, 'Download'),
         h('button.text-button.danger', { onclick: () => remove(asset) }, 'Delete')));
   }));

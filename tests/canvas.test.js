@@ -110,3 +110,25 @@ test('reference node feeds an edit node; empty prompt is reported on its node', 
     await t.close();
   }
 });
+
+test('video node turns a prompt (and optional image) into a clip', async () => {
+  const t = await startTestApp();
+  try {
+    const { project } = (await t.call('POST', '/api/projects', { name: 'Video canvas' })).body;
+    const { canvas } = (await t.call('POST', `/api/projects/${project.id}/canvases`, { name: 'Clip' })).body;
+    const graph = {
+      nodes: [
+        { id: 'p', type: 'prompt', x: 0, y: 0, data: { text: 'waves at night' } },
+        { id: 'v', type: 'video', x: 300, y: 0, data: { provider: 'mock', model: 'mock-video', duration: 4 } },
+      ],
+      edges: [{ id: 'e', from: { node: 'p', port: 'text' }, to: { node: 'v', port: 'prompt' } }],
+    };
+    await t.call('PUT', `/api/canvases/${canvas.id}`, { graph, version: canvas.version });
+    const { run } = (await t.call('POST', `/api/canvases/${canvas.id}/run`, {})).body;
+    const finished = await waitForRun(t, run.id);
+    assert.equal(finished.status, 'completed', JSON.stringify(finished.nodeState));
+    assert.match(finished.nodeState.v.videoPath, /\.mp4$/);
+  } finally {
+    await t.close();
+  }
+});

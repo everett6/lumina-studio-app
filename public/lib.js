@@ -98,7 +98,7 @@ export function pickAsset({ title = 'Choose an image' } = {}) {
     document.body.append(overlay);
     const [{ assets: references }, detail] = await Promise.all([api('/api/assets?kind=reference'), api(`/api/projects/${state.project.id}`)]);
     const seen = new Set();
-    const items = [...detail.assets, ...references].filter((a) => !seen.has(a.id) && seen.add(a.id));
+    const items = [...detail.assets, ...references].filter((a) => a.mimeType.startsWith('image/') && !seen.has(a.id) && seen.add(a.id));
     if (!items.length) grid.append(h('p.muted', {}, 'No images yet. Upload one or generate an image first.'));
     for (const asset of items) {
       grid.append(h('button.picker-item', { onclick: () => close(asset), title: asset.label || asset.kind },

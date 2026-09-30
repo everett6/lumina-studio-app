@@ -8,6 +8,7 @@ export const nodeTypes = {
   generate: { inputs: { prompt: { type: 'text', required: true }, images: { type: 'image', multiple: true } }, outputs: { image: 'image' } },
   edit: { inputs: { prompt: { type: 'text', required: true }, images: { type: 'image', required: true, multiple: true } }, outputs: { image: 'image' } },
   output: { inputs: { image: { type: 'image', required: true } }, outputs: {} },
+  video: { inputs: { prompt: { type: 'text', required: true }, image: { type: 'image' } }, outputs: {} },
 };
 
 const maxNodes = 200;
@@ -152,10 +153,10 @@ export function createCanvasRunner({ repo, generations, jobs, directors, keys })
 
     async function evaluate(node) {
       const reuse = node.id !== targetNodeId && cached[node.id];
-      if (reuse && (node.type === 'generate' || node.type === 'edit' || node.type === 'director')) {
+      if (reuse && ['generate', 'edit', 'director', 'video'].includes(node.type)) {
         state[node.id] = { ...reuse, reused: true };
         save();
-        return reuse.text !== undefined ? { text: reuse.text } : { assetIds: [reuse.assetId] };
+        return reuse.text !== undefined ? { text: reuse.text } : node.type === 'video' ? {} : { assetIds: [reuse.assetId] };
       }
       const data = node.data ?? {};
       try {
@@ -197,6 +198,19 @@ export function createCanvasRunner({ repo, generations, jobs, directors, keys })
           if (done?.status !== 'completed') throw new RequestError(502, done?.userError || 'Generation failed.');
           result = { assetIds: [done.assetId] };
           state[node.id] = { status: 'completed', generationId: done.id, assetId: done.assetId, assetPath: done.assetPath };
+        } else if (node.type === 'video') {
+          const [prompts, images] = await Promise.all([Promise.all(inputsFor(node.id, 'prompt')), Promise.all(inputsFor(node.id, 'image'))]);
+          if (!prompts[0]) throw new RequestError(400, 'Connect a prompt.');
+          const generation = generations.submit({
+            projectId: canvas.projectId, operation: 'video', prompt: prompts[0].text, inputAssetIds: images[0]?.assetIds.slice(0, 1) ?? [],
+            provider: data.provider, model: data.model, duration: data.duration, aspect: data.aspect, canvasRunId: run.id, nodeId: node.id,
+          });
+          state[node.id] = { status: 'running', generationId: generation.id };
+          save();
+          const done = await jobs.waitFor(generation.id);
+          if (done?.status !== 'completed') throw new RequestError(502, done?.userError || 'Video generation failed.');
+          result = {};
+          state[node.id] = { status: 'completed', generationId: done.id, assetId: done.assetId, videoPath: done.assetPath };
         } else if (node.type === 'output') {
           const [image] = await Promise.all(inputsFor(node.id, 'image'));
           if (!image) throw new RequestError(400, 'Connect an image to the output.');

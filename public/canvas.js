@@ -1,6 +1,6 @@
 import { $, api, downloadAsset, emit, h, modelsFor, on, pickAsset, state, toast } from './lib.js';
 
-const titles = { prompt: 'Prompt', reference: 'Reference image', director: 'Creative director', generate: 'Generate image', edit: 'Edit image', output: 'Output' };
+const titles = { prompt: 'Prompt', reference: 'Reference image', director: 'Creative director', generate: 'Generate image', edit: 'Edit image', video: 'Video', output: 'Output' };
 const ns = 'http://www.w3.org/2000/svg';
 const ui = { canvas: null, canvases: [], nodeEls: new Map(), run: null, runTimer: null, saveTimer: null, saving: false, dirty: false, drag: null, link: null };
 const assetPaths = new Map();
@@ -96,6 +96,10 @@ function newId(prefix) {
 }
 
 function defaultData(type) {
+  if (type === 'video') {
+    const first = modelsFor('video').find((m) => m.provider.ready);
+    return first ? { provider: first.provider.id, model: first.model.id, duration: first.model.durations?.[0] } : {};
+  }
   if (type !== 'generate' && type !== 'edit') return {};
   const first = modelsFor(type).find((m) => m.provider.ready);
   return first ? { provider: first.provider.id, model: first.model.id, size: '1024x1024' } : { size: '1024x1024' };
@@ -205,6 +209,22 @@ function nodeBody(node) {
       size.value = data.size ?? '1024x1024';
       return [modelSelect(node), size, resultPath ? h('img.node-image', { src: resultPath, alt: 'Result' }) : null];
     }
+    case 'video': {
+      const models = modelsFor('video');
+      const select = h('select', { 'aria-label': 'Video model', onchange: () => {
+        const [provider, model] = select.value.split('|');
+        const found = models.find((m) => m.value === select.value);
+        Object.assign(node.data, { provider, model, duration: found?.model.durations?.[0] });
+        render();
+        scheduleSave();
+      } }, ...models.map(({ provider, model, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${model.label}`)));
+      select.value = `${data.provider}|${data.model}`;
+      const durations = models.find((m) => m.value === select.value)?.model.durations ?? [];
+      const duration = h('select', { 'aria-label': 'Duration', onchange: () => { data.duration = Number(duration.value); scheduleSave(); } },
+        ...durations.map((d) => h('option', { value: d }, `${d} s`)));
+      duration.value = String(data.duration ?? durations[0] ?? '');
+      return [select, duration, result?.videoPath ? h('video.node-image', { src: result.videoPath, controls: true, loop: true }) : null];
+    }
     case 'output':
       return resultPath
         ? [h('img.node-image', { src: resultPath, alt: 'Output' }), h('button.button.secondary.small', { onclick: () => downloadAsset(resultPath, resultPath.split('/').pop()) }, 'Download')]
@@ -227,7 +247,7 @@ function portList(node, direction) {
 function renderNode(node) {
   const result = ui.run?.nodeState?.[node.id];
   const status = result?.status;
-  const runnable = ['generate', 'edit', 'director', 'output'].includes(node.type);
+  const runnable = ['generate', 'edit', 'director', 'video', 'output'].includes(node.type);
   const el = h('div.canvas-node', { dataset: { id: node.id, type: node.type, status: status ?? '' } },
     h('div.node-head', { dataset: { drag: node.id } },
       h('span.node-title', {}, titles[node.type]),

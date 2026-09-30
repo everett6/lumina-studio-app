@@ -39,23 +39,30 @@
     <section class="view" id="create-view">
       <div class="studio-grid">
         <section class="panel prompt-panel">
-          <div class="panel-topline"><div><span class="step-number">01</span><span class="section-title">Describe it</span></div></div>
-          <label class="field-label" for="prompt">WHAT DO YOU WANT TO CREATE?</label>
+          <div class="panel-topline"><div><span class="step-number">01</span><span class="section-title">Describe it</span></div>
+            <div class="segmented" id="mode-select" role="tablist" aria-label="What to make">
+              <button class="selected" data-mode="image">Image</button><button data-mode="video">Video</button><button data-mode="speech">Voice</button>
+            </div></div>
+          <label class="field-label" for="prompt" id="prompt-label">WHAT DO YOU WANT TO CREATE?</label>
           <textarea id="prompt" maxlength="4000" rows="5" placeholder="A sun-drenched coastal villa at golden hour, linen curtains drifting in the breeze…"></textarea>
           <div class="prompt-footer"><span class="muted">Ctrl+Enter to generate</span><span id="char-count">0 / 4000</span></div>
 
           <div class="control-grid">
             <label><span class="field-label">MODEL</span><select id="model-select"></select></label>
-            <label><span class="field-label">FORMAT</span>
+            <label id="duration-field" class="hidden"><span class="field-label">DURATION</span><select id="duration-select"></select></label>
+            <label id="aspect-field" class="hidden"><span class="field-label">ASPECT</span><select id="aspect-select"></select></label>
+            <label id="voice-field" class="hidden"><span class="field-label">VOICE</span><select id="voice-select"></select></label>
+            <label id="style-field" class="hidden"><span class="field-label">DELIVERY</span><input type="text" id="style-input" placeholder="e.g. calm, warm, slow"></label>
+            <label id="size-field"><span class="field-label">FORMAT</span>
               <select id="size-select">
                 <option value="1024x1024">Square</option><option value="1536x1024">Landscape</option><option value="1024x1536">Portrait</option>
               </select></label>
             <label id="quality-field"><span class="field-label">QUALITY</span><select id="quality-select"></select></label>
-            <label><span class="field-label">CREATIVE DIRECTOR</span><select id="director-select"></select></label>
+            <label id="director-field"><span class="field-label">CREATIVE DIRECTOR</span><select id="director-select"></select></label>
           </div>
           <p class="model-note muted" id="model-note"></p>
 
-          <div class="reference-row">
+          <div class="reference-row" id="reference-row">
             <div><b>Input images</b><small id="reference-hint">Add images to edit or guide the result</small></div>
             <div class="row-actions">
               <button class="button secondary small" id="pick-reference">Choose…</button>
@@ -72,6 +79,7 @@
           <div class="preview-stage" id="preview-stage">
             <div class="empty-state" id="empty-state"><span class="empty-title">Your next idea starts here</span><span class="muted">Write a prompt and generate.</span></div>
             <img id="result-image" class="result-image hidden" alt="Generated image">
+            <div id="result-media" class="hidden"></div>
             <div class="preview-status hidden" id="preview-status"></div>
           </div>
           <p class="preview-caption" id="preview-caption"></p>

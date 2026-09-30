@@ -1,6 +1,11 @@
 import { $, api, downloadAsset, emit, h, modelsFor, on, pickAsset, state, toast, uploadReference } from './lib.js';
 
-const local = { inputs: [], shown: null, polling: new Set(), operation: 'generate' };
+const local = { inputs: [], shown: null, polling: new Set(), operation: 'generate', mode: 'image' };
+const modeCopy = {
+  image: { label: 'WHAT DO YOU WANT TO CREATE?', placeholder: 'A sun-drenched coastal villa at golden hour, linen curtains drifting in the breeze…', button: 'Generate image' },
+  video: { label: 'DESCRIBE THE SHOT', placeholder: 'Slow dolly shot through a misty pine forest at dawn, birdsong, light rays…', button: 'Generate video' },
+  speech: { label: 'TEXT TO READ ALOUD', placeholder: 'Paste the words to narrate. Long text is split and joined automatically.', button: 'Generate voice' },
+};
 const statusLabels = { queued: 'Queued', running: 'Generating…', failed: 'Failed', interrupted: 'Interrupted', completed: 'Done' };
 
 function selectedModel() {
@@ -12,7 +17,7 @@ function selectedModel() {
 // The model list follows what the current inputs need: generation models without inputs, edit models with them.
 function renderModelOptions() {
   if (!state.catalog) return;
-  const operation = local.inputs.length ? 'edit' : 'generate';
+  const operation = local.mode === 'image' ? (local.inputs.length ? 'edit' : 'generate') : local.mode;
   const select = $('#model-select');
   const previous = select.value;
   const options = modelsFor(operation);
@@ -24,21 +29,58 @@ function renderModelOptions() {
   renderModelDetails();
 }
 
+function fillSelect(select, values, label = (v) => v) {
+  const current = select.value;
+  select.replaceChildren(...values.map((v) => h('option', { value: v }, label(v))));
+  if (values.map(String).includes(current)) select.value = current;
+}
+
 function renderModelDetails() {
   const { model } = selectedModel();
-  const qualityField = $('#quality-field');
-  qualityField.classList.toggle('hidden', !model?.qualities.length);
-  if (model?.qualities.length) {
+  const mode = local.mode;
+  $('#quality-field').classList.toggle('hidden', mode !== 'image' || !model?.qualities.length);
+  if (mode === 'image' && model?.qualities.length) {
     const current = $('#quality-select').value;
     $('#quality-select').replaceChildren(...model.qualities.map((q) => h('option', { value: q }, q[0].toUpperCase() + q.slice(1))));
     $('#quality-select').value = model.qualities.includes(current) ? current : model.qualities[Math.min(1, model.qualities.length - 1)];
   }
-  $('#model-note').textContent = model ? model.note : 'Add an API key in Settings to start generating.';
-  $('#reference-hint').textContent = model?.maxReferences
-    ? `${local.inputs.length}/${model.maxReferences} input image(s) — the prompt describes the edit`
-    : 'Add images to edit or guide the result';
+  $('#size-field').classList.toggle('hidden', mode !== 'image');
+  $('#duration-field').classList.toggle('hidden', mode !== 'video');
+  $('#aspect-field').classList.toggle('hidden', mode !== 'video' || !model?.aspects?.length);
+  $('#voice-field').classList.toggle('hidden', mode !== 'speech');
+  $('#style-field').classList.toggle('hidden', mode !== 'speech');
+  $('#director-field').classList.toggle('hidden', mode === 'speech');
+  $('#reference-row').classList.toggle('hidden', mode === 'speech' || (mode === 'video' && !model?.maxReferences));
+  if (mode === 'video') {
+    fillSelect($('#duration-select'), model?.durations ?? [], (d) => `${d} seconds`);
+    fillSelect($('#aspect-select'), model?.aspects ?? []);
+  }
+  if (mode === 'speech') fillSelect($('#voice-select'), model?.voices ?? []);
+  const copy = modeCopy[mode];
+  $('#prompt-label').textContent = copy.label;
+  $('#prompt').placeholder = copy.placeholder;
+  $('#prompt').maxLength = mode === 'speech' ? 200000 : 4000;
+  $('#char-count').textContent = `${$('#prompt').value.length} / ${mode === 'speech' ? '200000' : '4000'}`;
+  $('#model-note').textContent = model ? `${model.note}${model.requiresImage ? ' — needs a start image' : ''}` : 'Add an API key in Settings for a provider that offers this.';
+  $('#reference-hint').textContent = mode === 'video'
+    ? `${local.inputs.length}/${model?.maxReferences ?? 0} start image — animate it, or leave empty for text to video`
+    : model?.maxReferences ? `${local.inputs.length}/${model.maxReferences} input image(s) — the prompt describes the edit` : 'Add images to edit or guide the result';
   $('#generate-btn').disabled = !model;
-  $('#generate-btn').textContent = local.inputs.length ? 'Edit image' : 'Generate image';
+  $('#generate-btn').textContent = mode === 'image' && local.inputs.length ? 'Edit image' : copy.button;
+}
+
+function setMode(mode) {
+  local.mode = mode;
+  document.querySelectorAll('#mode-select button').forEach((b) => b.classList.toggle('selected', b.dataset.mode === mode));
+  if (mode === 'speech') {
+    local.inputs = [];
+    renderInputs();
+  }
+  if (mode === 'video' && local.inputs.length > 1) {
+    local.inputs = local.inputs.slice(0, 1);
+    renderInputs();
+  }
+  renderModelOptions();
 }
 
 function renderDirectors() {
@@ -62,6 +104,7 @@ function renderInputs() {
 
 function addInput(asset) {
   if (local.inputs.some((a) => a.id === asset.id)) return;
+  if (local.mode === 'video') local.inputs = [];
   local.inputs.push(asset);
   renderInputs();
   renderModelOptions();
@@ -80,8 +123,18 @@ function showGeneration(generation) {
     return;
   }
   const done = generation.status === 'completed';
-  image.classList.toggle('hidden', !done);
-  if (done) image.src = generation.assetPath;
+  const mime = generation.mimeType ?? (generation.operation === 'speech' ? 'audio/' : generation.operation === 'video' ? 'video/' : 'image/');
+  const isImage = mime.startsWith('image/');
+  const media = $('#result-media');
+  image.classList.toggle('hidden', !done || !isImage);
+  media.classList.toggle('hidden', !done || isImage);
+  if (done && isImage) image.src = generation.assetPath;
+  if (done && !isImage && media.dataset.src !== generation.assetPath) {
+    media.dataset.src = generation.assetPath;
+    media.replaceChildren(mime.startsWith('video/')
+      ? h('video.result-media', { src: generation.assetPath, controls: true, loop: true })
+      : h('audio.result-media', { src: generation.assetPath, controls: true }));
+  }
   status.classList.toggle('hidden', done);
   status.dataset.status = generation.status;
   status.replaceChildren(...[
@@ -90,6 +143,7 @@ function showGeneration(generation) {
     ['failed', 'interrupted'].includes(generation.status) ? h('button.button.secondary.small', { onclick: () => retry(generation) }, 'Retry') : null,
   ].filter(Boolean));
   $('#preview-actions').classList.toggle('hidden', !done);
+  for (const id of ['#use-input-btn', '#variation-btn', '#add-canvas-btn']) $(id).classList.toggle('hidden', !isImage);
   const caption = generation.finalPrompt && generation.finalPrompt !== generation.prompt ? `${generation.prompt}  →  ${generation.finalPrompt}` : generation.prompt;
   $('#preview-caption').textContent = caption;
 }
@@ -100,7 +154,8 @@ function renderHistory() {
   const grid = $('#history-grid');
   if (!generations.length) return grid.replaceChildren(h('div.history-empty.muted', {}, 'Your generated images will appear here.'));
   grid.replaceChildren(...generations.slice(0, 12).map((g) => h(`button.history-card${local.shown?.id === g.id ? '.active' : ''}`, { onclick: () => { showGeneration(g); renderHistory(); } },
-    h('div.history-thumb', { dataset: { status: g.status } }, g.status === 'completed' ? h('img', { src: g.assetPath, alt: '', loading: 'lazy' }) : h('span', {}, statusLabels[g.status])),
+    h('div.history-thumb', { dataset: { status: g.status } }, g.status !== 'completed' ? h('span', {}, statusLabels[g.status])
+      : g.operation === 'speech' ? h('span', {}, '♪ Voice') : g.operation === 'video' ? h('span', {}, '▶ Video') : h('img', { src: g.assetPath, alt: '', loading: 'lazy' })),
     h('b', {}, g.prompt), h('small', {}, `${g.model} · ${new Date(g.createdAt).toLocaleString()}`))));
 }
 
@@ -141,13 +196,16 @@ async function generate() {
   if (!prompt) { $('#prompt').focus(); return toast('Add an idea to get started.'); }
   const { provider, model } = selectedModel();
   if (!model) return toast('Add an API key in Settings first.', 'error');
+  const mode = local.mode;
   try {
-    localStorage.setItem(`lumina-model-${local.inputs.length ? 'edit' : 'generate'}`, $('#model-select').value);
+    localStorage.setItem(`lumina-model-${mode === 'image' ? (local.inputs.length ? 'edit' : 'generate') : mode}`, $('#model-select').value);
   } catch { /* ignore */ }
+  if (mode === 'video' && !confirm('Generate a video clip? Video takes several minutes and costs more than an image.')) return;
   const { generation } = await api('/api/generate', { method: 'POST', body: {
     projectId: state.project.id, prompt, provider: provider.id, model: model.id, size: $('#size-select').value,
-    quality: model.qualities.length ? $('#quality-select').value : null, director: $('#director-select').value || null,
-    inputAssetIds: local.inputs.map((a) => a.id), operation: local.operation,
+    quality: model.qualities.length ? $('#quality-select').value : null, director: mode === 'speech' ? null : $('#director-select').value || null,
+    inputAssetIds: mode === 'speech' ? [] : local.inputs.map((a) => a.id), operation: mode === 'image' ? local.operation : mode,
+    duration: $('#duration-select').value, aspect: $('#aspect-select').value, voice: $('#voice-select').value, style: $('#style-input').value,
   } });
   local.operation = 'generate';
   upsertGeneration(generation);
@@ -172,7 +230,8 @@ const guard = (fn) => async (...args) => {
 };
 
 export function initCreate() {
-  $('#prompt').addEventListener('input', () => { $('#char-count').textContent = `${$('#prompt').value.length} / 4000`; });
+  $('#prompt').addEventListener('input', () => { $('#char-count').textContent = `${$('#prompt').value.length} / ${local.mode === 'speech' ? '200000' : '4000'}`; });
+  document.querySelectorAll('#mode-select button').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.mode)));
   $('#prompt').addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') guard(generate)(); });
   $('#model-select').addEventListener('change', renderModelDetails);
   $('#generate-btn').addEventListener('click', guard(generate));
@@ -211,5 +270,11 @@ export function initCreate() {
     renderHistory();
     detail.generations.filter((g) => ['queued', 'running'].includes(g.status)).forEach((g) => poll(g.id));
   });
-  on('use-as-input', (asset) => { addInput(asset); emit('open-tab', 'create'); });
+  on('use-as-input', (asset) => {
+    if (!asset.mimeType?.startsWith('image/') && asset.mimeType) return toast('Only images can be used as inputs.');
+    if (local.mode === 'speech') setMode('image');
+    addInput(asset);
+    emit('open-tab', 'create');
+    return undefined;
+  });
 }
