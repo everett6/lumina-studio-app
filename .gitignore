@@ -1,4 +1,6 @@
 .env
 node_modules/
-data/*.json
+data/
 storage/assets/*
+exports/
+dist/
