@@ -1,118 +1,111 @@
 # Lumina Studio
 
-Lumina Studio is a private-first workspace for turning visual ideas into images. It brings prompt writing, optional AI creative direction, image generation and editing, project history, references, and a canvas-oriented workflow into one small web app.
+Lumina Studio is an open-source, Linux-first creative workspace for AI images. Bring your own API keys for OpenAI,
+fal.ai, Google Gemini or Replicate. Generate and edit images, keep everything in local projects, build reusable
+workflows on a node canvas, and let Claude drive it through MCP.
 
-> **Current status:** This is an early foundation. Project creation, generation history, reference uploads, image generation/edit requests, prompt refinement, and basic library/canvas views are implemented. The canvas is currently a UI shell; executable node graphs, authentication, database-backed storage, and team access are not implemented yet.
+Everything runs on your computer. Keys go only to the provider they belong to; images and projects stay in a local
+database and folder.
 
-## Features
+## What works
 
-- Create and switch between projects.
-- Generate images through OpenAI's Images API from the server.
-- Optionally refine prompts with NVIDIA Nemotron using NVIDIA's hosted endpoint or a configurable OpenAI-compatible endpoint.
-- Upload PNG, JPEG, and WebP references (up to 8 MB) and use them for edits.
-- Create variations from generated images.
-- Persist projects, generation history, and assets locally.
-- Browse previous generations and download results.
-- Keep provider API keys on the server; keys are never sent to browser code.
+| Area | Status |
+| --- | --- |
+| Generate and edit images | Works. Text-to-image, edits with up to 4 input images, variations, retry on failure. |
+| Providers | OpenAI GPT Image 2.5 (Flare, Sunburst), fal.ai FLUX schnell and Kontext pro, Gemini 3.x image models, Replicate FLUX (schnell, 1.1 pro, Kontext pro). Tested against faked provider responses; **not yet run against the live APIs** (see below). |
+| Creative director | Optional prompt refinement with OpenAI, Anthropic Claude or NVIDIA Nemotron. |
+| Projects and library | SQLite storage, uploaded references reusable across projects, rename, export to a folder, delete. |
+| Canvas | Prompt, reference, director, generate, edit and output nodes. Drag to connect, pan and zoom, autosave, templates, run all or up to one node, duplicate to branch. |
+| Desktop app | Electron `.deb` and AppImage. Keys encrypted with your system keyring. |
+| Claude (MCP) | Local stdio MCP server for Claude Code and Claude Desktop. See [docs/MCP.md](docs/MCP.md). |
+| claude.ai / ChatGPT connectors | Not built. They need a remote HTTPS gateway; the design is in [docs/MCP.md](docs/MCP.md). |
+| Video, upscaling, inpainting | Not built. See [docs/ROADMAP.md](docs/ROADMAP.md). |
 
-## Requirements
+Every flow in the table has been exercised with the built-in offline mock provider, both in the browser and in the
+desktop app. Real providers have not been called because no API keys were available while this was built. Expect
+to fix small request-format differences the first time each provider runs.
 
-- Node.js 20.6 or newer.
-- An OpenAI API key to generate or edit images.
-- An NVIDIA API key is optional and only needed for Nemotron prompt refinement.
+## Install the desktop app
 
-No npm packages are required for the current implementation.
+Build the packages (needs Node.js 22.13+):
 
-## Quick start
-
-```sh
-cp .env.example .env
+```bash
+npm install
+npm run dist
 ```
 
-Add your provider keys to `.env`:
+Then install the `.deb`:
 
-```dotenv
-OPENAI_API_KEY=your-openai-api-key
-NEMOTRON_API_KEY=your-nvidia-api-key
+```bash
+sudo apt install ./dist/lumina-studio_0.2.0_amd64.deb
 ```
 
-Then start the app:
+Or run the AppImage directly:
 
-```sh
+```bash
+chmod +x "dist/Lumina Studio-0.2.0.AppImage"
+```
+
+Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
+
+## Run from source
+
+```bash
+npm install
 npm start
 ```
 
-Open [http://localhost:4173](http://localhost:4173). Without `OPENAI_API_KEY`, you can explore the interface and project features, but generation requests will return a setup error.
+`npm start` prints a link like `http://127.0.0.1:4173/?token=…`. Open that exact link: the token logs your browser
+in to this local server. Other commands:
 
-For development with automatic server restarts:
-
-```sh
-npm run dev
-```
-
-Check JavaScript syntax with:
-
-```sh
-npm run check
-```
+| Command | Purpose |
+| --- | --- |
+| `npm run desktop` | Run the Electron app from source. |
+| `npm run mock` | Dev server with the offline mock provider and mock director (no keys, no network). |
+| `npm run desktop:mock` | Desktop app with the mock provider. |
+| `npm test` | Test suite (API, jobs, canvas, provider adapters, MCP). |
+| `npm run dist` | Build `.deb` and AppImage into `dist/`. |
+| `npm run mcp` | Start the MCP server on stdio (normally launched by Claude). |
 
 ## Configuration
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `OPENAI_API_KEY` | For image generation | — | Server-side key for the OpenAI Images API. |
-| `OPENAI_IMAGE_MODEL` | No | `gpt-image-1` | OpenAI image model name. |
-| `NEMOTRON_API_KEY` | No | — | Enables Nemotron prompt refinement. |
-| `NEMOTRON_BASE_URL` | No | `https://integrate.api.nvidia.com/v1` | OpenAI-compatible Nemotron API base URL; set this for a self-hosted endpoint. |
-| `NEMOTRON_MODEL` | No | `nvidia/nemotron-3.5-lightning-30b-a3b` | Chat model identifier sent to the configured Nemotron endpoint. |
-| `PORT` | No | `4173` | HTTP server port. |
-| `NEXT_PUBLIC_APP_URL` | No | `http://localhost:4173` | Reserved for application URL configuration. |
-| `DATABASE_URL` | No | — | Reserved for a future database adapter. |
-| `STORAGE_PROVIDER` | No | `local` | Reserved for a future storage adapter. |
-| `STORAGE_BUCKET` | No | — | Reserved for object storage configuration. |
-| `STORAGE_ENDPOINT` | No | — | Reserved for object storage configuration. |
+Keys are best entered in **Settings**. Environment variables (or a `.env` file for `npm start`) also work and show
+as "From environment":
 
-The `npm start` and `npm run dev` scripts load `.env` when present through Node’s built-in environment-file support. Variables already set in the shell also work.
+| Variable | Purpose |
+| --- | --- |
+| `OPENAI_API_KEY` | OpenAI images and the OpenAI director. |
+| `FAL_KEY` | fal.ai. |
+| `GEMINI_API_KEY` | Google Gemini image models. |
+| `REPLICATE_API_TOKEN` | Replicate. |
+| `ANTHROPIC_API_KEY` | Claude as creative director. |
+| `NEMOTRON_API_KEY`, `NEMOTRON_BASE_URL`, `NEMOTRON_MODEL` | Nemotron director (hosted or self-hosted OpenAI-compatible endpoint). |
+| `PORT` | Dev server port (default 4173). |
+| `LUMINA_DATA_DIR` | Data folder (default: repository folder for `npm start`, `~/.config/Lumina Studio` for the desktop app). |
+| `LUMINA_MOCK=1` | Enable the offline mock provider and director. |
 
-## Data and storage
+## Data and privacy
 
-The current local adapter stores metadata in JSON files under `data/` and image files under `storage/assets/`. These runtime files are ignored by Git. Back up both directories if you need to preserve local projects and generated assets. This storage approach is intended for local development and a single user; it is not a substitute for a production database or private object storage.
+- Desktop data lives in `~/.config/Lumina Studio`: `data/lumina.db` (SQLite), `data/keys.json` (keyring-encrypted
+  keys), and `storage/assets/` (images). Back up that folder to keep your work.
+- The dev server uses `data/` and `storage/assets/` in the repository. Keys there are stored in a private (0600)
+  file, but not encrypted.
+- Projects from Lumina 0.1 (`data/*.json`) are imported automatically the first time the dev server starts. The
+  original files are kept as `*.json.imported`.
+- **Project → Export** writes a plain folder with `project.json` and the image files.
+- The local server listens on `127.0.0.1` only and requires a per-install token. See
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
 
-## API routes
+Generating images costs money on your provider accounts. Lumina shows which provider and model each request uses
+but does not estimate prices yet.
 
-| Method | Route | Description |
-| --- | --- | --- |
-| `GET` | `/api/health` | Checks server status and reports whether provider keys are configured. |
-| `GET` | `/api/projects` | Lists projects. |
-| `POST` | `/api/projects` | Creates a project. JSON body: `{ "name": "Campaign" }`. |
-| `GET` | `/api/projects/:id` | Loads a project, generations, and assets. |
-| `GET` | `/api/projects/:id/generations` | Lists a project's generations. |
-| `POST` | `/api/projects/assets` | Saves a validated reference image. |
-| `POST` | `/api/generate` | Generates an image, optionally using a reference/source image and Nemotron refinement. |
-| `GET` | `/api/generations/:id` | Reads generation status and result metadata. |
+## Documentation
 
-`POST /api/generate` accepts `projectId`, `prompt`, optional `size` (`1024x1024`, `1536x1024`, or `1024x1536`), optional `quality` (`low`, `medium`, or `high`), and optional `enhance`, `referenceDataUrl`, `sourceAssetId`, and `operation` (`variation` or `edit`).
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, data model, jobs, providers, canvas, security.
+- [docs/MCP.md](docs/MCP.md): connecting Claude, and the plan for claude.ai and ChatGPT.
+- [docs/ROADMAP.md](docs/ROADMAP.md): what's next and known limits.
+- [CONTRIBUTING.md](CONTRIBUTING.md)
 
-## Architecture
+## License
 
-- `server.js` contains the HTTP API, local JSON/file storage, request validation, rate limiting, and provider adapters.
-- `public/` contains the browser UI and client-side interactions.
-- OpenAI image generation and edits use the Images API from the server.
-- Nemotron uses an OpenAI-compatible chat-completions endpoint from the server.
-- Generated output is saved as a local asset and linked to the project generation history.
-
-## Security notes
-
-- Keep `.env` out of version control. Never put provider keys in `public/` or browser code.
-- The current server is designed for local single-user use. It does not yet provide authentication, per-user authorization, or isolation between users.
-- Do not expose this development server directly to the public internet. Add authentication and durable private storage before deploying it for multiple users.
-- Generation endpoints are rate limited in memory; the limit resets when the server restarts.
-
-## Roadmap
-
-1. Foundation: project system, storage abstraction, and workspace shell.
-2. Image generation: provider integration, secure API routes, persistence, and history.
-3. Creative direction: Nemotron refinement and prompt compilation.
-4. References and editing: uploads, edits, and variations.
-5. Canvas: persisted node graphs and connected workflow execution.
-6. Polish: accessibility, responsive behavior, observability, and broader validation.
+MIT. See [LICENSE](LICENSE).
