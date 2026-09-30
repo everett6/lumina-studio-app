@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { startTestApp } from './helpers.js';
+import { startTestApp, tempRoot } from './helpers.js';
 
-const serverPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../mcp/server.js');
+const testsDir = path.dirname(fileURLToPath(import.meta.url));
+const serverPath = path.resolve(testsDir, '../mcp/server.js');
 const parse = (result) => JSON.parse(result.content.find((c) => c.type === 'text').text);
 
 test('MCP tools drive a running Lumina app end to end', async () => {
@@ -52,12 +53,33 @@ test('MCP tools drive a running Lumina app end to end', async () => {
   }
 });
 
+test('MCP server launches Lumina when it is closed', async () => {
+  const root = tempRoot();
+  const launcher = path.join(root, 'launch.sh');
+  writeFileSync(launcher, `#!/bin/sh\nexec "${process.execPath}" "${path.join(testsDir, 'fixtures', 'launch-app.js')}"\n`, { mode: 0o755 });
+  const client = new Client({ name: 'lumina-test', version: '1.0.0' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [serverPath], env: { ...process.env, LUMINA_DATA_DIR: root, LUMINA_APP_COMMAND: launcher }, stderr: 'ignore' }));
+  try {
+    const result = await client.callTool({ name: 'list_projects', arguments: {} });
+    assert.equal(result.isError, undefined, result.content[0].text);
+    assert.ok(Array.isArray(parse(result)));
+  } finally {
+    await client.close();
+    const endpoint = path.join(root, 'data', 'endpoint.json');
+    if (existsSync(endpoint)) {
+      try { process.kill(JSON.parse(readFileSync(endpoint, 'utf8')).pid); } catch { /* already gone */ }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('MCP server reports clearly when Lumina is not running', async () => {
   const t = await startTestApp();
   const root = t.dataRoot;
   await t.close({ keep: true });
   const client = new Client({ name: 'lumina-test', version: '1.0.0' });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [serverPath], env: { ...process.env, LUMINA_DATA_DIR: root }, stderr: 'ignore' }));
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [serverPath], env: { ...process.env, LUMINA_DATA_DIR: root, LUMINA_NO_AUTOLAUNCH: '1' }, stderr: 'ignore' }));
   try {
     const result = await client.callTool({ name: 'list_projects', arguments: {} });
     assert.equal(result.isError, true);

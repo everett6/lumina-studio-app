@@ -6,7 +6,9 @@ a canvas, and run canvas workflows.
 
 The MCP server is a small stdio process. It does not hold keys or data itself: it finds the **running** Lumina app
 through `data/endpoint.json` and authenticates with `data/api-token` (both readable only by your user), then calls
-the same local API the UI uses. Lumina must be open for the tools to work.
+the same local API the UI uses. If Lumina is closed, the first tool call opens the desktop app and waits for it.
+It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/opt/Lumina Studio/lumina-studio`,
+`/usr/bin/lumina-studio`, then `dist/linux-unpacked/lumina-studio`. Set `LUMINA_NO_AUTOLAUNCH=1` to turn this off.
 
 ## Tools
 
@@ -32,8 +34,11 @@ Where Lumina keeps its data decides which app the tools talk to:
 ### Claude Code
 
 ```bash
-claude mcp add lumina-studio -- node /path/to/lumina-studio/mcp/server.js
+claude mcp add -s user lumina-studio -- node /path/to/lumina-studio/mcp/server.js
 ```
+
+Check it with `claude mcp get lumina-studio` (should show `✔ Connected`). In a Claude Code session, `/mcp` lists
+the tools.
 
 To point it at a specific data folder:
 
@@ -64,8 +69,8 @@ Node.js 22.13 or newer is required. Run `npm install` in the repository first so
 every tool: create a project, generate, edit, add to canvas, run the canvas, plus the error paths for a missing key
 and for Lumina not running.
 
-Not verified here: a live Claude Code or Claude Desktop session calling these tools. The protocol path is the same,
-but a real client session has not been exercised.
+A real Claude Code session (`claude -p`) called `list_projects` and `list_models` against the installed AppImage.
+The app was closed at the start and the MCP server opened it. Claude Desktop has not been tried.
 
 ## Claude on the web and ChatGPT (not built yet)
 
