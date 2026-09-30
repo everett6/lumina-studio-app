@@ -16,18 +16,25 @@
   illustrations (character canon in every prompt, reference images sent to edit-capable models) → PDF and Markdown
   export. Book tools in MCP.
 
+## Done (v0.4)
+
+- Novels and nonfiction: outline → chapters → scenes or sections, continuity-aware drafting, revisions, history.
+- EPUB 3 and Word export; covers and chapter art.
+- Print bleed with trim and bleed boxes, full-bleed picture-book layout, non-Latin scripts in PDF.
+- Narration (OpenAI and Gemini TTS), audiobook export, text-to-speech in Create.
+- Video (Veo 3.1, Kling 3 Pro): Create video mode, a canvas video node, animated picture-book pages.
+- Remote MCP endpoint for claude.ai and ChatGPT: OAuth, pairing codes, through your own tunnel.
+
 ## Next
 
-0. **Book Studio, continued.** Novel and nonfiction modes (outline → chapters → scenes), EPUB and DOCX export,
-   print bleed and embedded fonts for non-Latin scripts, spread layouts, narration and video.
-1. **Real-provider verification.** Each adapter is tested against faked HTTP only. Run one low-cost generation per
-   provider with real keys and fix any schema drift.
-2. **Video.** A video capability (`image-to-video`, `text-to-video`) in the provider contract, video nodes on the
-   canvas, and a player in the library. Candidates: fal.ai (Kling, Veo, Seedance), Gemini Veo, Replicate.
+1. **Verify with real accounts.** Adapters are tested against faked HTTP only. Run one low-cost call per provider
+   (image, voice, video, writer) with real keys, connect claude.ai and ChatGPT through a real tunnel, and fix any drift.
+2. **Books, continued.** Fixed-layout EPUB for picture books, two-page spreads, EPUB media overlays (read-along
+   narration), multi-voice dialogue narration, and a built-in tunnel option.
 3. **Image tools.** Upscale, background removal, inpainting with a mask editor, outpainting.
 4. **Reusable subjects.** Named character and product reference sets that can be attached to any generation.
 5. **Presets.** Saved style, prompt and model combinations; canvas templates saved from your own graphs.
-6. **Remote MCP gateway** for claude.ai and ChatGPT. See `docs/MCP.md` for the relay-vs-hosted decision.
+6. **Hosted relay** for remote access without running a tunnel yourself (needs hosting).
 7. **Cost visibility.** Provider-reported usage per generation, plus an estimate before running a canvas.
 8. **Collaboration.** Shared projects, which depend on the hosted option.
 
@@ -37,6 +44,8 @@
 - Canvas runs are not cancellable once started (jobs finish or fail on their own).
 - The dev server keeps keys unencrypted (0600 file). Use the desktop app for keyring encryption.
 - No undo in the canvas.
-- Book PDFs use the standard PDF fonts, so Latin-script text only (no CJK, Arabic and so on), with no bleed. WebP
-  illustrations are skipped in the PDF.
+- Non-Latin PDF text needs a system font that covers the script (found through fontconfig), or a font file set in the
+  brief. Right-to-left text is shaped and ordered correctly within a line, but mixed-direction punctuation can land on
+  the wrong side. WebP images are skipped in PDF and Word exports.
+- Video from the mock provider is a placeholder file, not playable. Real video depends on provider access.
 - Book writing calls wait for the writer model (up to a few minutes for long plans), with no streaming progress.

@@ -53,7 +53,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, jobs, token, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, jobs, token, remote, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -159,6 +159,14 @@ export function createApiServer(ctx) {
     } catch (error) {
       return { ok: false, message: userMessage(error) };
     }
+  });
+
+  route('GET', '/api/settings/remote', () => remote.status());
+  route('PUT', '/api/settings/remote', async (req) => remote.update(await readBody(req, 4096)));
+  route('POST', '/api/settings/remote/pairing', () => ({ pairing: remote.newPairingCode() }));
+  route('POST', '/api/settings/remote/revoke', () => {
+    remote.revokeAll();
+    return remote.status();
   });
 
   route('GET', '/api/templates', () => ({ templates: Object.entries(templates).map(([id, t]) => ({ id, name: t.name })) }));

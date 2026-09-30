@@ -150,8 +150,10 @@
       <div class="view-head"><h1>Settings</h1></div>
       <p class="muted" id="key-storage-note"></p>
       <div class="settings-grid" id="settings-grid"></div>
-      <h2 class="settings-subhead">Connect Claude (MCP)</h2>
-      <p class="muted">Lumina includes a local MCP server so Claude Code or Claude Desktop can list projects, generate images and add them to canvases while Lumina is open. See <code>docs/MCP.md</code> for setup.</p>
+      <h2 class="settings-subhead">Claude Code and Claude Desktop</h2>
+      <p class="muted">Local MCP server (no internet exposure): <code>claude mcp add -s user lumina-studio -- node /path/to/lumina-studio/mcp/server.js</code>. See <code>docs/MCP.md</code>.</p>
+      <h2 class="settings-subhead">Remote access — claude.ai and ChatGPT</h2>
+      <div id="remote-panel"></div>
     </section>
   </main>
 </div>

@@ -12,6 +12,7 @@ import { createGenerationService } from './generation.js';
 import { createJobRunner } from './jobs.js';
 import { createKeyStore } from './keys.js';
 import { createProviders } from './providers/index.js';
+import { createRemoteGateway } from './remote.js';
 import { createRepo } from './repo.js';
 
 export const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,8 +47,10 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   repo.runs.markInterrupted();
   if (recovered.interrupted || recovered.resumed) log.info?.('Recovered jobs', recovered);
 
+  let origin = null;
+  const remote = createRemoteGateway({ repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), log });
   const server = createApiServer({
-    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, jobs, token,
+    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, jobs, token, remote,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
   });
   await new Promise((resolve, reject) => {
@@ -55,13 +58,17 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     server.listen(port, '127.0.0.1', resolve);
   });
   const address = server.address();
-  const origin = `http://127.0.0.1:${address.port}`;
+  origin = `http://127.0.0.1:${address.port}`;
+  const remoteStatus = await remote.start();
+  if (remoteStatus.error) log.error?.('Remote access not started', { detail: remoteStatus.error });
   // Tools like the MCP server find the running app through this file.
   writeFileSync(path.join(dataDir, 'endpoint.json'), JSON.stringify({ url: origin, pid: process.pid, mode }), { mode: 0o600 });
 
   return {
     origin, port: address.port, token, tokenFile, launchUrl: `${origin}/?token=${token}`, repo, jobs, generations, canvasRunner, keys,
+    remote,
     async close() {
+      await remote.stop();
       await new Promise((resolve) => server.close(resolve));
       server.closeAllConnections?.();
       db.close();

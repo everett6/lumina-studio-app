@@ -27,7 +27,11 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `plan_pages` | Writer model writes every page (text plus illustration brief). `replace: true` overwrites existing pages. |
 | `edit_page` / `revise_page` | Set a page's text directly, or have the writer revise it from an instruction. History is kept. |
 | `generate_illustration` | Illustrate one page with the bible's character looks and reference images. **Spends money.** |
-| `export_book` | Save a print-layout PDF or Markdown file and return its path. |
+| `outline_book` / `draft_chapter` / `read_chapter` / `revise_chapter` / `edit_chapter` | Novels and nonfiction: outline, write, read, revise and edit chapters. |
+| `generate_cover` | Cover art from the brief and bible. **Spends money.** |
+| `narrate` / `generate_speech` | Narrate a page or chapter with the book's voice, or turn any text into audio. **Spends money.** |
+| `generate_video` | Text-to-video or animate an image. **Spends money; slow.** |
+| `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. |
 
 Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft
 the bible and pages, show me the text, then illustrate page 1."*
@@ -81,21 +85,36 @@ and for Lumina not running.
 A real Claude Code session (`claude -p`) called `list_projects` and `list_models` against the installed AppImage.
 The app was closed at the start and the MCP server opened it. Claude Desktop has not been tried.
 
-## Claude on the web and ChatGPT (not built yet)
+## claude.ai and ChatGPT (remote access)
 
-claude.ai connectors and ChatGPT apps call MCP servers from their own cloud infrastructure over HTTPS. They cannot
-reach a stdio process or a loopback port on your computer. Supporting them needs a remote gateway. The design:
+claude.ai connectors and ChatGPT apps call MCP servers from their own cloud, over HTTPS. Lumina has a remote endpoint
+for them that keeps everything on your computer:
 
-- **Transport**: MCP Streamable HTTP on a public HTTPS endpoint, with the same tool set.
-- **Auth**: OAuth 2.1 with the gateway as authorization server (dynamic client registration for Claude, as both
-  clients expect). Tokens are scoped per user and revocable.
-- **Where the work happens**, one of:
-  1. *Relay*: the desktop app keeps an outbound WebSocket to the gateway. The gateway forwards tool calls to the app,
-     so keys and images stay on your computer. Tools only work while the app is open.
-  2. *Hosted*: an account service stores keys (encrypted, per user) and runs jobs server-side. Always available,
-     but keys and images leave your machine and hosting costs money.
-- **ChatGPT** apps need a production HTTPS endpoint and OpenAI's review. A development tunnel is fine for testing
-  but does not qualify for a public listing.
+- Lumina serves **MCP over Streamable HTTP** at `/mcp` on `127.0.0.1:<port>` (default 8787). It exposes the same tools
+  as the local server, except that remote clients can't choose where exported files are written.
+- **You** make that port reachable over HTTPS with a tunnel you control, for example:
+  `cloudflared tunnel --url http://127.0.0.1:8787`, `tailscale funnel 8787` or `ngrok http 8787`.
+- Clients sign in with **OAuth 2.1**: metadata discovery, dynamic client registration, authorization code with PKCE,
+  1-hour access tokens and rotating 30-day refresh tokens. Only hashes of tokens are stored.
+- The approval page asks for the **6-digit pairing code** shown in Lumina → Settings → Remote access. Each code works
+  once, expires after 15 minutes, and repeated wrong guesses are locked out. Settings → *Disconnect all* revokes every
+  client and token.
+- Lumina must be open (and the tunnel running) for the connector to work.
 
-Pick option 1 or 2 (and a domain and host) before this is built. Option 1 keeps Lumina's local-first promise and is
-the recommended first step.
+### Set up
+
+1. Start your tunnel and copy its `https://` address.
+2. Lumina → Settings → Remote access: paste the address, press **Turn on remote access**, then **Show a pairing code**.
+3. **claude.ai:** Settings → Connectors → add a custom connector with the connector URL shown (`https://…/mcp`).
+   **ChatGPT:** turn on developer mode and add a custom MCP connector with the same URL.
+4. When the approval page opens, enter the pairing code.
+
+### Verified
+
+`tests/remote.test.js` runs the whole flow a cloud client performs against a real Lumina instance: the 401 challenge
+with `resource_metadata`, discovery, registration, the consent page (a wrong code is rejected, the code works only
+once), a PKCE token exchange (a wrong verifier is rejected), MCP tool calls over HTTP (including an inline image),
+refresh-token rotation, and revocation.
+
+Not verified: an actual claude.ai or ChatGPT connection through a public tunnel. Those products may expect details
+(scopes, metadata fields) that the local test doesn't cover. If a connection fails, the Lumina log shows the request.

@@ -17,10 +17,12 @@ test('MCP tools drive a running Lumina app end to end', async () => {
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [serverPath], env: { ...process.env, LUMINA_DATA_DIR: t.dataRoot }, stderr: 'ignore' }));
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'add_to_canvas', 'create_book', 'create_project', 'draft_bible', 'edit_page', 'export_book', 'generate_illustration', 'generate_image',
-      'get_book', 'get_generation', 'list_assets', 'list_books', 'list_models', 'list_projects', 'plan_pages', 'revise_page', 'run_canvas', 'update_book',
-    ]);
+    const names = tools.map((tool) => tool.name);
+    for (const name of ['list_projects', 'create_project', 'list_models', 'generate_image', 'get_generation', 'list_assets', 'add_to_canvas', 'run_canvas',
+      'create_book', 'list_books', 'get_book', 'update_book', 'draft_bible', 'plan_pages', 'edit_page', 'revise_page', 'generate_illustration',
+      'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book']) {
+      assert.ok(names.includes(name), `missing tool ${name}`);
+    }
 
     const project = parse(await client.callTool({ name: 'create_project', arguments: { name: 'From Claude' } }));
     const models = parse(await client.callTool({ name: 'list_models', arguments: {} }));
@@ -74,10 +76,45 @@ test('MCP book tools: create → bible → plan → revise → illustrate → ex
     assert.equal(parse(illustrated).status, 'completed');
     assert.ok(illustrated.content.some((c) => c.type === 'image'));
     const exported = parse(await client.callTool({ name: 'export_book', arguments: { bookId: created.id } }));
-    assert.match(exported.file, /Moon-Fox\.pdf$/);
-    assert.equal(readFileSync(exported.file).subarray(0, 5).toString(), '%PDF-');
+    assert.match(exported.savedOnUsersComputer, /Moon-Fox\.pdf$/);
+    assert.equal(readFileSync(exported.savedOnUsersComputer).subarray(0, 5).toString(), '%PDF-');
+    const epub = parse(await client.callTool({ name: 'export_book', arguments: { bookId: created.id, format: 'epub' } }));
+    assert.equal(readFileSync(epub.savedOnUsersComputer).subarray(30, 38).toString(), 'mimetype');
     const book = parse(await client.callTool({ name: 'get_book', arguments: { bookId: created.id } }));
     assert.equal(book.pages[0].hasIllustration, true);
+  } finally {
+    await client.close();
+    await t.close();
+  }
+});
+
+test('MCP novel tools: outline → draft → read → narrate → speech/video → DOCX', async () => {
+  const t = await startTestApp();
+  const client = new Client({ name: 'lumina-test', version: '1.0.0' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [serverPath], env: { ...process.env, LUMINA_DATA_DIR: t.dataRoot }, stderr: 'ignore' }));
+  try {
+    const project = parse(await client.callTool({ name: 'create_project', arguments: { name: 'Novel via Claude' } }));
+    const book = parse(await client.callTool({ name: 'create_book', arguments: {
+      projectId: project.id, kind: 'novel', title: 'Deep Water', writer: 'mock:mock-director', chapterCount: 2, wordsPerChapter: 300,
+      narration: { provider: 'mock', model: 'mock-voice', voice: 'tone-low' },
+    } }));
+    assert.equal(book.kind, 'novel');
+    const outlined = parse(await client.callTool({ name: 'outline_book', arguments: { bookId: book.id } }));
+    assert.equal(outlined.chapters.length, 2);
+    const drafted = parse(await client.callTool({ name: 'draft_chapter', arguments: { chapterId: outlined.chapters[0].id } }));
+    assert.ok(drafted.words > 100);
+    const full = parse(await client.callTool({ name: 'read_chapter', arguments: { bookId: book.id, chapterId: outlined.chapters[0].id } }));
+    assert.ok(full.text.length > drafted.excerpt.length);
+    const narrated = await client.callTool({ name: 'narrate', arguments: { chapterId: outlined.chapters[0].id } });
+    assert.equal(parse(narrated).operation, 'speech');
+    const speech = parse(await client.callTool({ name: 'generate_speech', arguments: { projectId: project.id, text: 'Hello.', provider: 'mock', model: 'mock-voice' } }));
+    assert.equal(speech.status, 'completed');
+    const video = parse(await client.callTool({ name: 'generate_video', arguments: { projectId: project.id, prompt: 'rain', provider: 'mock', model: 'mock-video' } }));
+    assert.equal(video.operation, 'video');
+    const docx = parse(await client.callTool({ name: 'export_book', arguments: { bookId: book.id, format: 'docx' } }));
+    assert.match(docx.savedOnUsersComputer, /Deep-Water\.docx$/);
+    const audio = parse(await client.callTool({ name: 'export_book', arguments: { bookId: book.id, format: 'audio' } }));
+    assert.ok(audio.notes.some((n) => /without narration/.test(n)));
   } finally {
     await client.close();
     await t.close();

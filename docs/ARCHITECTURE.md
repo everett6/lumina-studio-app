@@ -16,6 +16,12 @@ the MCP server. Everything runs on your computer.
        │     ├─ src/directors/  prompt refinement: OpenAI, Anthropic, Nemotron
        │     └─ src/providers/  image adapters: OpenAI, fal.ai, Gemini, Replicate, mock
        ├─ src/canvas.js       graph validation, templates, parallel execution via jobs
+       ├─ src/books.js        picture books, novels, nonfiction; covers, narration, video; PDF/EPUB/DOCX/MD/audio export
+       │     ├─ src/fonts.js    per-script system fonts (fontconfig) for PDF
+       │     ├─ src/audio.js    TTS chunking, WAV/MP3 joining
+       │     └─ src/zip.js      EPUB container writer
+       ├─ src/remote.js       MCP over Streamable HTTP + OAuth 2.1 (pairing-code consent) for claude.ai / ChatGPT
+       │     └─ mcp/tools.js    the tool set, shared with the local stdio server
        ├─ src/keys.js         0600 key file, encrypted when a cipher is supplied
        ├─ src/assets.js       image files, type sniffing, lineage
        └─ src/repo.js + src/db.js   node:sqlite, WAL, migrations, v0.1 JSON import
@@ -34,7 +40,8 @@ lineage), `generations` (also the job queue), `canvases` (versioned JSON graph),
 
 ## Jobs
 
-`POST /api/generate` inserts a `queued` row and returns `202`. The runner picks rows up (two at a time). It
+`POST /api/generate` inserts a `queued` row and returns `202`. Jobs have an `operation`: `generate`/`edit`/`variation` (images), `speech` or `video`, and the runner calls the
+provider's `run`, `speak` or `video` accordingly. The runner picks rows up (two at a time). It
 optionally refines the prompt with a director, loads input images, calls the provider, sniffs and stores the
 output, and marks the row `completed` or `failed` with a category (`auth`, `rate_limit`, `policy`,
 `invalid_request`, `timeout`, `provider`, `missing_key`) and a plain-language message. On start, `queued` rows

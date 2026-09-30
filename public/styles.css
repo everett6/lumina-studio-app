@@ -76,7 +76,7 @@ code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; b
 .text-button:hover { color: var(--text); }
 .text-button:disabled { opacity: .4; cursor: default; }
 .ghost { border: 0; background: none; cursor: pointer; color: var(--muted); font-size: 15px; }
-select, input[type=password], input[type=text], textarea { background: #141412; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; width: 100%; }
+select, input[type=password], input[type=text], input[type=number], textarea { background: #141412; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; width: 100%; }
 select:focus, input:focus, textarea:focus { border-color: #717d4b; outline: none; }
 textarea { resize: vertical; }
 .field-label { display: block; color: #85857d; font: 10px var(--mono); letter-spacing: .08em; margin-bottom: 6px; }
@@ -154,6 +154,13 @@ textarea { resize: vertical; }
 .key-result[data-tone=ok] { color: var(--ok); }
 .key-result[data-tone=error] { color: var(--danger); }
 .settings-subhead { font: 500 20px var(--serif); margin: 32px 0 6px; }
+.remote-card { padding: 18px; display: grid; gap: 12px; max-width: 860px; }
+.remote-card p { margin: 0; }
+.remote-steps { margin: 0; padding-left: 20px; color: #c9c9bf; display: grid; gap: 4px; }
+.remote-grid { display: grid; grid-template-columns: 1fr 140px; gap: 12px; }
+.remote-url { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.remote-url .field-label { margin: 0; }
+.pairing-code { font-size: 22px; letter-spacing: .3em; color: var(--lime); }
 
 /* canvas */
 .canvas-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #252522; background: #141412; }

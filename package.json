@@ -1,6 +1,6 @@
 {
   "name": "lumina-studio",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,6 +21,7 @@
     "@anthropic-ai/sdk": "^0.129.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
     "docx": "^9.8.1",
+    "express": "^5.2.1",
     "pdfkit": "^0.20.2",
     "zod": "^4.6.5"
   },

@@ -11,19 +11,20 @@ database and folder.
 
 | Area | Status |
 | --- | --- |
-| Generate and edit images | Works. Text-to-image, edits with up to 4 input images, variations, retry on failure. |
-| Providers | OpenAI GPT Image 2.5 (Flare, Sunburst), fal.ai FLUX schnell and Kontext pro, Gemini 3.x image models, Replicate FLUX (schnell, 1.1 pro, Kontext pro). Tested against faked provider responses; **not yet run against the live APIs** (see below). |
-| Writers and creative director | OpenAI, Anthropic Claude or NVIDIA Nemotron write book pages and story bibles, and can optionally refine image prompts. |
-| Projects and library | SQLite storage, uploaded references reusable across projects, rename, export to a folder, delete. |
-| Canvas | Prompt, reference, director, generate, edit and output nodes. Drag to connect, pan and zoom, autosave, templates, run all or up to one node, duplicate to branch. |
-| Book Studio (picture books) | Book brief → AI-drafted story bible (characters with fixed looks and reference images, setting, voice, style) → AI page plan → edit or AI-revise each page with version history → illustrate pages with consistent characters → export a print-layout PDF (title page, art above real text) or Markdown. Novels, EPUB and DOCX are not built yet. |
+| Generate and edit images | Text-to-image, edits with up to 4 input images, variations, retry on failure. |
+| Video | Text-to-video and image-to-video: Google Veo 3.1 (standard, Fast, Lite) and fal.ai Kling 3 Pro. Animate picture-book pages. (OpenAI's video API was shut down in September 2026.) |
+| Voice | Text to speech for any text, and narration of book pages and chapters: OpenAI gpt-4o-mini-tts and Gemini 3.8 TTS. Audiobook export. |
+| Providers | OpenAI, fal.ai, Google Gemini, Replicate (images); OpenAI, Anthropic Claude, NVIDIA Nemotron (writing). Tested against faked provider responses; **not yet run against the live APIs** (see below). |
+| Books | **Picture books** (page plan, consistent illustrations, full-bleed or art-above-text layouts), **novels** and **nonfiction** (outline → chapters → scenes or sections, drafted and revised with continuity context). Story bible with character looks and reference images, cover art, chapter art, page/chapter history. |
+| Book export | Print PDF (optional 0.125 in bleed with trim/bleed boxes; non-Latin scripts via installed system fonts or your own font file), EPUB 3, Word (.docx), Markdown, audiobook (MP3 or WAV). |
+| Projects and library | SQLite storage, reusable references, audio and video in the library, rename, export to a folder, delete. |
+| Canvas | Prompt, reference, director, generate, edit, video and output nodes. Drag to connect, pan and zoom, autosave, templates, run all or up to one node. |
 | Desktop app | Electron `.deb` and AppImage. Keys encrypted with your system keyring. |
-| Claude (MCP) | Local stdio MCP server for Claude Code and Claude Desktop. See [docs/MCP.md](docs/MCP.md). |
-| claude.ai / ChatGPT connectors | Not built. They need a remote HTTPS gateway; the design is in [docs/MCP.md](docs/MCP.md). |
-| Video, upscaling, inpainting | Not built. See [docs/ROADMAP.md](docs/ROADMAP.md). |
+| Claude Code / Claude Desktop | Local stdio MCP server with 27 tools (images, video, voice, canvas, books). See [docs/MCP.md](docs/MCP.md). |
+| claude.ai / ChatGPT | Remote MCP endpoint with OAuth and pairing-code approval. You expose it through an HTTPS tunnel you run (Cloudflare Tunnel, Tailscale Funnel, ngrok…). Tested end to end with an MCP client over HTTP; **not yet tried from claude.ai or ChatGPT themselves**. |
 
-Every flow in the table has been exercised with the built-in offline mock provider, both in the browser and in the
-desktop app. Real providers have not been called because no API keys were available while this was built. Expect
+Every flow in the table has been exercised with the built-in offline mock providers (image, voice, video, writer), in
+the browser and through the MCP tools. Real providers have not been called because no API keys were available while this was built. Expect
 to fix small request-format differences the first time each provider runs.
 
 ## Install the desktop app
@@ -38,13 +39,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.3.0_amd64.deb
+sudo apt install ./dist/lumina-studio_0.4.0_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.3.0.AppImage"
+chmod +x "dist/Lumina Studio-0.4.0.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
@@ -64,7 +65,7 @@ in to this local server. Other commands:
 | `npm run desktop` | Run the Electron app from source. |
 | `npm run mock` | Dev server with the offline mock provider and mock director (no keys, no network). |
 | `npm run desktop:mock` | Desktop app with the mock provider. |
-| `npm test` | Test suite (API, jobs, canvas, provider adapters, MCP). |
+| `npm test` | Test suite (API, jobs, canvas, providers, books and exports, MCP local and remote). |
 | `npm run dist` | Build `.deb` and AppImage into `dist/`. |
 | `npm run mcp` | Start the MCP server on stdio (normally launched by Claude). |
 
