@@ -24,12 +24,12 @@
 - Narration (OpenAI and Gemini TTS), audiobook export, text-to-speech in Create.
 - Video (Veo 3.1, Kling 3 Pro): Create video mode, a canvas video node, animated picture-book pages.
 - Remote MCP endpoint for claude.ai and ChatGPT: OAuth, pairing codes, through your own tunnel.
-- Fixed-layout EPUB 3 export for picture books; reflowable EPUB remains available.
 
 ## Done (v0.5)
 
 - Preset gallery on Create: camera moves, effects and styles with animated preview tiles; Animate and Remix on results;
   presets in MCP (`list_presets`, `presets` on generate_image / generate_video).
+- Fixed-layout EPUB 3 export for picture books; reflowable EPUB remains available.
 
 ## Next
 
