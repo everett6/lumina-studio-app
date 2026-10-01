@@ -1,5 +1,7 @@
 import { $, api, downloadAsset, emit, h, modelsFor, on, pickAsset, state, toast, uploadReference } from './lib.js';
+import { renderCharacterRow, selectedCharacters } from './characters.js';
 import { applyPresets, initPresets, presetModeChanged, selectedPresets } from './presets.js';
+import { toolMenu } from './tools.js';
 
 const local = { inputs: [], shown: null, polling: new Set(), operation: 'generate', mode: 'image' };
 const modeCopy = {
@@ -66,6 +68,7 @@ function renderModelDetails() {
   $('#reference-hint').textContent = mode === 'video'
     ? `${local.inputs.length}/${model?.maxReferences ?? 0} start image — animate it, or leave empty for text to video`
     : model?.maxReferences ? `${local.inputs.length}/${model.maxReferences} input image(s) — the prompt describes the edit` : 'Add images to edit or guide the result';
+  renderCharacterRow({ mode, model });
   $('#generate-btn').disabled = !model;
   $('#generate-btn').textContent = mode === 'image' && local.inputs.length ? 'Edit image' : copy.button;
 }
@@ -146,6 +149,7 @@ function showGeneration(generation) {
   ].filter(Boolean));
   $('#preview-actions').classList.toggle('hidden', !done);
   for (const id of ['#use-input-btn', '#variation-btn', '#add-canvas-btn', '#animate-btn']) $(id).classList.toggle('hidden', !isImage);
+  $('#tool-menu-slot').replaceChildren(...(done && isImage ? [toolMenu({ id: generation.assetId, path: generation.assetPath })] : []));
   const caption = generation.finalPrompt && generation.finalPrompt !== generation.prompt ? `${generation.prompt}  →  ${generation.finalPrompt}` : generation.prompt;
   $('#preview-caption').textContent = caption;
 }
@@ -207,7 +211,7 @@ async function generate() {
     projectId: state.project.id, prompt, provider: provider.id, model: model.id, size: $('#size-select').value,
     quality: model.qualities.length ? $('#quality-select').value : null, director: mode === 'speech' ? null : $('#director-select').value || null,
     inputAssetIds: mode === 'speech' ? [] : local.inputs.map((a) => a.id), operation: mode === 'image' ? local.operation : mode,
-    presets: mode === 'speech' ? [] : selectedPresets(),
+    presets: mode === 'speech' ? [] : selectedPresets(), characterIds: mode === 'speech' ? [] : selectedCharacters(),
     duration: $('#duration-select').value, aspect: $('#aspect-select').value, voice: $('#voice-select').value, style: $('#style-input').value,
   } });
   local.operation = 'generate';
@@ -277,6 +281,16 @@ export function initCreate() {
   initPresets();
 
   on('catalog', () => { renderModelOptions(); renderDirectors(); });
+  on('characters-selected', () => renderModelDetails());
+  // Jobs started elsewhere (image tools, the library) are followed here.
+  on('generation-started', (generation) => {
+    if (generation.projectId !== state.project?.id) return;
+    upsertGeneration(generation);
+    showGeneration(generation);
+    renderHistory();
+    emit('open-tab', 'create');
+    poll(generation.id);
+  });
   on('project', (detail) => {
     const switched = local.projectId !== detail.project.id;
     local.projectId = detail.project.id;

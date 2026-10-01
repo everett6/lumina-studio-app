@@ -2,10 +2,12 @@ import { $, $$, api, emit, h, on, state, toast } from './lib.js';
 import { initCreate } from './create.js';
 import { initBooks } from './books.js';
 import { initCanvas } from './canvas.js';
+import { initCharacters } from './characters.js';
 import { initLibrary } from './library.js';
 import { initSettings } from './settings.js';
+import { initStoryboard } from './storyboard.js';
 
-const views = ['create', 'canvas', 'books', 'library', 'settings'];
+const views = ['create', 'canvas', 'books', 'library', 'storyboard', 'characters', 'settings'];
 
 export function setTab(tab) {
   $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.tab === tab));
@@ -90,7 +92,7 @@ $('#export-project').addEventListener('click', guard(exportProject));
 $('#delete-project').addEventListener('click', guard(deleteProject));
 document.addEventListener('keydown', (event) => {
   if (!(event.ctrlKey || event.metaKey)) return;
-  const tab = { 1: 'create', 2: 'canvas', 3: 'books', 4: 'library' }[event.key];
+  const tab = { 1: 'create', 2: 'canvas', 3: 'books', 4: 'library', 5: 'storyboard', 6: 'characters' }[event.key];
   if (tab) { event.preventDefault(); setTab(tab); }
 });
 on('keys-changed', guard(loadCatalog));
@@ -103,6 +105,8 @@ initCanvas();
 initBooks();
 initLibrary();
 initSettings();
+initStoryboard();
+initCharacters();
 
 (async () => {
   try {

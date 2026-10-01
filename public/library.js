@@ -1,4 +1,5 @@
 import { $, $$, api, downloadAsset, emit, h, on, state, toast } from './lib.js';
+import { toolMenu } from './tools.js';
 
 let filter = 'project';
 
@@ -26,6 +27,7 @@ async function render() {
       h('div.library-actions', {},
         isImage ? h('button.text-button', { onclick: () => emit('use-as-input', asset) }, 'Use as input') : null,
         isImage ? h('button.text-button', { onclick: () => emit('add-to-canvas', asset) }, 'Add to canvas') : null,
+        isImage ? toolMenu(asset) : null,
         h('button.text-button', { onclick: () => downloadAsset(asset.path, asset.file) }, 'Download'),
         h('button.text-button.danger', { onclick: () => remove(asset) }, 'Delete')));
   }));

@@ -598,6 +598,31 @@ export function initBooks() {
     $('#book-select').value = '';
     renderNewBookForm();
   }));
+  $('#book-import').addEventListener('change', guard(async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024) throw new Error('Choose a file under 25 MB.');
+    const kind = confirm(`Import "${file.name}" as a novel?\n\nOK = novel · Cancel = nonfiction`) ? 'novel' : 'nonfiction';
+    const body = { fileName: file.name, kind };
+    if (/\.docx$/i.test(file.name)) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('Could not read this file.'));
+        reader.readAsDataURL(file);
+      });
+      body.dataBase64 = String(dataUrl).split(',')[1] ?? '';
+    } else {
+      body.text = await file.text();
+    }
+    const writer = (state.catalog?.directors ?? []).find((d) => d.ready);
+    if (writer) body.writer = `${writer.id}:${writer.models[0]}`;
+    toast('Importing…');
+    const detail = await api(`/api/projects/${state.project.id}/books/import`, { method: 'POST', body });
+    toast(`Imported ${detail.chapters.length} chapter(s). Revise any chapter, or add one and draft it to continue the book.`);
+    await loadBooks(detail.book.id);
+  }));
   $('#book-delete').addEventListener('click', guard(async () => {
     if (!ui.detail || !confirm(`Delete "${ui.detail.book.title}"? Its images and audio stay in the library.`)) return;
     await api(`/api/books/${ui.detail.book.id}`, { method: 'DELETE' });

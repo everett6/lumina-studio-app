@@ -19,6 +19,8 @@
       <button class="nav-item" data-tab="canvas"><span class="nav-icon">▦</span>Canvas<span class="nav-shortcut">Ctrl 2</span></button>
       <button class="nav-item" data-tab="books"><span class="nav-icon">❏</span>Books<span class="nav-shortcut">Ctrl 3</span></button>
       <button class="nav-item" data-tab="library"><span class="nav-icon">▧</span>Library<span class="nav-shortcut">Ctrl 4</span></button>
+      <button class="nav-item" data-tab="storyboard"><span class="nav-icon">▤</span>Storyboard<span class="nav-shortcut">Ctrl 5</span></button>
+      <button class="nav-item" data-tab="characters"><span class="nav-icon">☺</span>Characters<span class="nav-shortcut">Ctrl 6</span></button>
       <button class="nav-item" data-tab="settings"><span class="nav-icon">⚙</span>Settings</button>
     </nav>
     <div class="side-label">PROJECTS <button class="tiny-plus" id="new-project" title="New project" aria-label="New project">+</button></div>
@@ -47,6 +49,7 @@
           <textarea id="prompt" maxlength="4000" rows="5" placeholder="A sun-drenched coastal villa at golden hour, linen curtains drifting in the breeze…"></textarea>
           <div class="prompt-footer"><span class="muted">Ctrl+Enter to generate</span><span id="char-count">0 / 4000</span></div>
           <div class="applied-presets" id="applied-presets"></div>
+          <div class="applied-presets" id="character-row"></div>
 
           <div class="control-grid">
             <label><span class="field-label">MODEL</span><select id="model-select"></select></label>
@@ -91,6 +94,7 @@
             <button class="button secondary small" id="add-canvas-btn">Add to canvas</button>
             <button class="button secondary small" id="animate-btn">Animate</button>
             <button class="button secondary small" id="remix-btn">Remix</button>
+            <span id="tool-menu-slot"></span>
           </div>
         </section>
       </div>
@@ -115,6 +119,9 @@
         <span class="toolbar-sep"></span>
         <div class="add-node-group" id="add-node-group"></div>
         <span class="toolbar-sep"></span>
+        <button class="button secondary small" id="canvas-undo" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+        <button class="button secondary small" id="canvas-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
+        <button class="button secondary small" id="canvas-save-template">Save as template</button>
         <button class="button secondary small" id="canvas-rename">Rename</button>
         <button class="button secondary small danger" id="canvas-delete">Delete</button>
         <span class="save-indicator muted" id="canvas-save-state"></span>
@@ -138,6 +145,7 @@
         <div class="row-actions">
           <select id="book-select" aria-label="Book" class="hidden"></select>
           <button class="button secondary small" id="book-new">New book</button>
+          <label class="button secondary small" title="Bring in a manuscript you already have (.txt, .md or .docx)">Import manuscript<input type="file" id="book-import" accept=".txt,.md,.markdown,.docx,text/plain,text/markdown" hidden></label>
           <button class="button secondary small danger hidden" id="book-delete">Delete</button>
         </div>
       </div>
@@ -153,6 +161,27 @@
         </div>
       </div>
       <div class="library-grid" id="library-grid"></div>
+    </section>
+
+    <section class="view hidden" id="storyboard-view">
+      <div class="view-head">
+        <h1>Storyboard</h1>
+        <div class="row-actions">
+          <select id="sb-select" aria-label="Storyboard" class="hidden"></select>
+          <button class="button secondary small" id="sb-new">New storyboard</button>
+          <button class="button secondary small danger hidden" id="sb-delete">Delete</button>
+        </div>
+      </div>
+      <div id="sb-editor"></div>
+    </section>
+
+    <section class="view hidden" id="characters-view">
+      <div class="view-head">
+        <h1>Characters</h1>
+        <div class="row-actions"><button class="button secondary small" id="character-new">New character</button></div>
+      </div>
+      <p class="muted">Define a person, creature or product once, then add it to any image, video or storyboard. Characters are shared by all projects.</p>
+      <div class="character-grid" id="character-grid"></div>
     </section>
 
     <section class="view hidden" id="settings-view">

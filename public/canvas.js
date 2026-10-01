@@ -14,7 +14,45 @@ function setSaveState(text) {
 
 // ---------- persistence ----------
 
+// Undo history holds snapshots of nodes and edges (not pan/zoom). Bursts of edits, such as typing, merge into one step.
+const history = { past: [], future: [], snap: '', stamp: 0 };
+const snapshot = () => JSON.stringify({ nodes: graph().nodes, edges: graph().edges });
+
+function resetHistory() {
+  Object.assign(history, { past: [], future: [], snap: ui.canvas ? snapshot() : '', stamp: 0 });
+  renderHistoryButtons();
+}
+
+function renderHistoryButtons() {
+  $('#canvas-undo').disabled = !history.past.length;
+  $('#canvas-redo').disabled = !history.future.length;
+}
+
+function recordChange() {
+  const current = snapshot();
+  if (current === history.snap) return;
+  if (Date.now() - history.stamp > 700 || !history.past.length) history.past.push(history.snap);
+  if (history.past.length > 100) history.past.shift();
+  history.future = [];
+  history.snap = current;
+  history.stamp = Date.now();
+  renderHistoryButtons();
+}
+
+function stepHistory(from, to) {
+  if (!ui.canvas || !from.length) return;
+  to.push(snapshot());
+  const restored = JSON.parse(from.pop());
+  Object.assign(graph(), { nodes: restored.nodes, edges: restored.edges });
+  history.snap = snapshot();
+  history.stamp = 0;
+  render();
+  renderHistoryButtons();
+  scheduleSave();
+}
+
 function scheduleSave() {
+  if (ui.canvas) recordChange();
   ui.dirty = true;
   setSaveState('Unsaved');
   clearTimeout(ui.saveTimer);
@@ -35,6 +73,7 @@ async function save() {
   } catch (error) {
     if (error.status === 409 && error.data?.canvas) {
       ui.canvas = error.data.canvas;
+      resetHistory();
       render();
     }
     setSaveState('Not saved');
@@ -75,6 +114,7 @@ async function openCanvas(id) {
   ui.run = lastRun;
   $('#canvas-select').value = id;
   setSaveState('Saved');
+  resetHistory();
   render();
   if (lastRun?.status === 'running') watchRun(lastRun.id);
 }
@@ -454,6 +494,14 @@ const guard = (fn) => async (...args) => {
   try { await fn(...args); } catch (error) { toast(error.message, 'error'); }
 };
 
+async function loadTemplates() {
+  ui.templates = (await api('/api/templates')).templates;
+  const mine = ui.templates.filter((t) => !t.builtIn);
+  $('#canvas-template').replaceChildren(h('option', { value: '' }, 'From template…'),
+    ...ui.templates.filter((t) => t.builtIn).map((t) => h('option', { value: t.id }, t.name)),
+    ...(mine.length ? [h('optgroup', { label: 'My templates' }, ...mine.map((t) => h('option', { value: t.id }, t.name))), h('option', { value: 'delete' }, 'Delete one of my templates…')] : []));
+}
+
 export function initCanvas() {
   bindPointer();
   $('#add-node-group').replaceChildren(...Object.entries(titles).map(([type, title]) => h('button.button.secondary.small', { onclick: () => ui.canvas ? addNode(type) : toast('Create a canvas first.') }, `+ ${title}`)));
@@ -463,9 +511,37 @@ export function initCanvas() {
   $('#canvas-template').addEventListener('change', guard(async (event) => {
     const template = event.target.value;
     event.target.value = '';
+    if (template === 'delete') {
+      const mine = ui.templates.filter((t) => !t.builtIn);
+      const answer = prompt(`Delete which template? Type its number.\n\n${mine.map((t, i) => `${i + 1}. ${t.name}`).join('\n')}`);
+      const chosen = mine[Number(answer) - 1];
+      if (!chosen) return;
+      await api(`/api/templates/${chosen.id}`, { method: 'DELETE' });
+      await loadTemplates();
+      return;
+    }
     if (template) await createCanvas({ template });
   }));
   $('#canvas-run').addEventListener('click', guard(() => runCanvas()));
+  $('#canvas-undo').addEventListener('click', () => stepHistory(history.past, history.future));
+  $('#canvas-redo').addEventListener('click', () => stepHistory(history.future, history.past));
+  document.addEventListener('keydown', (event) => {
+    if (!(event.ctrlKey || event.metaKey) || $('#canvas-view').classList.contains('hidden')) return;
+    // Text fields keep their own undo.
+    if (['TEXTAREA', 'INPUT', 'SELECT'].includes(document.activeElement?.tagName)) return;
+    const key = event.key.toLowerCase();
+    if (key === 'z' && !event.shiftKey) { event.preventDefault(); stepHistory(history.past, history.future); }
+    if ((key === 'z' && event.shiftKey) || key === 'y') { event.preventDefault(); stepHistory(history.future, history.past); }
+  });
+  $('#canvas-save-template').addEventListener('click', guard(async () => {
+    if (!ui.canvas) return toast('Create a canvas first.');
+    const name = prompt('Save this canvas as a template named', ui.canvas.name);
+    if (!name?.trim()) return undefined;
+    await flushSave();
+    await api('/api/templates', { method: 'POST', body: { canvasId: ui.canvas.id, name } });
+    await loadTemplates();
+    return toast('Template saved. Find it under "From template…".');
+  }));
   $('#canvas-rename').addEventListener('click', guard(async () => {
     if (!ui.canvas) return;
     const name = prompt('Rename canvas', ui.canvas.name);
@@ -485,10 +561,7 @@ export function initCanvas() {
 
   on('tab', guard(async (tab) => {
     if (tab !== 'canvas' || !state.project) return;
-    if (!$('#canvas-template').options[1]) {
-      const { templates } = await api('/api/templates');
-      $('#canvas-template').append(...templates.map((t) => h('option', { value: t.id }, t.name)));
-    }
+    if (!ui.templates) await loadTemplates();
     await loadCanvasList();
   }));
   on('project', guard(async (detail) => {

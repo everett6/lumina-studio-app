@@ -72,7 +72,7 @@ export const bus = new EventTarget();
 export const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
 export const on = (type, fn) => bus.addEventListener(type, (event) => fn(event.detail));
 
-export const state = { project: null, projects: [], catalog: null, detail: null };
+export const state = { project: null, projects: [], catalog: null, detail: null, characters: [] };
 
 export function modelsFor(operation) {
   return (state.catalog?.providers ?? []).flatMap((provider) => provider.models
