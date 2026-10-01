@@ -17,7 +17,7 @@ database and folder.
 | Voice | Text to speech for any text, and narration of book pages and chapters: OpenAI gpt-4o-mini-tts and Gemini 3.8 TTS. Audiobook export. |
 | Providers | OpenAI, fal.ai, Google Gemini, Replicate (images); OpenAI, Anthropic Claude, NVIDIA Nemotron (writing). Tested against faked provider responses; **not yet run against the live APIs** (see below). |
 | Books | **Picture books** (page plan, consistent illustrations, full-bleed or art-above-text layouts), **novels** and **nonfiction** (outline → chapters → scenes or sections, drafted and revised with continuity context). Story bible with character looks and reference images, cover art, chapter art, page/chapter history. |
-| Book export | Print PDF (optional 0.125 in bleed with trim/bleed boxes; non-Latin scripts via installed system fonts or your own font file), EPUB 3, Word (.docx), Markdown, audiobook (MP3 or WAV). |
+| Book export | Print PDF (optional 0.125 in bleed with trim/bleed boxes; non-Latin scripts via installed system fonts or your own font file), reflowable EPUB 3 and fixed-layout EPUB for picture books, Word (.docx), Markdown, audiobook (MP3 or WAV). |
 | Projects and library | SQLite storage, reusable references, audio and video in the library, rename, export to a folder, delete. |
 | Canvas | Prompt, reference, director, generate, edit, video and output nodes. Drag to connect, pan and zoom, autosave, templates, run all or up to one node. |
 | Desktop app | Electron `.deb` and AppImage. Keys encrypted with your system keyring. |

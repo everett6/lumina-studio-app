@@ -312,7 +312,10 @@ export function createApiServer(ctx) {
       const { pdf, skippedWebp, missingScripts } = await books.exportPdf(id);
       return sendDownload(res, pdf, 'application/pdf', `${name}.pdf`, { 'x-lumina-skipped-webp': String(skippedWebp), 'x-lumina-missing-scripts': missingScripts.join(',') });
     }
-    if (format === 'epub') return sendDownload(res, await books.exportEpub(id), 'application/epub+zip', `${name}.epub`);
+    if (format === 'epub') {
+      const fixed = url.searchParams.get('layout') === 'fixed' && book.kind === 'picture_book';
+      return sendDownload(res, await books.exportEpub(id, { layout: fixed ? 'fixed' : 'reflowable' }), 'application/epub+zip', `${name}${fixed ? '-fixed' : ''}.epub`);
+    }
     if (format === 'docx') return sendDownload(res, await books.exportDocx(id), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', `${name}.docx`);
     if (format === 'md') return sendDownload(res, Buffer.from(books.exportMarkdown(id)), 'text/markdown; charset=utf-8', `${name}.md`);
     const { audio, mime, missing } = await books.exportAudiobook(id);

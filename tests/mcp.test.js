@@ -85,6 +85,8 @@ test('MCP book tools: create → bible → plan → revise → illustrate → ex
     assert.match(exported.savedOnUsersComputer, /Moon-Fox\.pdf$/);
     assert.equal(readFileSync(exported.savedOnUsersComputer).subarray(0, 5).toString(), '%PDF-');
     const epub = parse(await client.callTool({ name: 'export_book', arguments: { bookId: created.id, format: 'epub' } }));
+    const fixedEpub = parse(await client.callTool({ name: 'export_book', arguments: { bookId: created.id, format: 'epub', fixedLayout: true } }));
+    assert.match(fixedEpub.savedOnUsersComputer, /-fixed\.epub$/);
     assert.equal(readFileSync(epub.savedOnUsersComputer).subarray(30, 38).toString(), 'mimetype');
     const book = parse(await client.callTool({ name: 'get_book', arguments: { bookId: created.id } }));
     assert.equal(book.pages[0].hasIllustration, true);

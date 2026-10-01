@@ -32,7 +32,7 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `generate_cover` | Cover art from the brief and bible. **Spends money.** |
 | `narrate` / `generate_speech` | Narrate a page or chapter with the book's voice, or turn any text into audio. **Spends money.** |
 | `generate_video` | Text-to-video or animate an image. **Spends money; slow.** |
-| `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. |
+| `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. `fixedLayout: true` makes a fixed-layout EPUB for a picture book. |
 
 Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft
 the bible and pages, show me the text, then illustrate page 1."*

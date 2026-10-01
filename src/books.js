@@ -596,8 +596,9 @@ export function createBookService({ repo, directors, keys, generations, provider
     return { pdf: Buffer.concat(chunks), skippedWebp: skipped, missingScripts: text.missing, embeddedFonts: text.embedded };
   }
 
-  async function exportEpub(bookId) {
+  async function exportEpub(bookId, { layout = 'reflowable' } = {}) {
     const { book, pages, chapters, isPicture } = units(bookId);
+    const fixedLayout = layout === 'fixed' && isPicture;
     const lang = languageCode(book.brief.language);
     const dir = rtl(lang) ? 'rtl' : 'ltr';
     const files = [];
@@ -613,7 +614,11 @@ export function createBookService({ repo, directors, keys, generations, provider
       manifest.push({ id: `img-${name}`, href, type: art.asset.mimeType });
       return href;
     };
-    const xhtml = (title, body) => `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${lang}" lang="${lang}" dir="${dir}">\n<head><meta charset="UTF-8"/><title>${escapeXml(title)}</title><link rel="stylesheet" href="style.css" type="text/css"/></head>\n<body>${body}</body>\n</html>\n`;
+    // Fixed layout: one screen per page at the trim size (points → CSS px).
+    const trim = trimSizes[book.brief.trimSize] ?? trimSizes['8x8'];
+    const [width, height] = [Math.round(trim.width * 4 / 3), Math.round(trim.height * 4 / 3)];
+    const viewport = fixedLayout ? `<meta name="viewport" content="width=${width}, height=${height}"/>` : '';
+    const xhtml = (title, body) => `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${lang}" lang="${lang}" dir="${dir}">\n<head><meta charset="UTF-8"/>${viewport}<title>${escapeXml(title)}</title><link rel="stylesheet" href="style.css" type="text/css"/></head>\n<body>${body}</body>\n</html>\n`;
     const addDoc = (id, title, body, { inToc = true, properties } = {}) => {
       files.push({ name: `OEBPS/${id}.xhtml`, data: xhtml(title, body) });
       manifest.push({ id, href: `${id}.xhtml`, type: 'application/xhtml+xml', properties });
@@ -631,8 +636,10 @@ export function createBookService({ repo, directors, keys, generations, provider
     if (isPicture) {
       for (const page of pages) {
         const href = await addImage(page.assetId, `page-${page.position}`);
-        addDoc(`page-${String(page.position).padStart(3, '0')}`, `Page ${page.position}`,
-          `<section class="page">${href ? `<figure><img src="${href}" alt="${escapeXml(page.illustrationBrief)}"/></figure>` : ''}${paragraphs(page.text).map((p) => `<p>${escapeXml(p)}</p>`).join('')}</section>`);
+        const pageBody = fixedLayout
+          ? `<section class="page ${book.brief.layout === 'full-bleed' ? 'full-bleed' : 'art-top'}">${href ? `<img class="art" src="${href}" alt="${escapeXml(page.illustrationBrief)}"/>` : ''}${page.text.trim() ? `<div class="text-panel">${paragraphs(page.text).map((p) => `<p>${escapeXml(p)}</p>`).join('')}</div>` : ''}</section>`
+          : `<section class="page">${href ? `<figure><img src="${href}" alt="${escapeXml(page.illustrationBrief)}"/></figure>` : ''}${paragraphs(page.text).map((p) => `<p>${escapeXml(p)}</p>`).join('')}</section>`;
+        addDoc(`page-${String(page.position).padStart(3, '0')}`, `Page ${page.position}`, pageBody);
       }
     } else {
       for (const c of chapters) {
@@ -647,7 +654,10 @@ export function createBookService({ repo, directors, keys, generations, provider
     const navList = toc.map((t) => `<li><a href="${t.id}.xhtml">${escapeXml(t.title)}</a></li>`).join('');
     files.push({ name: 'OEBPS/nav.xhtml', data: xhtml('Contents', `<nav epub:type="toc" id="toc"><h2>Contents</h2><ol>${navList}</ol></nav>`) });
     manifest.push({ id: 'nav', href: 'nav.xhtml', type: 'application/xhtml+xml', properties: 'nav' });
-    files.push({ name: 'OEBPS/style.css', data: 'body{font-family:serif;line-height:1.5;margin:0 5%}h1,h2{text-align:center}h2 .num{display:block;font-size:.7em;letter-spacing:.15em;color:#666}p{text-indent:1.2em;margin:0}.chapter p:first-of-type,.page p{text-indent:0}.page p{text-align:center;margin:.6em 0;font-size:1.2em}figure{margin:1em 0;text-align:center}img{max-width:100%;height:auto}.cover{text-align:center}.cover img{max-height:100vh}.titlepage{margin-top:30%;text-align:center}.author{font-style:italic;text-indent:0}' });
+    const fixedCss = fixedLayout
+      ? `html,body{width:${width}px;height:${height}px;margin:0;padding:0;overflow:hidden}.page{position:relative;width:${width}px;height:${height}px;overflow:hidden;line-height:1.2}.page .art{position:absolute;display:block;object-fit:cover;width:100%;height:100%;inset:0}.page.art-top .art{height:68%}.page .text-panel{position:absolute;left:0;right:0;bottom:0;max-height:34%;box-sizing:border-box;padding:3% 7%;overflow:hidden;background:#fff;color:#111;font-family:serif;font-size:${Math.round(height * 0.036)}px;text-align:center}.page.full-bleed .text-panel{left:6%;right:6%;bottom:5%;max-height:32%;border-radius:1em;background:rgba(255,255,255,.9)}.page p{margin:.25em 0;text-indent:0}.cover{width:${width}px;height:${height}px}.cover img{width:100%;height:100%;max-height:none;object-fit:contain}`
+      : '';
+    files.push({ name: 'OEBPS/style.css', data: `body{font-family:serif;line-height:1.5;margin:0 5%}h1,h2{text-align:center}h2 .num{display:block;font-size:.7em;letter-spacing:.15em;color:#666}p{text-indent:1.2em;margin:0}.chapter p:first-of-type,.page p{text-indent:0}.page p{text-align:center;margin:.6em 0;font-size:1.2em}figure{margin:1em 0;text-align:center}img{max-width:100%;height:auto}.cover{text-align:center}.cover img{max-height:100vh}.titlepage{margin-top:30%;text-align:center}.author{font-style:italic;text-indent:0}${fixedCss}` });
     manifest.push({ id: 'css', href: 'style.css', type: 'text/css' });
     const ncx = `<?xml version="1.0" encoding="UTF-8"?>\n<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="urn:uuid:${book.id}"/></head><docTitle><text>${escapeXml(book.title)}</text></docTitle><navMap>${toc.map((t, i) => `<navPoint id="n${i + 1}" playOrder="${i + 1}"><navLabel><text>${escapeXml(t.title)}</text></navLabel><content src="${t.id}.xhtml"/></navPoint>`).join('')}</navMap></ncx>\n`;
     files.push({ name: 'OEBPS/toc.ncx', data: ncx });
@@ -662,6 +672,7 @@ export function createBookService({ repo, directors, keys, generations, provider
     <dc:language>${lang}</dc:language>
     ${book.brief.author ? `<dc:creator>${escapeXml(book.brief.author)}</dc:creator>` : ''}
     <meta property="dcterms:modified">${modified}</meta>
+    ${fixedLayout ? '<meta property="rendition:layout">pre-paginated</meta><meta property="rendition:orientation">auto</meta><meta property="rendition:spread">none</meta>' : ''}
     ${coverHref ? '<meta name="cover" content="img-cover"/>' : ''}
   </metadata>
   <manifest>

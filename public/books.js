@@ -326,7 +326,7 @@ function renderToolbar() {
   }) }, 'Narrate all'));
 
   const exports = h('div.export-group', {}, h('span.field-label', {}, 'EXPORT'),
-    ...[['pdf', 'PDF'], ['epub', 'EPUB'], ['docx', 'Word'], ['md', 'Text'], ['audio', 'Audiobook']].map(([format, label]) => h('button.button.secondary.small', { onclick: () => exportBook(format) }, label)));
+    ...[['pdf', 'PDF'], ['epub', isPicture() ? 'EPUB (reflowable)' : 'EPUB'], ...(isPicture() ? [['epub-fixed', 'EPUB (fixed layout)']] : []), ['docx', 'Word'], ['md', 'Text'], ['audio', 'Audiobook']].map(([format, label]) => h('button.button.secondary.small', { onclick: () => exportBook(format) }, label)));
 
   return h('div.book-toolbar', {}, plan, add, ...bulk, h('span.toolbar-sep'),
     h('label.inline', {}, h('span.field-label', {}, 'ART'), illustrator),
@@ -338,7 +338,7 @@ function renderToolbar() {
 const exportBook = guard(async (format) => {
   const { book } = ui.detail;
   toast('Preparing export…');
-  const response = await fetch(`/api/books/${book.id}/export.${format}`);
+  const response = await fetch(`/api/books/${book.id}/export.${format === 'epub-fixed' ? 'epub?layout=fixed' : format}`);
   if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Export failed.');
   const name = decodeURIComponent(/filename\*=UTF-8''([^;]+)/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? `${book.title}.${format}`);
   const url = URL.createObjectURL(await response.blob());

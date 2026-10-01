@@ -200,7 +200,23 @@ test('picture book: bleed boxes, full-bleed layout, non-Latin fonts, narration a
       }
     }
     const epub = await download(t, `/api/books/${book.id}/export.epub`);
-    if (has('python3')) assert.match(zipEntries(epub.bytes).find((e) => e.name === 'OEBPS/content.opf').text, /<dc:language>ja<\/dc:language>/);
+    if (has('python3')) {
+      const entries = zipEntries(epub.bytes);
+      const opf = entries.find((e) => e.name === 'OEBPS/content.opf').text;
+      assert.match(opf, /<dc:language>ja<\/dc:language>/);
+      assert.doesNotMatch(opf, /rendition:layout/);
+      const fixed = await download(t, `/api/books/${book.id}/export.epub?layout=fixed`);
+      const fixedEntries = zipEntries(fixed.bytes);
+      const fixedOpf = fixedEntries.find((e) => e.name === 'OEBPS/content.opf').text;
+      assert.match(fixedOpf, /<meta property="rendition:layout">pre-paginated<\/meta>/);
+      assert.match(fixedOpf, /<meta property="rendition:spread">none<\/meta>/);
+      const fixedPage = fixedEntries.find((e) => e.name === 'OEBPS/page-001.xhtml').text;
+      assert.match(fixedPage, /name="viewport" content="width=768, height=768"/);
+      assert.match(fixedPage, /class="page full-bleed"/);
+      assert.match(fixedPage, /class="text-panel"/);
+      assert.match(fixed.headers.get('content-disposition'), /-fixed\.epub/);
+      assert.match(fixedEntries.find((e) => e.name === 'OEBPS/style.css').text, /\.cover img\{width:100%/);
+    }
   } finally {
     await t.close();
   }

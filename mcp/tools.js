@@ -358,9 +358,9 @@ export function registerLuminaTools(server, client) {
   server.registerTool('export_book', {
     title: 'Export book',
     description: 'Export a book as a print-layout PDF, EPUB e-book, Word document (docx), Markdown text, or audiobook (joined narration). Saves the file on the computer running Lumina and returns its path.',
-    inputSchema: { bookId: z.string(), format: z.enum(['pdf', 'epub', 'docx', 'md', 'audio']).optional(), outputPath: z.string().optional().describe('Absolute file path (local connections only); defaults to the Lumina exports folder') },
-  }, safe(async ({ bookId, format = 'pdf', outputPath }) => {
-    const response = await client.fetchRaw(`/api/books/${bookId}/export.${format}`);
+    inputSchema: { bookId: z.string(), format: z.enum(['pdf', 'epub', 'docx', 'md', 'audio']).optional(), fixedLayout: z.boolean().optional().describe('EPUB only, picture books only: fixed-layout pages (art and text placed like the print book) instead of reflowable text'), outputPath: z.string().optional().describe('Absolute file path (local connections only); defaults to the Lumina exports folder') },
+  }, safe(async ({ bookId, format = 'pdf', fixedLayout, outputPath }) => {
+    const response = await client.fetchRaw(`/api/books/${bookId}/export.${format}${format === 'epub' && fixedLayout ? '?layout=fixed' : ''}`);
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Export failed (HTTP ${response.status})`);
     const name = decodeURIComponent(/filename\*=UTF-8''([^;]+)/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? `book.${format}`);
     const target = outputPath && client.allowOutputPath ? path.resolve(outputPath) : path.join(client.exportDir(), name);

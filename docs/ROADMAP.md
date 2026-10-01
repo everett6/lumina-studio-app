@@ -24,6 +24,7 @@
 - Narration (OpenAI and Gemini TTS), audiobook export, text-to-speech in Create.
 - Video (Veo 3.1, Kling 3 Pro): Create video mode, a canvas video node, animated picture-book pages.
 - Remote MCP endpoint for claude.ai and ChatGPT: OAuth, pairing codes, through your own tunnel.
+- Fixed-layout EPUB 3 export for picture books; reflowable EPUB remains available.
 
 ## Done (v0.5)
 
@@ -34,8 +35,8 @@
 
 1. **Verify with real accounts.** Adapters are tested against faked HTTP only. Run one low-cost call per provider
    (image, voice, video, writer) with real keys, connect claude.ai and ChatGPT through a real tunnel, and fix any drift.
-2. **Books, continued.** Fixed-layout EPUB for picture books, two-page spreads, EPUB media overlays (read-along
-   narration), multi-voice dialogue narration, and a built-in tunnel option.
+2. **Books, continued.** Two-page spreads, EPUB media overlays (read-along narration), multi-voice dialogue
+   narration, and a built-in tunnel option.
 3. **Image tools.** Upscale, background removal, inpainting with a mask editor, outpainting.
 4. **Reusable subjects.** Named character and product reference sets that can be attached to any generation.
 5. **Your own presets.** Save style, prompt and model combinations; canvas templates saved from your own graphs;
