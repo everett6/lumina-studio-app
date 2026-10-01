@@ -323,8 +323,117 @@ export function createRepo(db) {
     }),
   };
 
-  return { projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth };
+  // Characters are global (usable in every project). Their reference photos are ordinary assets.
+  const characters = {
+    get: (id) => toCharacter(db.prepare('SELECT * FROM characters WHERE id = ?').get(id)),
+    list: () => db.prepare('SELECT * FROM characters ORDER BY name COLLATE NOCASE').all().map(toCharacter),
+    create({ name, kind = 'character', description = '', referenceAssetIds = [] }) {
+      const id = randomUUID();
+      db.prepare('INSERT INTO characters (id, name, kind, description, reference_asset_ids, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, cleanName(name, 'Unnamed'), kind, description, JSON.stringify(referenceAssetIds), now(), now());
+      return characters.get(id);
+    },
+    update(id, { name, kind, description, referenceAssetIds }) {
+      const c = characters.get(id);
+      db.prepare('UPDATE characters SET name = ?, kind = ?, description = ?, reference_asset_ids = ?, updated_at = ? WHERE id = ?')
+        .run(name === undefined ? c.name : cleanName(name, c.name), kind ?? c.kind, description ?? c.description,
+          JSON.stringify(referenceAssetIds ?? c.referenceAssetIds), now(), id);
+      return characters.get(id);
+    },
+    remove: (id) => db.prepare('DELETE FROM characters WHERE id = ?').run(id).changes > 0,
+  };
+
+  const sequences = {
+    get: (id) => toSequence(db.prepare('SELECT * FROM sequences WHERE id = ?').get(id)),
+    listByProject: (projectId) => db.prepare(`SELECT s.*, (SELECT COUNT(*) FROM shots x WHERE x.sequence_id = s.id) AS shot_count
+      FROM sequences s WHERE project_id = ? ORDER BY updated_at DESC`).all(projectId).map((r) => ({ ...toSequence(r), shotCount: r.shot_count })),
+    create({ projectId, title, idea = '', writer = null, settings = {} }) {
+      const id = randomUUID();
+      db.prepare('INSERT INTO sequences (id, project_id, title, idea, writer, settings, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, projectId, cleanName(title, 'Untitled storyboard'), idea, writer, JSON.stringify(settings), now(), now());
+      touch(projectId);
+      return sequences.get(id);
+    },
+    update(id, { title, idea, writer, settings, outputAssetId }) {
+      const s = sequences.get(id);
+      db.prepare('UPDATE sequences SET title = ?, idea = ?, writer = ?, settings = ?, output_asset_id = ?, updated_at = ? WHERE id = ?')
+        .run(title === undefined ? s.title : cleanName(title, s.title), idea ?? s.idea, writer === undefined ? s.writer : writer,
+          JSON.stringify(settings ?? s.settings), outputAssetId === undefined ? s.outputAssetId : outputAssetId, now(), id);
+      return sequences.get(id);
+    },
+    remove: (id) => db.prepare('DELETE FROM sequences WHERE id = ?').run(id).changes > 0,
+  };
+
+  const shots = {
+    get: (id) => toShot(db.prepare('SELECT * FROM shots WHERE id = ?').get(id)),
+    listBySequence: (sequenceId) => db.prepare('SELECT * FROM shots WHERE sequence_id = ? ORDER BY position').all(sequenceId).map(toShot),
+    renumber(sequenceId) {
+      const ids = db.prepare('SELECT id FROM shots WHERE sequence_id = ? ORDER BY position, created_at').all(sequenceId).map((r) => r.id);
+      const set = db.prepare('UPDATE shots SET position = ? WHERE id = ?');
+      ids.forEach((shotId, index) => set.run(index + 1, shotId));
+    },
+    insert(sequenceId, { position, description = '', camera = null, duration = null }) {
+      const id = randomUUID();
+      db.prepare('UPDATE shots SET position = position + 1 WHERE sequence_id = ? AND position >= ?').run(sequenceId, position);
+      db.prepare('INSERT INTO shots (id, sequence_id, position, description, camera, duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, sequenceId, position, description, camera, duration, now(), now());
+      return shots.get(id);
+    },
+    replaceAll(sequenceId, list) {
+      db.prepare('DELETE FROM shots WHERE sequence_id = ?').run(sequenceId);
+      list.forEach((shot, index) => shots.insert(sequenceId, { ...shot, position: index + 1 }));
+      return shots.listBySequence(sequenceId);
+    },
+    update(id, fields) {
+      const s = shots.get(id);
+      const pick = (key) => (fields[key] === undefined ? s[key] : fields[key]);
+      db.prepare('UPDATE shots SET description = ?, camera = ?, duration = ?, image_asset_id = ?, video_asset_id = ?, updated_at = ? WHERE id = ?')
+        .run(pick('description'), pick('camera'), pick('duration'), pick('imageAssetId'), pick('videoAssetId'), now(), id);
+      return shots.get(id);
+    },
+    move(id, direction) {
+      const s = shots.get(id);
+      const neighbour = db.prepare(`SELECT id, position FROM shots WHERE sequence_id = ? AND position ${direction < 0 ? '<' : '>'} ?
+        ORDER BY position ${direction < 0 ? 'DESC' : 'ASC'} LIMIT 1`).get(s.sequenceId, s.position);
+      if (!neighbour) return s;
+      db.prepare('UPDATE shots SET position = ? WHERE id = ?').run(neighbour.position, id);
+      db.prepare('UPDATE shots SET position = ? WHERE id = ?').run(s.position, neighbour.id);
+      return shots.get(id);
+    },
+    remove(id) {
+      const s = shots.get(id);
+      db.prepare('DELETE FROM shots WHERE id = ?').run(id);
+      shots.renumber(s.sequenceId);
+    },
+  };
+
+  const canvasTemplates = {
+    list: () => db.prepare('SELECT * FROM canvas_templates ORDER BY name COLLATE NOCASE').all().map(toTemplate),
+    get: (id) => toTemplate(db.prepare('SELECT * FROM canvas_templates WHERE id = ?').get(id)),
+    create(name, graph) {
+      const id = randomUUID();
+      db.prepare('INSERT INTO canvas_templates (id, name, graph, created_at) VALUES (?, ?, ?, ?)').run(id, cleanName(name, 'My template'), JSON.stringify(graph), now());
+      return canvasTemplates.get(id);
+    },
+    remove: (id) => db.prepare('DELETE FROM canvas_templates WHERE id = ?').run(id).changes > 0,
+  };
+
+  return { projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth, characters, sequences, shots, canvasTemplates };
 }
+
+const toCharacter = (r) => r && {
+  id: r.id, name: r.name, kind: r.kind, description: r.description, referenceAssetIds: parse(r.reference_asset_ids, []),
+  createdAt: r.created_at, updatedAt: r.updated_at,
+};
+const toSequence = (r) => r && {
+  id: r.id, projectId: r.project_id, title: r.title, idea: r.idea, writer: r.writer, settings: parse(r.settings, {}),
+  outputAssetId: r.output_asset_id, createdAt: r.created_at, updatedAt: r.updated_at,
+};
+const toShot = (r) => r && {
+  id: r.id, sequenceId: r.sequence_id, position: r.position, description: r.description, camera: r.camera, duration: r.duration,
+  imageAssetId: r.image_asset_id, videoAssetId: r.video_asset_id, createdAt: r.created_at, updatedAt: r.updated_at,
+};
+const toTemplate = (r) => r && { id: r.id, name: r.name, graph: parse(r.graph, { nodes: [], edges: [] }), createdAt: r.created_at };
 
 const toChapter = (r) => r && {
   id: r.id, bookId: r.book_id, position: r.position, title: r.title, summary: r.summary, beats: parse(r.beats, []), text: r.text,

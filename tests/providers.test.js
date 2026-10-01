@@ -59,6 +59,31 @@ test('fal: submits to the queue, polls status, downloads the result', async () =
   }
 });
 
+test('fal: image tools send each endpoint its own input and read image or images[0]', async () => {
+  const fake = fakeFetch((url) => {
+    if (/^https:\/\/queue\.fal\.run\/fal-ai\/(esrgan|birefnet\/v2|flux-pro\/v1\/fill)$/.test(url)) return { body: { status_url: 'https://queue.fal.run/s', response_url: `https://queue.fal.run/r?m=${url.includes('fill') ? 'fill' : 'one'}` } };
+    if (url === 'https://queue.fal.run/s') return { body: { status: 'COMPLETED' } };
+    if (url === 'https://queue.fal.run/r?m=one') return { body: { image: { url: 'https://fal.media/out.png' } } };
+    if (url === 'https://queue.fal.run/r?m=fill') return { body: { images: [{ url: 'https://fal.media/out.png' }] } };
+    if (url === 'https://fal.media/out.png') return { body: png };
+    return { status: 500 };
+  });
+  const submitted = (model) => JSON.parse(fake.calls.find((c) => c.url === `https://queue.fal.run/${model}`).options.body);
+  try {
+    for (const m of ['fal-ai/esrgan', 'fal-ai/birefnet/v2', 'fal-ai/flux-pro/v1/fill']) assert.ok(fal.models.some((x) => x.id === m), m);
+    assert.deepEqual((await fal.tool({ key: 'k', model: 'fal-ai/esrgan', operation: 'upscale', image, scale: 4, prompt: 'Upscale' })).bytes, png);
+    assert.deepEqual({ ...submitted('fal-ai/esrgan'), image_url: 'x' }, { image_url: 'x', scale: 4, output_format: 'png' });
+    await fal.tool({ key: 'k', model: 'fal-ai/birefnet/v2', operation: 'remove-background', image, prompt: 'Remove background' });
+    assert.deepEqual(Object.keys(submitted('fal-ai/birefnet/v2')).sort(), ['image_url', 'output_format']);
+    assert.deepEqual((await fal.tool({ key: 'k', model: 'fal-ai/flux-pro/v1/fill', operation: 'inpaint', image, mask: image, prompt: 'a red door' })).bytes, png);
+    const fill = submitted('fal-ai/flux-pro/v1/fill');
+    assert.equal(fill.prompt, 'a red door');
+    assert.match(fill.mask_url, /^data:image\/png;base64,/);
+  } finally {
+    fake.restore();
+  }
+});
+
 test('gemini: finds the image inside interaction steps and sends inline inputs', async () => {
   const fake = fakeFetch(() => ({ body: { id: 'i1', status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: 'ok' }, { type: 'image', mime_type: 'image/png', data: b64 }] }] } }));
   try {

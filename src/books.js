@@ -3,6 +3,7 @@ import { imageSize } from './assets.js';
 import { joinAudio } from './audio.js';
 import { resolveFonts, scriptRuns } from './fonts.js';
 import { RequestError } from './generation.js';
+import { parseManuscript } from './manuscript.js';
 import { createZip } from './zip.js';
 
 export const bookKinds = {
@@ -195,6 +196,22 @@ export function createBookService({ repo, directors, keys, generations, provider
   function createBook({ projectId, title, kind = 'picture_book', brief, bible, writer }) {
     const safeKind = bookKinds[kind] ? kind : 'picture_book';
     return repo.books.create({ projectId, title, kind: safeKind, brief: cleanBrief(brief, briefFor(safeKind)), bible: cleanBible(bible), writer });
+  }
+
+  // Bring in an existing manuscript: one chapter per heading, ready to revise or continue.
+  function importManuscript({ projectId, fileName, bytes, title, kind = 'novel', writer }) {
+    let parsed;
+    try {
+      parsed = parseManuscript({ fileName, bytes });
+    } catch (error) {
+      throw new RequestError(400, error.message);
+    }
+    if (!parsed.chapters.length) throw new RequestError(400, 'No chapters were found in this file.');
+    if (parsed.chapters.length > 300) throw new RequestError(400, 'This file splits into more than 300 chapters. Check its headings and try again.');
+    const fallback = String(fileName ?? '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    const book = createBook({ projectId, title: title || parsed.title || fallback || 'Imported manuscript', kind: kind === 'nonfiction' ? 'nonfiction' : 'novel', writer });
+    parsed.chapters.forEach((chapter, index) => repo.chapters.insert(book.id, { position: index + 1, title: chapter.title, text: chapter.text }, 'import'));
+    return detail(book.id);
   }
 
   async function draftBible(bookId, { writer } = {}) {
@@ -755,7 +772,7 @@ export function createBookService({ repo, directors, keys, generations, provider
   }
 
   return {
-    detail, createBook, draftBible, planPages, revisePage, outline, draftChapter, reviseChapter, illustratePage, illustrateChapter, generateCover,
+    detail, createBook, importManuscript, draftBible, planPages, revisePage, outline, draftChapter, reviseChapter, illustratePage, illustrateChapter, generateCover,
     narrate, animatePage, illustrationRequest, onGenerationUpdate, exportMarkdown, exportPdf, exportEpub, exportDocx, exportAudiobook, writerFor,
   };
 }

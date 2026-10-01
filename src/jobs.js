@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { composePrompt } from './presets.js';
+import { providerPrompt, toolOperations } from './generation.js';
 import { userMessage } from './providers/http.js';
 
 // Durable image job runner. Generation rows are the queue: 'queued' rows survive restarts and resume;
@@ -30,7 +30,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     try {
       const provider = providers.get(job.provider);
       if (!provider) throw Object.assign(new Error('Provider unavailable'), { category: 'invalid_request' });
-      let prompt = composePrompt(job.prompt, job.params?.presets);
+      let prompt = providerPrompt(job);
       if (job.director && job.operation !== 'speech') {
         const [directorId, model] = job.director.split(':');
         const director = directors.get(directorId);
@@ -47,7 +47,15 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       const key = provider.keyless ? null : keys.get(provider.id);
       const { params } = job;
       let output;
-      if (job.operation === 'speech') {
+      if (toolOperations.includes(job.operation)) {
+        if (typeof provider.tool !== 'function') throw Object.assign(new Error('This provider has no image tools'), { category: 'invalid_request' });
+        const maskAsset = params.maskAssetId ? repo.assets.get(params.maskAssetId) : null;
+        if (params.maskAssetId && !maskAsset) throw Object.assign(new Error('The mask was deleted.'), { category: 'invalid_request' });
+        output = await provider.tool({
+          key, model: job.model, operation: job.operation, image: images[0], prompt, scale: params.scale,
+          mask: maskAsset ? await assetStore.read(maskAsset) : null,
+        });
+      } else if (job.operation === 'speech') {
         output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style });
       } else if (job.operation === 'video') {
         output = await provider.video({ key, model: job.model, prompt, image: images[0] ?? null, duration: params.duration, aspect: params.aspect });

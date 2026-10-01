@@ -140,6 +140,41 @@ const migrations = [
      expires_at INTEGER NOT NULL,
      created_at TEXT NOT NULL
    );`,
+  `CREATE TABLE characters (
+     id TEXT PRIMARY KEY,
+     name TEXT NOT NULL,
+     kind TEXT NOT NULL DEFAULT 'character',
+     description TEXT NOT NULL DEFAULT '',
+     reference_asset_ids TEXT NOT NULL DEFAULT '[]',
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE TABLE sequences (
+     id TEXT PRIMARY KEY,
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     title TEXT NOT NULL,
+     idea TEXT NOT NULL DEFAULT '',
+     writer TEXT,
+     settings TEXT NOT NULL DEFAULT '{}',
+     output_asset_id TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE INDEX sequences_project ON sequences(project_id, updated_at DESC);
+   CREATE TABLE shots (
+     id TEXT PRIMARY KEY,
+     sequence_id TEXT NOT NULL REFERENCES sequences(id) ON DELETE CASCADE,
+     position INTEGER NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     camera TEXT,
+     duration INTEGER,
+     image_asset_id TEXT,
+     video_asset_id TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE INDEX shots_sequence ON shots(sequence_id, position);
+   CREATE TABLE canvas_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, graph TEXT NOT NULL, created_at TEXT NOT NULL);`,
 ];
 
 function migrate(db) {

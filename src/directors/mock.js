@@ -32,6 +32,15 @@ export function mockCompletion({ task, prompt }) {
       })),
     });
   }
+  if (task === 'shots') {
+    const count = Number(/SHOT_COUNT=(\d+)/.exec(prompt)?.[1] ?? 3);
+    const cameras = ['dolly-in', 'orbit-left', 'crane-up', 'not-a-camera'];
+    return JSON.stringify({
+      shots: Array.from({ length: count }, (_, i) => ({
+        description: `Shot ${i + 1}: Pip the fox walks toward the lake at dawn.`, camera: cameras[i % cameras.length], duration: 4 + (i % 3) * 3,
+      })),
+    });
+  }
   if (task === 'draft') {
     const words = Number(/TARGET_WORDS=(\d+)/.exec(prompt)?.[1] ?? 300);
     const sentence = 'Pip stood at the edge of the cold water and listened to the reeds whisper.';

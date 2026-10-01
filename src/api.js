@@ -10,6 +10,8 @@ import { RequestError } from './generation.js';
 import { envNames } from './keys.js';
 import { presetGroups, presets } from './presets.js';
 import { userMessage } from './providers/http.js';
+import { cleanSequenceSettings } from './sequences.js';
+import { hasFfmpeg } from './video.js';
 
 const staticTypes = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -54,7 +56,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, jobs, token, remote, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, jobs, token, remote, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -82,7 +84,7 @@ export function createApiServer(ctx) {
   route('GET', '/api/projects', () => ({ projects: repo.projects.list() }));
   route('POST', '/api/projects', async (req) => ({ status: 201, body: { project: repo.projects.create((await readBody(req, 16_384)).name) } }));
   route('GET', `/api/projects/${uuid}`, (req, [id]) => ({
-    project: needProject(id), generations: repo.generations.listByProject(id), assets: repo.assets.listByProject(id),
+    project: needProject(id), generations: repo.generations.listByProject(id), assets: repo.assets.listByProject(id).filter((a) => a.kind !== 'mask'),
     canvases: repo.canvases.listByProject(id).map(({ graph, ...rest }) => ({ ...rest, nodeCount: graph.nodes.length })),
   }));
   route('PATCH', `/api/projects/${uuid}`, async (req, [id]) => {
@@ -115,7 +117,8 @@ export function createApiServer(ctx) {
     const image = parseDataUrl(body.dataUrl);
     if (!image) throw new RequestError(400, 'Upload a PNG, JPEG or WebP image under 8 MB.');
     const label = typeof body.label === 'string' ? body.label.slice(0, 120) : null;
-    return { status: 201, body: { asset: await assetStore.save({ bytes: image.bytes, projectId: body.projectId, kind: 'reference', label }) } };
+    // Masks are working files for inpainting; they stay out of the library.
+    return { status: 201, body: { asset: await assetStore.save({ bytes: image.bytes, projectId: body.projectId, kind: body.kind === 'mask' ? 'mask' : 'reference', label }) } };
   });
   route('DELETE', `/api/assets/${uuid}`, async (req, [id]) => {
     const asset = repo.assets.get(id);
@@ -171,11 +174,112 @@ export function createApiServer(ctx) {
     return remote.status();
   });
 
-  route('GET', '/api/templates', () => ({ templates: Object.entries(templates).map(([id, t]) => ({ id, name: t.name })) }));
+  // ---------- Characters ----------
+  const needCharacter = (id) => repo.characters.get(id) ?? (() => { throw new RequestError(404, 'Character not found.'); })();
+  const withReferences = (character) => ({
+    ...character,
+    references: character.referenceAssetIds.map((id) => repo.assets.get(id)).filter((a) => a?.mimeType.startsWith('image/')).map((a) => ({ id: a.id, path: a.path })),
+  });
+  function characterFields(body) {
+    const fields = {};
+    if (body.name !== undefined) fields.name = body.name;
+    if (body.kind !== undefined) fields.kind = body.kind === 'product' ? 'product' : 'character';
+    if (body.description !== undefined) fields.description = String(body.description ?? '').slice(0, 1500);
+    if (body.referenceAssetIds !== undefined) {
+      const ids = [...new Set(Array.isArray(body.referenceAssetIds) ? body.referenceAssetIds : [])];
+      if (ids.length > 4) throw new RequestError(400, 'A character can have at most 4 reference images.');
+      if (ids.some((id) => !repo.assets.get(id)?.mimeType.startsWith('image/'))) throw new RequestError(404, 'A reference image was not found.');
+      fields.referenceAssetIds = ids;
+    }
+    return fields;
+  }
+  route('GET', '/api/characters', () => ({ characters: repo.characters.list().map(withReferences) }));
+  route('POST', '/api/characters', async (req) => {
+    const fields = characterFields(await readBody(req, 16_384));
+    if (!String(fields.name ?? '').trim()) throw new RequestError(400, 'Give the character a name.');
+    return { status: 201, body: { character: withReferences(repo.characters.create(fields)) } };
+  });
+  route('PATCH', `/api/characters/${uuid}`, async (req, [id]) => {
+    needCharacter(id);
+    return { character: withReferences(repo.characters.update(id, characterFields(await readBody(req, 16_384)))) };
+  });
+  route('DELETE', `/api/characters/${uuid}`, (req, [id]) => {
+    needCharacter(id);
+    return { deleted: repo.characters.remove(id) };
+  });
+
+  // ---------- Storyboards ----------
+  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings() }));
+  route('GET', `/api/projects/${uuid}/storyboards`, (req, [projectId]) => {
+    needProject(projectId);
+    return { storyboards: repo.sequences.listByProject(projectId) };
+  });
+  route('POST', `/api/projects/${uuid}/storyboards`, async (req, [projectId]) => {
+    const body = await readBody(req, 32 * 1024);
+    return { status: 201, body: sequences.detail(sequences.create({ ...body, projectId }).id) };
+  });
+  route('GET', `/api/storyboards/${uuid}`, (req, [id]) => sequences.detail(id));
+  route('PATCH', `/api/storyboards/${uuid}`, async (req, [id]) => {
+    sequences.update(id, await readBody(req, 32 * 1024));
+    return sequences.detail(id);
+  });
+  route('DELETE', `/api/storyboards/${uuid}`, (req, [id]) => {
+    sequences.needSequence(id);
+    return { deleted: repo.sequences.remove(id) };
+  });
+  route('POST', `/api/storyboards/${uuid}/plan`, async (req, [id]) => sequences.plan(id, await readBody(req, 4096)));
+  route('POST', `/api/storyboards/${uuid}/stitch`, (req, [id]) => sequences.stitch(id));
+  route('POST', `/api/storyboards/${uuid}/shots`, async (req, [id]) => {
+    sequences.needSequence(id);
+    const body = await readBody(req, 16_384);
+    const count = repo.shots.listBySequence(id).length;
+    if (count >= 24) throw new RequestError(400, 'A storyboard can have at most 24 shots.');
+    repo.shots.insert(id, { position: count + 1, description: String(body.description ?? '').slice(0, 2000) });
+    return { status: 201, body: sequences.detail(id) };
+  });
+  route('PATCH', `/api/shots/${uuid}`, async (req, [id]) => {
+    const shot = sequences.needShot(id);
+    const body = await readBody(req, 16_384);
+    repo.shots.update(id, {
+      description: typeof body.description === 'string' ? body.description.slice(0, 2000) : undefined,
+      camera: body.camera === undefined ? undefined : presets.some((p) => p.group === 'camera' && p.id === body.camera) ? body.camera : null,
+      duration: body.duration === undefined ? undefined : Math.min(15, Math.max(1, Math.round(Number(body.duration)) || 5)),
+    });
+    return sequences.detail(shot.sequenceId);
+  });
+  route('DELETE', `/api/shots/${uuid}`, (req, [id]) => {
+    const shot = sequences.needShot(id);
+    repo.shots.remove(id);
+    return sequences.detail(shot.sequenceId);
+  });
+  route('POST', `/api/shots/${uuid}/move`, async (req, [id]) => {
+    const shot = sequences.needShot(id);
+    repo.shots.move(id, (await readBody(req, 1024)).direction === 'up' ? -1 : 1);
+    return sequences.detail(shot.sequenceId);
+  });
+  route('POST', `/api/shots/${uuid}/frame`, async (req, [id]) => ({ status: 202, body: sequences.generateFrame(id, await readBody(req, 4096)) }));
+  route('POST', `/api/shots/${uuid}/animate`, async (req, [id]) => ({ status: 202, body: sequences.animate(id, await readBody(req, 4096)) }));
+
+  // ---------- Canvas ----------
+  const userTemplate = (id) => (/^user:/.test(String(id)) ? repo.canvasTemplates.get(String(id).slice(5)) : null);
+  route('GET', '/api/templates', () => ({
+    templates: [
+      ...Object.entries(templates).map(([id, t]) => ({ id, name: t.name, builtIn: true })),
+      ...repo.canvasTemplates.list().map((t) => ({ id: `user:${t.id}`, name: t.name, builtIn: false })),
+    ],
+  }));
+  route('POST', '/api/templates', async (req) => {
+    const body = await readBody(req, 16_384);
+    const canvas = needCanvas(body.canvasId);
+    if (!canvas.graph.nodes.length) throw new RequestError(400, 'Add some nodes before saving a template.');
+    const saved = repo.canvasTemplates.create(body.name || canvas.name, canvas.graph);
+    return { status: 201, body: { template: { id: `user:${saved.id}`, name: saved.name, builtIn: false } } };
+  });
+  route('DELETE', `/api/templates/user:${uuid}`, (req, [id]) => ({ deleted: repo.canvasTemplates.remove(id) }));
   route('POST', `/api/projects/${uuid}/canvases`, async (req, [projectId]) => {
     needProject(projectId);
     const body = await readBody(req, 16_384);
-    const template = templates[body.template];
+    const template = templates[body.template] ?? userTemplate(body.template);
     return { status: 201, body: { canvas: repo.canvases.create(projectId, body.name || template?.name, structuredClone(template?.graph ?? emptyGraph())) } };
   });
   route('GET', `/api/canvases/${uuid}`, (req, [id]) => ({ canvas: needCanvas(id), lastRun: repo.runs.listByCanvas(id, 1)[0] ?? null }));
@@ -212,6 +316,15 @@ export function createApiServer(ctx) {
     const body = await readBody(req, 64 * 1024);
     const writer = typeof body.writer === 'string' && body.writer ? body.writer : null;
     return { status: 201, body: { book: books.createBook({ projectId, title: body.title, kind: body.kind, brief: body.brief, bible: body.bible, writer }) } };
+  });
+  route('POST', `/api/projects/${uuid}/books/import`, async (req, [projectId]) => {
+    needProject(projectId);
+    const body = await readBody(req, 40 * 1024 * 1024);
+    const bytes = typeof body.text === 'string' ? Buffer.from(body.text, 'utf8')
+      : typeof body.dataBase64 === 'string' && /^[A-Za-z0-9+/=]*$/.test(body.dataBase64) ? Buffer.from(body.dataBase64, 'base64') : null;
+    if (!bytes?.length) throw new RequestError(400, 'Choose a .txt, .md or .docx file.');
+    const writer = typeof body.writer === 'string' && body.writer ? body.writer : null;
+    return { status: 201, body: books.importManuscript({ projectId, fileName: text(body.fileName, 200) ?? '', bytes, title: text(body.title, 80), kind: body.kind, writer }) };
   });
   route('GET', `/api/books/${uuid}`, (req, [id]) => books.detail(id));
   route('PATCH', `/api/books/${uuid}`, async (req, [id]) => {
