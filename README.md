@@ -44,13 +44,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.5.0_amd64.deb
+sudo apt install ./dist/lumina-studio_0.6.0_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.5.0.AppImage"
+chmod +x "dist/Lumina Studio-0.6.0.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
