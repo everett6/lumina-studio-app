@@ -381,7 +381,7 @@ function renderCost() {
   const jobs = graph().nodes.filter((n) => ['generate', 'edit', 'video'].includes(n.type)).map((n) => {
     const provider = state.catalog?.providers.find((p) => p.id === n.data?.provider);
     const model = provider?.models.find((m) => m.id === n.data?.model);
-    return !model || provider.keyless ? null : estimateCost(model, { size: n.data?.size, duration: n.data?.duration });
+    return !model || provider.keyless ? null : estimateCost(model, { size: n.data?.size ?? '1024x1024', duration: n.data?.duration ?? model.durations?.[0] });
   }).filter(Boolean);
   const text = describeTotal(sumCosts(jobs));
   $('#canvas-cost').textContent = text ? `One run: ${text}` : '';
