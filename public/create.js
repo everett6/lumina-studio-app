@@ -1,4 +1,4 @@
-import { $, api, downloadAsset, emit, h, modelsFor, on, pickAsset, state, toast, uploadReference } from './lib.js';
+import { $, api, downloadAsset, emit, estimateCost, formatUsd, h, modelsFor, on, pickAsset, state, toast, uploadReference } from './lib.js';
 import { renderCharacterRow, selectedCharacters } from './characters.js';
 import { applyPresets, initPresets, presetModeChanged, selectedPresets } from './presets.js';
 import { toolMenu } from './tools.js';
@@ -69,8 +69,19 @@ function renderModelDetails() {
     ? `${local.inputs.length}/${model?.maxReferences ?? 0} start image — animate it, or leave empty for text to video`
     : model?.maxReferences ? `${local.inputs.length}/${model.maxReferences} input image(s) — the prompt describes the edit` : 'Add images to edit or guide the result';
   renderCharacterRow({ mode, model });
+  renderCost();
   $('#generate-btn').disabled = !model;
   $('#generate-btn').textContent = mode === 'image' && local.inputs.length ? 'Edit image' : copy.button;
+}
+
+// List-price estimate for the current settings, so nothing is spent blind.
+function renderCost() {
+  const { provider, model } = selectedModel();
+  const note = $('#cost-note');
+  if (!model || provider?.keyless) return note.replaceChildren();
+  const cost = estimateCost(model, { size: $('#size-select').value, duration: $('#duration-select').value });
+  const asOf = state.catalog?.pricesAsOf ? `list price, ${state.catalog.pricesAsOf}` : 'list price';
+  return note.replaceChildren(cost.usd != null ? `Costs ${formatUsd(cost.usd, cost.from)} on your ${provider.label} account (${asOf}).`.replace('Costs free', 'Free') : `${cost.text}.`);
 }
 
 function setMode(mode) {
@@ -241,6 +252,7 @@ export function initCreate() {
   document.querySelectorAll('#mode-select button').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.mode)));
   $('#prompt').addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') guard(generate)(); });
   $('#model-select').addEventListener('change', renderModelDetails);
+  for (const id of ['#size-select', '#duration-select']) $(id).addEventListener('change', renderCost);
   $('#generate-btn').addEventListener('click', guard(generate));
   $('#pick-reference').addEventListener('click', guard(async () => { const asset = await pickAsset({ title: 'Choose an input image' }); if (asset) addInput(asset); }));
   $('#reference-file').addEventListener('change', guard(async (event) => {

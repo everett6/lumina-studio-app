@@ -1,4 +1,4 @@
-import { $, api, downloadAsset, emit, h, modelsFor, on, state, toast } from './lib.js';
+import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast } from './lib.js';
 
 // Storyboard: an idea becomes a shot list; each shot gets a still frame, then a clip; clips join into one video.
 const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '' };
@@ -97,6 +97,14 @@ function settingsPanel() {
     h('button.text-button', { onclick: () => emit('open-tab', 'characters') }, (state.characters ?? []).length ? 'Manage →' : '＋ Add a character →'));
 
   const withFrames = shots.filter((s) => s.description.trim());
+  // List-price estimates for the two bulk actions.
+  const sizes = { '16:9': '1536x1024', '9:16': '1024x1536', '1:1': '1024x1024' };
+  const pick = (kind, operation) => modelsFor(operation).find((o) => o.provider.id === settings[`${kind}Provider`] && o.model.id === settings[`${kind}Model`]);
+  const [imageChoice, videoChoice] = [pick('image', 'generate'), pick('video', 'video')];
+  const total = (choice, jobs) => (choice && !choice.provider.keyless ? describeTotal(sumCosts(jobs.map((job) => estimateCost(choice.model, job)))) : '');
+  const frameCost = total(imageChoice, withFrames.map(() => ({ size: sizes[settings.aspect] })));
+  const clipCost = total(videoChoice, withFrames.map((s) => ({ duration: videoChoice?.model.durations?.includes(s.duration) ? s.duration : videoChoice?.model.durations?.[0] })));
+  const costLine = [frameCost && `all frames ${frameCost}`, clipCost && `all clips ${clipCost}`].filter(Boolean).join(' · ');
   const clips = shots.filter((s) => s.videoPath).length;
   const busy = (label, key) => (ui.busy === key ? 'Working…' : label);
   const actions = h('div.book-toolbar', {},
@@ -110,7 +118,7 @@ function settingsPanel() {
       show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
     }) }, 'Make all frames'),
     h('button.button.secondary.small', { disabled: !withFrames.length, onclick: guard(async () => {
-      if (!confirm(`Generate ${withFrames.length} video clip(s)? Video takes several minutes each and costs more than images.`)) return;
+      if (!confirm(`Generate ${withFrames.length} video clip(s)? Video takes several minutes each and costs more than images.${clipCost ? `\n\nAt list prices: ${clipCost}.` : ''}`)) return;
       for (const shot of withFrames) await call(`/api/shots/${shot.id}/animate`);
       show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
     }) }, 'Animate all'),
@@ -136,7 +144,8 @@ function settingsPanel() {
       h('label', {}, h('span.field-label', {}, 'STYLE'), style),
       modelPicker('image', 'generate', 'IMAGE MODEL (FRAMES)'),
       modelPicker('video', 'video', 'VIDEO MODEL (CLIPS)')),
-    characters, actions);
+    characters, actions,
+    costLine ? h('p.muted', {}, `At list prices (${state.catalog?.pricesAsOf ?? 'recent'}): ${costLine}.`) : null);
 }
 
 async function work(key, fn) {

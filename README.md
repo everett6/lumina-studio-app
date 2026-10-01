@@ -13,15 +13,19 @@ database and folder.
 | --- | --- |
 | Generate and edit images | Text-to-image, edits with up to 4 input images, variations, retry on failure. |
 | Presets | 45 original presets with animated preview tiles: 20 camera moves (dolly, orbit, crane, FPV, dolly zoom…), 9 effects (slow motion, time-lapse, rain, fog…) and 16 styles (cinematic, noir, anime, clay…). One click adds them to an image or video prompt. **Animate** and **Remix** buttons on every result. |
+| Characters | Save a person, creature or product once (name, look, up to 4 reference photos) and add it to any image, video or storyboard. The look is added to every prompt; the photos are sent to models that accept input images (GPT Image, Gemini, FLUX Kontext). Video uses the description only. |
+| Image tools | Upscale 2× or 4× (Real-ESRGAN), remove background (BiRefNet), inpaint with a brush, and extend an image to a new shape (FLUX.1 Fill), all through fal.ai. Available on any result and in the library. |
+| Storyboard | Idea → shot list (written by a text model, with a camera move and length per shot) → a still frame per shot → a clip per shot → clips joined into one MP4. Joining needs `ffmpeg` installed. |
+| Cost estimates | Create, Canvas and Storyboard show the provider's list price before you run, where the provider publishes one per image, megapixel or second (fal.ai, Gemini, Veo). OpenAI bills per token and Replicate prices were not confirmed, so those show a note instead of a number. |
 | Video | Text-to-video and image-to-video: Google Veo 3.1 (standard, Fast, Lite) and fal.ai Kling 3 Pro. Animate picture-book pages. (OpenAI's video API was shut down in September 2026.) |
 | Voice | Text to speech for any text, and narration of book pages and chapters: OpenAI gpt-4o-mini-tts and Gemini 3.8 TTS. Audiobook export. |
 | Providers | OpenAI, fal.ai, Google Gemini, Replicate (images); OpenAI, Anthropic Claude, NVIDIA Nemotron (writing). Tested against faked provider responses; **not yet run against the live APIs** (see below). |
-| Books | **Picture books** (page plan, consistent illustrations, full-bleed or art-above-text layouts), **novels** and **nonfiction** (outline → chapters → scenes or sections, drafted and revised with continuity context). Story bible with character looks and reference images, cover art, chapter art, page/chapter history. |
+| Books | **Picture books** (page plan, consistent illustrations, full-bleed or art-above-text layouts), **novels** and **nonfiction** (outline → chapters → scenes or sections, drafted and revised with continuity context), or **import a manuscript** you already have (.txt, .md, .docx) and keep revising or continuing it. Story bible with character looks and reference images, cover art, chapter art, page/chapter history. |
 | Book export | Print PDF (optional 0.125 in bleed with trim/bleed boxes; non-Latin scripts via installed system fonts or your own font file), reflowable EPUB 3 and fixed-layout EPUB for picture books, Word (.docx), Markdown, audiobook (MP3 or WAV). |
 | Projects and library | SQLite storage, reusable references, audio and video in the library, rename, export to a folder, delete. |
-| Canvas | Prompt, reference, director, generate, edit, video and output nodes. Drag to connect, pan and zoom, autosave, templates, run all or up to one node. |
+| Canvas | Prompt, reference, director, generate, edit, video and output nodes. Drag to connect, pan and zoom, autosave, undo and redo, built-in templates and templates saved from your own canvases, run all or up to one node. |
 | Desktop app | Electron `.deb` and AppImage. Keys encrypted with your system keyring. |
-| Claude Code / Claude Desktop | Local stdio MCP server with 28 tools (images, video, voice, presets, canvas, books). See [docs/MCP.md](docs/MCP.md). |
+| Claude Code / Claude Desktop | Local stdio MCP server with 37 tools (images, video, voice, presets, characters, image tools, storyboards, canvas, books). See [docs/MCP.md](docs/MCP.md). |
 | claude.ai / ChatGPT | Remote MCP endpoint with OAuth and pairing-code approval. You expose it through an HTTPS tunnel you run (Cloudflare Tunnel, Tailscale Funnel, ngrok…). Tested end to end with an MCP client over HTTP; **not yet tried from claude.ai or ChatGPT themselves**. |
 
 Every flow in the table has been exercised with the built-in offline mock providers (image, voice, video, writer), in

@@ -9,6 +9,7 @@ import { emptyGraph, nodeTypes, templates, validateGraph } from './canvas.js';
 import { RequestError } from './generation.js';
 import { envNames } from './keys.js';
 import { presetGroups, presets } from './presets.js';
+import { priceFor, pricesAsOf } from './pricing.js';
 import { userMessage } from './providers/http.js';
 import { cleanSequenceSettings } from './sequences.js';
 import { hasFfmpeg } from './video.js';
@@ -68,12 +69,12 @@ export function createApiServer(ctx) {
     return {
       providers: providers.list.map((p) => ({
         id: p.id, label: p.label, keyUrl: p.keyUrl ?? null, keyless: Boolean(p.keyless),
-        ready: Boolean(p.keyless || keyStatus[p.id]?.configured), models: p.models,
+        ready: Boolean(p.keyless || keyStatus[p.id]?.configured), models: p.models.map((m) => ({ ...m, price: priceFor(p.id, m.id) })),
       })),
       directors: directors.list.map((d) => ({
         id: d.id, label: d.label, models: d.models, ready: Boolean(d.keyless || keyStatus[d.keyProvider]?.configured),
       })),
-      nodeTypes,
+      nodeTypes, pricesAsOf,
     };
   }
 

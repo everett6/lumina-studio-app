@@ -31,18 +31,27 @@
   presets in MCP (`list_presets`, `presets` on generate_image / generate_video).
 - Fixed-layout EPUB 3 export for picture books; reflowable EPUB remains available.
 
+## Done (v0.6)
+
+- Characters: reusable people and products with a look description and reference photos, usable in Create, Storyboard and MCP.
+- Image tools through fal.ai: upscale, background removal, inpainting with a brush, extend to a new shape.
+- Storyboard: idea → shots → frames → clips → one joined video (ffmpeg).
+- Manuscript import (.txt, .md, .docx) for novels and nonfiction.
+- Canvas undo/redo and templates saved from your own canvases.
+- List-price cost estimates before running, where providers publish a per-unit price.
+
 ## Next
 
 1. **Verify with real accounts.** Adapters are tested against faked HTTP only. Run one low-cost call per provider
    (image, voice, video, writer) with real keys, connect claude.ai and ChatGPT through a real tunnel, and fix any drift.
 2. **Books, continued.** Two-page spreads, EPUB media overlays (read-along narration), multi-voice dialogue
    narration, and a built-in tunnel option.
-3. **Image tools.** Upscale, background removal, inpainting with a mask editor, outpainting.
-4. **Reusable subjects.** Named character and product reference sets that can be attached to any generation.
+3. **More video tools.** Start and end frames, clip extension, lip sync, video upscaling, narration or music on a joined storyboard.
+4. **More models.** Seedance, Wan, Runway and others, plus a field for typing any model ID.
 5. **Your own presets.** Save style, prompt and model combinations; canvas templates saved from your own graphs;
    presets on canvas nodes.
 6. **Hosted relay** for remote access without running a tunnel yourself (needs hosting).
-7. **Cost visibility.** Provider-reported usage per generation, plus an estimate before running a canvas.
+7. **Actual cost per generation** from provider-reported usage (estimates before running are done), and prices for OpenAI and Replicate.
 8. **Collaboration.** Shared projects, which depend on the hosted option.
 
 ## Known limits
@@ -50,9 +59,16 @@
 - Provider model IDs and parameters change often. Adapters list a fixed catalog; there is no custom-model field yet.
 - Canvas runs are not cancellable once started (jobs finish or fail on their own).
 - The dev server keeps keys unencrypted (0600 file). Use the desktop app for keyring encryption.
-- No undo in the canvas.
 - Non-Latin PDF text needs a system font that covers the script (found through fontconfig), or a font file set in the
   brief. Right-to-left text is shaped and ordered correctly within a line, but mixed-direction punctuation can land on
   the wrong side. WebP images are skipped in PDF and Word exports.
-- Video from the mock provider is a placeholder file, not playable. Real video depends on provider access.
+- The mock provider's video is a one-second flat-colour clip when ffmpeg is installed, and a placeholder file otherwise.
+- Characters are only as consistent as the chosen model's handling of reference images; there is no trained identity model. Video
+  gets a character's description, not its photos. Deleting the project that holds a character's photos removes those photos.
+- Inpainting sends a mask that is white where the image should change. fal's FLUX.1 Fill page does not state its mask convention;
+  white-means-repaint is assumed and untested against the live API.
+- Joining storyboard clips needs ffmpeg and ffprobe on the computer. The joined video has no added narration or music.
+- Prices are list prices read on the date shown in the app. They can be out of date, and the provider's bill is what counts.
+- Manuscript import splits at headings only ("# Title", "## Chapter", Word heading styles, or lines like "Chapter 3"). PDF, .doc and
+  .odt files are not supported.
 - Book writing calls wait for the writer model (up to a few minutes for long plans), with no streaming progress.

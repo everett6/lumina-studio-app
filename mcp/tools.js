@@ -60,12 +60,12 @@ export function registerLuminaTools(server, client) {
 
   server.registerTool('list_models', {
     title: 'List image models',
-    description: 'List image providers and models, whether each provider has a key configured, and what each model supports (generate, edit, sizes, max input images). Also lists creative directors.',
+    description: 'List providers and models, whether each provider has a key configured, and what each model supports (generate, edit, video, speech, upscale, remove-background, inpaint; sizes, durations, max input images). listPrice is the provider\'s list price when known (USD per image, megapixel or second) — an estimate, not a bill. Also lists creative directors.',
     inputSchema: {},
   }, safe(async () => {
     const { providers, directors } = await client.call('GET', '/api/catalog');
     return ok(text({
-      providers: providers.map((p) => ({ id: p.id, label: p.label, ready: p.ready, models: p.models.map(({ id, label, operations, sizes, qualities, maxReferences }) => ({ id, label, operations, sizes, qualities, maxReferences })) })),
+      providers: providers.map((p) => ({ id: p.id, label: p.label, ready: p.ready, models: p.models.map(({ id, label, operations, sizes, qualities, maxReferences, durations, scales, price }) => ({ id, label, operations, sizes, qualities, maxReferences, durations, scales, listPrice: price ?? undefined })) })),
       directors: directors.map((d) => ({ id: d.id, ready: d.ready, options: d.models.map((m) => `${d.id}:${m}`) })),
     }));
   }));
@@ -81,6 +81,41 @@ export function registerLuminaTools(server, client) {
 
   const presetsArg = z.array(z.string()).max(3).optional().describe('Preset ids from list_presets, e.g. ["dolly-in", "cinematic"]; one per group');
 
+  const charactersArg = z.array(z.string()).max(4).optional().describe('Character ids from list_characters. Their look is added to the prompt; their reference photos are attached when the model accepts input images (not for video).');
+
+  server.registerTool('list_characters', {
+    title: 'List characters',
+    description: 'List saved characters and products (name, look description, reference photo asset ids). Pass their ids as characterIds to generate_image, generate_video or create_storyboard to keep them consistent.',
+    inputSchema: {},
+  }, safe(async () => ok(text((await client.call('GET', '/api/characters')).characters.map(({ id, name, kind, description, referenceAssetIds }) => ({ id, name, kind, description, referenceAssetIds }))))));
+
+  server.registerTool('create_character', {
+    title: 'Create character',
+    description: 'Save a reusable character or product: a name, a description of what must stay the same (face, hair, build, clothing, colours), and up to 4 reference image asset ids from list_assets.',
+    inputSchema: {
+      name: z.string().min(1).max(80), description: z.string().max(1500).optional(), kind: z.enum(['character', 'product']).optional(),
+      referenceAssetIds: z.array(z.string()).max(4).optional(),
+    },
+  }, safe(async (args) => {
+    const { id, name, kind, description, referenceAssetIds } = (await client.call('POST', '/api/characters', args)).character;
+    return ok(text({ id, name, kind, description, referenceAssetIds }));
+  }));
+
+  server.registerTool('enhance_image', {
+    title: 'Upscale or remove background',
+    description: 'Run an image tool on one existing image: "upscale" (2× or 4×) or "remove-background" (cut-out on transparency). Returns the new image. Costs money on the user\'s provider account. Inpainting needs a painted mask, so it is only available in the Lumina app.',
+    inputSchema: {
+      projectId: z.string(), assetId: z.string().describe('Image asset id from list_assets or a generation'), operation: z.enum(['upscale', 'remove-background']),
+      scale: z.number().int().optional().describe('Upscale factor, 2 or 4'), provider: z.string().optional(), model: z.string().optional(),
+    },
+  }, safe(async ({ projectId, assetId, operation, scale, provider, model }) => {
+    const choice = await pickModel(operation, provider, model);
+    const { generation } = await client.call('POST', '/api/generate', { projectId, operation, scale, inputAssetIds: [assetId], ...choice });
+    const done = (await client.call('POST', `/api/generations/${generation.id}/wait`, { timeoutMs: 600_000 })).generation;
+    if (done.status !== 'completed') return { content: [text(summarizeGeneration(done))], isError: done.status === 'failed' };
+    return ok(text(summarizeGeneration(done)), ...(await imageContent(done.assetPath)));
+  }));
+
   server.registerTool('generate_image', {
     title: 'Generate or edit an image',
     description: 'Generate an image in a Lumina project using the user\'s own provider keys. Pass inputAssetIds to edit or combine existing images. Waits for the result by default and returns the image. Costs money on the user\'s provider account.',
@@ -94,6 +129,7 @@ export function registerLuminaTools(server, client) {
       inputAssetIds: z.array(z.string()).max(4).optional().describe('Asset ids to edit or use as references'),
       director: z.string().optional().describe('Optional creative director, e.g. "anthropic:claude-opus-5-5"'),
       presets: presetsArg,
+      characterIds: charactersArg,
       wait: z.boolean().optional().describe('Wait for completion (default true)'),
     },
   }, safe(async (args) => {
@@ -348,11 +384,83 @@ export function registerLuminaTools(server, client) {
   server.registerTool('generate_video', {
     title: 'Generate video',
     description: 'Generate a short video clip from a prompt, optionally animating an image (inputAssetId). Slow (minutes) and more expensive than images — confirm with the user first.',
-    inputSchema: { projectId: z.string(), prompt: z.string().min(1).max(4000), inputAssetId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), duration: z.number().int().optional(), aspect: z.string().optional(), presets: presetsArg },
-  }, safe(async ({ projectId, prompt, inputAssetId, provider, model, duration, aspect, presets }) => {
+    inputSchema: { projectId: z.string(), prompt: z.string().min(1).max(4000), inputAssetId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), duration: z.number().int().optional(), aspect: z.string().optional(), presets: presetsArg, characterIds: charactersArg },
+  }, safe(async ({ projectId, prompt, inputAssetId, provider, model, duration, aspect, presets, characterIds }) => {
     const choice = await pickModel('video', provider, model);
-    const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'video', prompt, inputAssetIds: inputAssetId ? [inputAssetId] : [], duration, aspect, presets, ...choice });
+    const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'video', prompt, inputAssetIds: inputAssetId ? [inputAssetId] : [], duration, aspect, presets, characterIds, ...choice });
     return waitAndShow(generation);
+  }));
+
+  server.registerTool('import_manuscript', {
+    title: 'Import manuscript',
+    description: 'Create a novel or nonfiction book from existing text. Chapters are split at Markdown headings ("# Title", "## Chapter") or lines like "Chapter 3". Afterwards use read_chapter, revise_chapter, edit_chapter, or add chapters and draft_chapter to continue the book.',
+    inputSchema: {
+      projectId: z.string(), text: z.string().min(1).max(2_000_000), title: z.string().max(80).optional(), kind: z.enum(['novel', 'nonfiction']).optional(),
+      writer: z.string().optional().describe('Writer model for later revisions, e.g. "anthropic:claude-opus-5-5"'),
+    },
+  }, safe(async ({ projectId, text: body, title, kind, writer }) => ok(text(bookSummary(await client.call('POST', `/api/projects/${projectId}/books/import`, { text: body, fileName: 'manuscript.md', title, kind, writer }))))));
+
+  // ---------- Storyboards ----------
+  const storyboardSummary = ({ sequence, shots }) => ({
+    id: sequence.id, projectId: sequence.projectId, title: sequence.title, idea: sequence.idea, writer: sequence.writer, settings: sequence.settings,
+    hasJoinedVideo: Boolean(sequence.outputAssetId), joinedVideoAssetId: sequence.outputAssetId ?? undefined,
+    shots: shots.map((s) => ({
+      id: s.id, position: s.position, description: s.description, camera: s.camera, duration: s.duration, frameAssetId: s.imageAssetId, clipAssetId: s.videoAssetId,
+      frameStatus: s.frameJob?.status, clipStatus: s.clipJob?.status,
+    })),
+  });
+
+  server.registerTool('create_storyboard', {
+    title: 'Create storyboard',
+    description: 'Turn an idea into a storyboard: a writer model plans the shots (description, camera move, length). Next: generate_shot for frames and clips, then join_storyboard for one video. Planning costs a little on the writer\'s provider account.',
+    inputSchema: {
+      projectId: z.string(), title: z.string().min(1).max(80), idea: z.string().min(1).max(6000), shotCount: z.number().int().min(1).max(24).optional(),
+      aspect: z.enum(['16:9', '9:16', '1:1']).optional(), style: z.string().optional().describe('A style preset id from list_presets'), characterIds: charactersArg,
+      writer: z.string().optional().describe('Writer model as "provider:model" (see list_models directors); defaults to the first ready one'),
+      plan: z.boolean().optional().describe('Plan the shots now (default true)'),
+    },
+  }, safe(async ({ projectId, title, idea, shotCount, aspect, style, characterIds, writer, plan = true }) => {
+    const { providers, directors } = await client.call('GET', '/api/catalog');
+    const first = (operation) => providers.filter((p) => p.ready).flatMap((p) => p.models.filter((m) => m.operations.includes(operation)).map((m) => [p.id, m.id]))[0] ?? [];
+    const readyWriter = directors.find((d) => d.ready);
+    const [imageProvider, imageModel] = first('generate');
+    const [videoProvider, videoModel] = first('video');
+    const created = await client.call('POST', `/api/projects/${projectId}/storyboards`, {
+      title, idea, writer: writer ?? (readyWriter ? `${readyWriter.id}:${readyWriter.models[0]}` : null),
+      settings: { shotCount, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel },
+    });
+    return ok(text(storyboardSummary(plan ? await client.call('POST', `/api/storyboards/${created.sequence.id}/plan`, {}) : created)));
+  }));
+
+  server.registerTool('get_storyboard', {
+    title: 'Get storyboard',
+    description: 'Read a storyboard: its settings and every shot with frame and clip status.',
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => ok(text(storyboardSummary(await client.call('GET', `/api/storyboards/${storyboardId}`))))));
+
+  server.registerTool('update_shot', {
+    title: 'Edit a storyboard shot',
+    description: 'Change a shot\'s description, camera move (a camera preset id from list_presets, or "" for none) or length in seconds.',
+    inputSchema: { shotId: z.string(), description: z.string().max(2000).optional(), camera: z.string().optional(), duration: z.number().int().min(1).max(15).optional() },
+  }, safe(async ({ shotId, ...changes }) => ok(text(storyboardSummary(await client.call('PATCH', `/api/shots/${shotId}`, changes))))));
+
+  server.registerTool('generate_shot', {
+    title: 'Generate a shot frame or clip',
+    description: 'Make the still frame ("frame") or the video clip ("clip") for one storyboard shot. A clip starts from the shot\'s frame when the video model accepts a start image. Clips are slow and cost more than images — confirm with the user first.',
+    inputSchema: { shotId: z.string(), kind: z.enum(['frame', 'clip']), provider: z.string().optional(), model: z.string().optional() },
+  }, safe(async ({ shotId, kind, provider, model }) => {
+    const { generation } = await client.call('POST', `/api/shots/${shotId}/${kind === 'frame' ? 'frame' : 'animate'}`, { provider, model });
+    return waitAndShow(generation, { shotId });
+  }));
+
+  server.registerTool('join_storyboard', {
+    title: 'Join storyboard clips',
+    description: 'Join the storyboard\'s clips, in shot order, into one MP4 saved in the project library. Needs ffmpeg on the computer running Lumina. Shots without a clip are skipped.',
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => {
+    const result = await client.call('POST', `/api/storyboards/${storyboardId}/stitch`, {});
+    const file = client.localFile && result.sequence.outputPath ? client.localFile(result.sequence.outputPath) : undefined;
+    return ok(text({ ...storyboardSummary(result), joined: result.joined, skipped: result.skipped, seconds: Math.round(result.duration * 10) / 10, file }));
   }));
 
   server.registerTool('export_book', {

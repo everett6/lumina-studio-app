@@ -16,7 +16,7 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | --- | --- |
 | `list_projects` | Projects, most recently updated first. |
 | `create_project` | Create a project. |
-| `list_models` | Providers, whether each has a key, and each model's capabilities; creative directors. |
+| `list_models` | Providers, whether each has a key, each model's capabilities and its list price when known; creative directors. |
 | `list_presets` | Camera moves, effects and styles; pass their ids as `presets` to `generate_image` / `generate_video`. |
 | `generate_image` | Generate, or edit when `inputAssetIds` is given. Waits and returns the image by default. **Spends money on your provider account.** |
 | `get_generation` | Status of a generation, with the image when complete. |
@@ -32,6 +32,12 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `generate_cover` | Cover art from the brief and bible. **Spends money.** |
 | `narrate` / `generate_speech` | Narrate a page or chapter with the book's voice, or turn any text into audio. **Spends money.** |
 | `generate_video` | Text-to-video or animate an image. **Spends money; slow.** |
+| `list_characters` / `create_character` | Reusable characters and products. Pass their ids as `characterIds` to `generate_image`, `generate_video` or `create_storyboard`. |
+| `enhance_image` | Upscale (2× or 4×) or remove the background of one image. **Spends money.** Inpainting needs a painted mask, so it is app-only. |
+| `import_manuscript` | Create a novel or nonfiction book from existing text, split into chapters at its headings. |
+| `create_storyboard` / `get_storyboard` / `update_shot` | Plan shots from an idea with a writer model, read the storyboard, edit a shot. |
+| `generate_shot` | Make one shot's still frame or video clip. **Spends money; clips are slow.** |
+| `join_storyboard` | Join the clips into one MP4 (needs ffmpeg on the computer running Lumina). |
 | `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. `fixedLayout: true` makes a fixed-layout EPUB for a picture book. |
 
 Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft

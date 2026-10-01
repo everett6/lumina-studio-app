@@ -20,6 +20,9 @@ the MCP server. Everything runs on your computer.
        │     ├─ src/fonts.js    per-script system fonts (fontconfig) for PDF
        │     ├─ src/audio.js    TTS chunking, WAV/MP3 joining
        │     └─ src/zip.js      EPUB container writer
+       ├─ src/sequences.js    storyboards: shot planning, frames, clips; src/video.js joins clips with ffmpeg
+       ├─ src/manuscript.js   .txt/.md/.docx import into chapters
+       ├─ src/pricing.js      list prices per model, shown as estimates
        ├─ src/remote.js       MCP over Streamable HTTP + OAuth 2.1 (pairing-code consent) for claude.ai / ChatGPT
        │     └─ mcp/tools.js    the tool set, shared with the local stdio server
        ├─ src/keys.js         0600 key file, encrypted when a cipher is supplied
@@ -36,12 +39,15 @@ A data root holds `data/` (`lumina.db`, `keys.json`, `api-token`, `endpoint.json
 
 Tables: `projects`, `assets` (kind `generation` or `reference`, with `generation_id` and `parent_asset_id` for
 lineage), `generations` (also the job queue), `canvases` (versioned JSON graph), `canvas_runs` (per-node state),
-`settings`, `schema_migrations`.
+`settings`, `schema_migrations`, `books`, `book_pages`, `book_chapters` (with revision tables), `characters` (global),
+`sequences` and `shots` (storyboards), `canvas_templates`, `oauth_clients`, `oauth_tokens`. Assets of kind `mask` are
+working files for inpainting and are hidden from the library.
 
 ## Jobs
 
-`POST /api/generate` inserts a `queued` row and returns `202`. Jobs have an `operation`: `generate`/`edit`/`variation` (images), `speech` or `video`, and the runner calls the
-provider's `run`, `speak` or `video` accordingly. The runner picks rows up (two at a time). It
+`POST /api/generate` inserts a `queued` row and returns `202`. Jobs have an `operation`: `generate`/`edit`/`variation` (images), `speech`, `video`, or an image tool
+(`upscale`, `remove-background`, `inpaint`), and the runner calls the provider's `run`, `speak`, `video` or `tool` accordingly. Presets and characters are
+added to the prompt by `providerPrompt()` when the job runs. The runner picks rows up (two at a time). It
 optionally refines the prompt with a director, loads input images, calls the provider, sniffs and stores the
 output, and marks the row `completed` or `failed` with a category (`auth`, `rate_limit`, `policy`,
 `invalid_request`, `timeout`, `provider`, `missing_key`) and a plain-language message. On start, `queued` rows

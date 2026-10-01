@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -20,7 +21,8 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     const names = tools.map((tool) => tool.name);
     for (const name of ['list_projects', 'create_project', 'list_models', 'generate_image', 'get_generation', 'list_assets', 'add_to_canvas', 'run_canvas',
       'create_book', 'list_books', 'get_book', 'update_book', 'draft_bible', 'plan_pages', 'edit_page', 'revise_page', 'generate_illustration',
-      'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets']) {
+      'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
+      'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -52,6 +54,32 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     const run = parse(await client.callTool({ name: 'run_canvas', arguments: { canvasId: placed.canvasId } }));
     assert.equal(run.status, 'completed');
     assert.equal(run.nodes[placed.nodeId].assetId, summary.assetId);
+
+    // Characters, image tools, storyboard and manuscript import.
+    const hero = parse(await client.callTool({ name: 'create_character', arguments: { name: 'Pip', description: 'small red fox, green scarf', referenceAssetIds: [summary.assetId] } }));
+    assert.equal(parse(await client.callTool({ name: 'list_characters', arguments: {} }))[0].id, hero.id);
+    const cast = parse(await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'by the lake', provider: 'mock', model: 'mock-image', characterIds: [hero.id] } }));
+    assert.match(cast.finalPrompt, /Pip — small red fox/);
+    const bigger = await client.callTool({ name: 'enhance_image', arguments: { projectId: project.id, assetId: summary.assetId, operation: 'upscale', scale: 2 } });
+    assert.equal(parse(bigger).operation, 'upscale');
+    assert.ok(bigger.content.some((c) => c.type === 'image'));
+    const board = parse(await client.callTool({ name: 'create_storyboard', arguments: { projectId: project.id, title: 'Dawn', idea: 'A fox reaches a lake.', shotCount: 2, characterIds: [hero.id] } }));
+    assert.equal(board.shots.length, 2);
+    assert.equal(board.settings.videoModel, 'mock-video');
+    const reshot = parse(await client.callTool({ name: 'update_shot', arguments: { shotId: board.shots[0].id, camera: 'crane-up', duration: 8 } }));
+    assert.equal(reshot.shots[0].camera, 'crane-up');
+    const frameResult = await client.callTool({ name: 'generate_shot', arguments: { shotId: board.shots[0].id, kind: 'frame' } });
+    assert.ok(frameResult.content.some((c) => c.type === 'image'));
+    assert.equal(parse(await client.callTool({ name: 'generate_shot', arguments: { shotId: board.shots[0].id, kind: 'clip' } })).operation, 'video');
+    const fetched = parse(await client.callTool({ name: 'get_storyboard', arguments: { storyboardId: board.id } }));
+    assert.ok(fetched.shots[0].frameAssetId && fetched.shots[0].clipAssetId && !fetched.shots[1].clipAssetId);
+    if (spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0) {
+      const joined = parse(await client.callTool({ name: 'join_storyboard', arguments: { storyboardId: board.id } }));
+      assert.equal(joined.joined, 1);
+      assert.ok(existsSync(joined.file));
+    }
+    const manuscript = parse(await client.callTool({ name: 'import_manuscript', arguments: { projectId: project.id, title: 'Lake Road', text: '## One\n\nIt began.\n\n## Two\n\nIt ended.' } }));
+    assert.deepEqual(manuscript.chapters.map((c) => c.title), ['One', 'Two']);
 
     const failed = await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'x [fail]', provider: 'mock', model: 'mock-image' } });
     assert.equal(failed.isError, true);

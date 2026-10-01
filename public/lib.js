@@ -80,6 +80,37 @@ export function modelsFor(operation) {
     .map((model) => ({ provider, model, value: `${provider.id}|${model.id}` })));
 }
 
+// Cost of one job at the provider's list price: { usd } when it can be worked out, otherwise { text }.
+export function estimateCost(model, { size, duration } = {}) {
+  const price = model?.price;
+  if (!price) return { usd: null, text: 'Price not listed' };
+  if (price.usd == null) return { usd: null, text: price.text };
+  if (price.per === 'second') return { usd: price.usd * (Number(duration) || 0), from: price.from };
+  if (price.per === 'megapixel') {
+    const [w, h] = String(size ?? '').split('x').map(Number);
+    return w && h ? { usd: price.usd * w * h / 1e6 } : { usd: null, text: `$${price.usd} per megapixel` };
+  }
+  return { usd: price.usd };
+}
+
+export function formatUsd(usd, from = false) {
+  if (usd === 0) return 'free';
+  if (usd < 0.01) return 'under $0.01';
+  return `${from ? 'from ' : ''}about $${usd < 0.1 ? usd.toFixed(3) : usd.toFixed(2)}`;
+}
+
+// Adds up several jobs; `unknown` counts the ones without a list price.
+export function sumCosts(costs) {
+  const known = costs.filter((c) => c.usd != null);
+  return { usd: known.reduce((sum, c) => sum + c.usd, 0), unknown: costs.length - known.length, from: known.some((c) => c.from), count: costs.length };
+}
+
+export function describeTotal(total) {
+  if (!total.count) return '';
+  if (total.unknown === total.count) return 'price not listed for these models';
+  return `${formatUsd(total.usd, total.from)}${total.unknown ? ` plus ${total.unknown} without a listed price` : ''}`;
+}
+
 // A modal that resolves with the chosen asset (or null). Shows project images, library references and upload.
 export function pickAsset({ title = 'Choose an image' } = {}) {
   return new Promise(async (resolve) => {

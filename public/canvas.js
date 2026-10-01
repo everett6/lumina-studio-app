@@ -1,4 +1,4 @@
-import { $, api, downloadAsset, emit, h, modelsFor, on, pickAsset, state, toast } from './lib.js';
+import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, pickAsset, state, sumCosts, toast } from './lib.js';
 
 const titles = { prompt: 'Prompt', reference: 'Reference image', director: 'Creative director', generate: 'Generate image', edit: 'Edit image', video: 'Video', output: 'Output' };
 const ns = 'http://www.w3.org/2000/svg';
@@ -52,7 +52,10 @@ function stepHistory(from, to) {
 }
 
 function scheduleSave() {
-  if (ui.canvas) recordChange();
+  if (ui.canvas) {
+    recordChange();
+    renderCost();
+  }
   ui.dirty = true;
   setSaveState('Unsaved');
   clearTimeout(ui.saveTimer);
@@ -368,8 +371,20 @@ function render() {
   }
   applyViewport();
   renderEdges();
+  renderCost();
   $('#canvas-run').disabled = ui.run?.status === 'running';
   $('#canvas-run').textContent = ui.run?.status === 'running' ? 'Running…' : 'Run all';
+}
+
+// List-price estimate for running every generating node once.
+function renderCost() {
+  const jobs = graph().nodes.filter((n) => ['generate', 'edit', 'video'].includes(n.type)).map((n) => {
+    const provider = state.catalog?.providers.find((p) => p.id === n.data?.provider);
+    const model = provider?.models.find((m) => m.id === n.data?.model);
+    return !model || provider.keyless ? null : estimateCost(model, { size: n.data?.size, duration: n.data?.duration });
+  }).filter(Boolean);
+  const text = describeTotal(sumCosts(jobs));
+  $('#canvas-cost').textContent = text ? `One run: ${text}` : '';
 }
 
 // ---------- pointer interaction ----------

@@ -208,3 +208,23 @@ test('canvas templates: save a canvas as a template and start new canvases from 
     await t.close();
   }
 });
+
+test('catalog carries list prices and the estimate helper follows each pricing unit', async () => {
+  const { estimateUsd, priceFor } = await import('../src/pricing.js');
+  assert.equal(estimateUsd(priceFor('fal', 'fal-ai/flux-pro/kontext'), { size: '1024x1024' }), 0.04);
+  assert.ok(Math.abs(estimateUsd(priceFor('fal', 'fal-ai/flux/schnell'), { size: '1536x1024' }) - 0.003 * 1.572864) < 1e-9);
+  assert.ok(Math.abs(estimateUsd(priceFor('fal', 'fal-ai/kling-video/v3/pro/text-to-video'), { duration: 5 }) - 0.84) < 1e-9);
+  assert.equal(estimateUsd(priceFor('openai', 'gpt-image-2.5-flare'), { size: '1024x1024' }), null);
+  assert.equal(estimateUsd(priceFor('replicate', 'black-forest-labs/flux-schnell')), null);
+  const t = await startTestApp();
+  try {
+    const catalog = (await t.call('GET', '/api/catalog')).body;
+    assert.match(catalog.pricesAsOf, /^\d{4}-\d{2}-\d{2}$/);
+    const model = (provider, id) => catalog.providers.find((p) => p.id === provider).models.find((m) => m.id === id);
+    assert.deepEqual(model('gemini', 'veo-3.1-generate-preview').price, { usd: 0.4, per: 'second' });
+    assert.equal(model('replicate', 'black-forest-labs/flux-1.1-pro').price, null);
+    assert.match(model('openai', 'gpt-image-2.5-sunburst').price.text, /per token/);
+  } finally {
+    await t.close();
+  }
+});
