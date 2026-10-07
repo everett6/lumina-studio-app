@@ -58,7 +58,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, jobs, token, remote, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, jobs, token, remote, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -254,6 +254,23 @@ export function createApiServer(ctx) {
     const body = await readBody(req, 1024);
     const result = await sequences.stitch(id, { wait: body.wait === true });
     return body.wait === true ? result : { status: 202, body: result };
+  });
+  route('POST', `/api/storyboards/${uuid}/produce`, async (req, [id]) => ({ status: 202, body: await sequences.produce(id) }));
+  route('POST', `/api/storyboards/${uuid}/stop`, (req, [id]) => sequences.stopProduction(id));
+  route('GET', `/api/assets/${uuid}/enhance`, (req, [id]) => ({ enhance: enhancer.status(id) }));
+  route('POST', `/api/assets/${uuid}/enhance`, async (req, [id]) => {
+    const asset = repo.assets.get(id);
+    if (!asset) throw new RequestError(404, 'Video not found.');
+    if (!asset.mimeType.startsWith('video/')) throw new RequestError(400, 'Only videos can be enhanced here (use Upscale for images).');
+    if (!(await hasFfmpeg())) throw new RequestError(501, 'Enhancing video needs ffmpeg (on Debian/Ubuntu: sudo apt install ffmpeg).');
+    const body = await readBody(req, 1024);
+    try {
+      const job = await enhancer.start({ asset, assetStore, mode: body.mode === 'ai' ? 'ai' : 'fast', allowDownload: body.download === true });
+      return { status: 202, body: { enhance: job } };
+    } catch (error) {
+      if (error.needsDownload) return { status: 428, body: { error: error.message, needsDownload: true } };
+      throw error.status ? new RequestError(error.status, error.message) : error;
+    }
   });
   route('POST', `/api/storyboards/${uuid}/shots`, async (req, [id]) => {
     sequences.needSequence(id);

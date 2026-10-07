@@ -1,4 +1,4 @@
-import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, pickAsset, state, sumCosts, toast } from './lib.js';
+import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, pickAsset, state, sumCosts, toast, askChoice, askText } from './lib.js';
 
 const titles = { prompt: 'Prompt', reference: 'Reference image', director: 'Creative director', generate: 'Generate image', edit: 'Edit image', video: 'Video', output: 'Output' };
 const ns = 'http://www.w3.org/2000/svg';
@@ -124,7 +124,7 @@ async function openCanvas(id) {
 
 async function createCanvas({ template, name, ask = true } = {}) {
   if (!template && ask) {
-    name = prompt('Name this canvas', 'Untitled canvas');
+    name = await askText('New canvas', { label: 'Name', value: 'Untitled canvas', okLabel: 'Create' });
     if (name === null) return null;
   }
   const { canvas } = await api(`/api/projects/${state.project.id}/canvases`, { method: 'POST', body: { name, template } });
@@ -528,8 +528,8 @@ export function initCanvas() {
     event.target.value = '';
     if (template === 'delete') {
       const mine = ui.templates.filter((t) => !t.builtIn);
-      const answer = prompt(`Delete which template? Type its number.\n\n${mine.map((t, i) => `${i + 1}. ${t.name}`).join('\n')}`);
-      const chosen = mine[Number(answer) - 1];
+      if (!mine.length) return;
+      const chosen = await askChoice('Delete which template?', mine, { describe: (t) => t.name, okLabel: 'Delete' });
       if (!chosen) return;
       await api(`/api/templates/${chosen.id}`, { method: 'DELETE' });
       await loadTemplates();
@@ -550,7 +550,7 @@ export function initCanvas() {
   });
   $('#canvas-save-template').addEventListener('click', guard(async () => {
     if (!ui.canvas) return toast('Create a canvas first.');
-    const name = prompt('Save this canvas as a template named', ui.canvas.name);
+    const name = await askText('Save as template', { label: 'Template name', value: ui.canvas.name, okLabel: 'Save' });
     if (!name?.trim()) return undefined;
     await flushSave();
     await api('/api/templates', { method: 'POST', body: { canvasId: ui.canvas.id, name } });
@@ -559,7 +559,7 @@ export function initCanvas() {
   }));
   $('#canvas-rename').addEventListener('click', guard(async () => {
     if (!ui.canvas) return;
-    const name = prompt('Rename canvas', ui.canvas.name);
+    const name = await askText('Rename canvas', { label: 'Name', value: ui.canvas.name, okLabel: 'Rename' });
     if (!name?.trim()) return;
     ui.canvas.name = name.trim();
     ui.dirty = true;

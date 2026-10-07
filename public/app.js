@@ -1,4 +1,4 @@
-import { $, $$, api, emit, h, on, state, toast } from './lib.js';
+import { $, $$, api, emit, h, on, state, toast, askText } from './lib.js';
 import { initCreate } from './create.js';
 import { initBooks } from './books.js';
 import { initCanvas } from './canvas.js';
@@ -55,7 +55,7 @@ async function loadProjects(preferId) {
 }
 
 async function createProject() {
-  const name = prompt('Name this project');
+  const name = await askText('New project', { label: 'Name', okLabel: 'Create' });
   if (!name?.trim()) return;
   const { project } = await api('/api/projects', { method: 'POST', body: { name } });
   await loadProjects(project.id);
@@ -63,7 +63,7 @@ async function createProject() {
 }
 
 async function renameProject() {
-  const name = prompt('Rename project', state.project.name);
+  const name = await askText('Rename project', { label: 'Name', value: state.project.name, okLabel: 'Rename' });
   if (!name?.trim()) return;
   await api(`/api/projects/${state.project.id}`, { method: 'PATCH', body: { name } });
   await loadProjects(state.project.id);

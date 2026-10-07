@@ -260,7 +260,8 @@ test('a five-minute film: 30 planned shots aimed at 300 seconds, clips at each s
       detail = (await t.call('GET', `/api/storyboards/${id}`)).body;
     }
     assert.equal(detail.sequence.join.state, 'completed', detail.sequence.join.error);
-    assert.equal(detail.sequence.join.done, 30);
+    assert.equal(detail.sequence.join.clips, 30);
+    assert.equal(detail.sequence.join.done, detail.sequence.join.total);
     const file = path.join(t.dataRoot, 'feature.mp4');
     writeFileSync(file, await bytesOf(t, detail.sequence.outputPath));
     const seconds = Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]).toString());
@@ -285,6 +286,92 @@ test('search and fetch (ChatGPT connector shape): projects, storyboards and char
     const doc = (await t.call('GET', `/api/search/document?id=${encodeURIComponent(shots[0].id)}`)).body;
     assert.match(doc.text, /Shot 1 .*rowing boat/);
     assert.equal((await t.call('GET', '/api/search/document?id=book:nope')).status, 404);
+  } finally {
+    await t.close();
+  }
+});
+
+const waitFor = async (t, id, ok, timeoutMs = 120_000) => {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const detail = (await t.call('GET', `/api/storyboards/${id}`)).body;
+    if (ok(detail)) return detail;
+    if (Date.now() > until) throw new Error(`timed out: ${JSON.stringify(detail.sequence.production)} ${JSON.stringify(detail.sequence.join)}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+};
+
+test('Produce film: chained shots start from the previous clip\'s last frame, then crossfade + cinematic finish; enhance doubles the size', { skip: !has('ffmpeg') && 'needs ffmpeg', timeout: 300_000 }, async () => {
+  process.env.LUMINA_MOCK_FULL_CLIPS = '1';
+  const t = await startTestApp();
+  try {
+    const project = (await t.call('POST', '/api/projects', { name: 'Chained' })).body.project;
+    const created = await t.call('POST', `/api/projects/${project.id}/storyboards`, {
+      title: 'Run', idea: 'A runner crosses a city at night.', writer: 'mock:mock-director',
+      settings: { shotCount: 3, clipLength: 4, continuity: 'chain', transition: 'crossfade', finish: 'cinematic', imageProvider: 'mock', imageModel: 'mock-image', videoProvider: 'mock', videoModel: 'mock-video' },
+    });
+    const id = created.body.sequence.id;
+    const planned = (await t.call('POST', `/api/storyboards/${id}/plan`, {})).body;
+    assert.deepEqual(planned.shots.map((s) => s.duration), [4, 4, 4], 'clip length applies to every shot');
+    const started = await t.call('POST', `/api/storyboards/${id}/produce`, {});
+    assert.equal(started.status, 202, JSON.stringify(started.body));
+    assert.equal((await t.call('POST', `/api/storyboards/${id}/produce`, {})).status, 409);
+    const done = await waitFor(t, id, (d) => ['completed', 'paused'].includes(d.sequence.production?.state));
+    assert.equal(done.sequence.production.state, 'completed', done.sequence.production.error);
+    // Shot 1 used a generated frame; shots 2 and 3 start from the end of the shot before.
+    const frames = done.shots.map((s) => s.imagePath);
+    assert.ok(frames.every(Boolean));
+    const assets = (await t.call('GET', `/api/projects/${project.id}`)).body.assets;
+    const label = (path) => assets.find((a) => a.path === path)?.label ?? '';
+    assert.match(label(frames[1]), /Shot 2 start \(end of shot 1\)/);
+    assert.match(label(frames[2]), /Shot 3 start \(end of shot 2\)/);
+    const clip2 = (await t.call('GET', `/api/projects/${project.id}`)).body.generations.find((g) => g.bookTarget === `shot-video:${done.shots[1].id}`);
+    assert.deepEqual(clip2.inputAssetIds, [assets.find((a) => a.path === frames[1]).id]);
+    assert.match(clip2.finalPrompt, /Photorealistic live-action/);
+    // 3 x 4 s with two 0.5 s dissolves = 11 s; the cinematic pass letterboxes the frame.
+    const film = path.join(t.dataRoot, 'film.mp4');
+    writeFileSync(film, await bytesOf(t, done.sequence.outputPath));
+    const seconds = Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', film]).toString());
+    assert.ok(Math.abs(seconds - 11) < 0.4, `film runs ${seconds} s`);
+    const row = execFileSync('ffmpeg', ['-v', 'error', '-ss', '5', '-i', film, '-frames:v', '1', '-vf', 'crop=iw:4:0:0,format=gray', '-f', 'rawvideo', '-']);
+    assert.ok(Math.max(...row) < 30, 'top rows are black letterbox');
+
+    const outputId = assets.find((a) => a.path === done.sequence.outputPath)?.id ?? (await t.call('GET', `/api/projects/${project.id}`)).body.assets.find((a) => a.path === done.sequence.outputPath).id;
+    const enhance = await t.call('POST', `/api/assets/${outputId}/enhance`, { mode: 'fast' });
+    assert.equal(enhance.status, 202, JSON.stringify(enhance.body));
+    let status;
+    for (let i = 0; i < 200; i += 1) {
+      status = (await t.call('GET', `/api/assets/${outputId}/enhance`)).body.enhance;
+      if (status.state !== 'running') break;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    assert.equal(status.state, 'completed', status.error);
+    assert.equal(status.width, 640);
+    assert.equal(status.height, 360);
+  } finally {
+    delete process.env.LUMINA_MOCK_FULL_CLIPS;
+    await t.close();
+  }
+});
+
+test('Produce film with separate frames; a failed shot pauses production with a reason', { skip: !has('ffmpeg') && 'needs ffmpeg', timeout: 120_000 }, async () => {
+  const t = await startTestApp();
+  try {
+    const project = (await t.call('POST', '/api/projects', { name: 'Frames' })).body.project;
+    const id = (await t.call('POST', `/api/projects/${project.id}/storyboards`, {
+      title: 'Lake', idea: 'x', settings: { imageProvider: 'mock', imageModel: 'mock-image', videoProvider: 'mock', videoModel: 'mock-video' },
+    })).body.sequence.id;
+    for (const description of ['Fox at the lake.', 'Fox drinks [fail].']) await t.call('POST', `/api/storyboards/${id}/shots`, { description });
+    await t.call('POST', `/api/storyboards/${id}/produce`, {});
+    const paused = await waitFor(t, id, (d) => d.sequence.production?.state !== 'running');
+    assert.equal(paused.sequence.production.state, 'paused');
+    assert.match(paused.sequence.production.error, /Shot 2 frame failed/);
+    const shot2 = paused.shots[1];
+    await t.call('PATCH', `/api/shots/${shot2.id}`, { description: 'Fox drinks.' });
+    await t.call('POST', `/api/storyboards/${id}/produce`, {});
+    const done = await waitFor(t, id, (d) => d.sequence.production?.state !== 'running');
+    assert.equal(done.sequence.production.state, 'completed', done.sequence.production.error);
+    assert.ok(done.sequence.outputPath);
   } finally {
     await t.close();
   }

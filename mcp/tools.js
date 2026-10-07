@@ -439,11 +439,15 @@ export function registerLuminaTools(server, client) {
     inputSchema: {
       projectId: z.string(), title: z.string().min(1).max(80), idea: z.string().min(1).max(6000), shotCount: z.number().int().min(1).max(60).optional(),
       targetMinutes: z.number().min(0).max(15).optional().describe('Total running time the writer aims for'),
+      clipLength: z.number().int().min(0).max(30).optional().describe('Seconds per clip for every shot (0 = writer decides); long takes like 10-15 s need a model that supports them'),
+      continuity: z.enum(['frames', 'chain']).optional().describe('"chain": each clip starts from the previous clip\'s last frame (unbroken action); "frames": each shot from its own still'),
+      realistic: z.boolean().optional().describe('Direct everything as photoreal live action (default true)'),
+      transition: z.enum(['cut', 'crossfade']).optional(), finish: z.enum(['none', 'cinematic']).optional().describe('"cinematic": 2.39:1 bars, film grain, fades'),
       aspect: z.enum(['16:9', '9:16', '1:1']).optional(), style: z.string().optional().describe('A style preset id from list_presets'), characterIds: charactersArg,
       writer: z.string().optional().describe('Writer model as "provider:model" (see list_models directors); defaults to the first ready one'),
       plan: z.boolean().optional().describe('Plan the shots now (default true)'),
     },
-  }, safe(async ({ projectId, title, idea, shotCount, targetMinutes, aspect, style, characterIds, writer, plan = true }) => {
+  }, safe(async ({ projectId, title, idea, shotCount, targetMinutes, clipLength, continuity, realistic, transition, finish, aspect, style, characterIds, writer, plan = true }) => {
     const { providers, directors } = await client.call('GET', '/api/catalog');
     const first = (operation) => providers.filter((p) => p.ready).flatMap((p) => p.models.filter((m) => m.operations.includes(operation)).map((m) => [p.id, m.id]))[0] ?? [];
     const readyWriter = directors.find((d) => d.ready);
@@ -451,7 +455,7 @@ export function registerLuminaTools(server, client) {
     const [videoProvider, videoModel] = first('video');
     const created = await client.call('POST', `/api/projects/${projectId}/storyboards`, {
       title, idea, writer: writer ?? (readyWriter ? `${readyWriter.id}:${readyWriter.models[0]}` : null),
-      settings: { shotCount, targetSeconds: targetMinutes ? Math.round(targetMinutes * 60) : undefined, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel },
+      settings: { shotCount, targetSeconds: targetMinutes ? Math.round(targetMinutes * 60) : undefined, clipLength, continuity, realistic, transition, finish, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel },
     });
     return ok(text(storyboardSummary(plan ? await client.call('POST', `/api/storyboards/${created.sequence.id}/plan`, {}) : created)));
   }));
@@ -492,6 +496,24 @@ export function registerLuminaTools(server, client) {
     return ok(text({ queued: queued.length, generationIds: queued, next: 'Call get_storyboard to follow progress; join_storyboard once the clips are done.' }));
   }));
 
+  server.registerTool('produce_film', {
+    title: 'Produce the whole film',
+    description: 'Make every missing frame and clip of a storyboard and join them into the finished film, in the background. With continuity "chain" (set via create_storyboard or the app) each clip starts from the last frame of the one before for unbroken action. Costs real money for every clip — confirm the price with the user first. Follow progress with get_storyboard (sequence.production).',
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => {
+    const result = await client.call('POST', `/api/storyboards/${storyboardId}/produce`, {});
+    return ok(text({ ...storyboardSummary(result), production: result.sequence.production }));
+  }));
+
+  server.registerTool('enhance_video', {
+    title: 'Enhance (upscale) a video',
+    description: 'Make a 2x larger, sharper copy of a video (up to 4K) on the computer running Lumina: mode "fast" uses GPU scaling (seconds to minutes); mode "ai" uses Real-ESRGAN on the NVIDIA GPU (much slower, adds detail; must be installed from the app first). Runs in the background; returns the job status. Call again with the same assetId to check.',
+    inputSchema: { assetId: z.string(), mode: z.enum(['fast', 'ai']).optional(), checkOnly: z.boolean().optional() },
+  }, safe(async ({ assetId, mode = 'fast', checkOnly = false }) => {
+    if (checkOnly) return ok(text(await client.call('GET', `/api/assets/${assetId}/enhance`)));
+    return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode })));
+  }));
+
   server.registerTool('join_storyboard', {
     title: 'Join storyboard clips',
     description: 'Join the storyboard\'s clips, in shot order, into one MP4 saved in the project library. Needs ffmpeg on the computer running Lumina. Shots without a clip are skipped. Long films take a few minutes; if it is still running when this returns, call get_storyboard later.',
@@ -506,7 +528,7 @@ export function registerLuminaTools(server, client) {
     const join = result.sequence.join;
     if (join?.state === 'failed') throw new Error(join.error);
     const file = client.localFile && join?.state === 'completed' && result.sequence.outputPath ? client.localFile(result.sequence.outputPath) : undefined;
-    return ok(text({ ...storyboardSummary(result), joined: join?.total, skipped: join?.skipped, done: join?.done, state: join?.state,
+    return ok(text({ ...storyboardSummary(result), joined: join?.clips, skipped: join?.skipped, progress: join ? `${join.done}/${join.total}` : undefined, state: join?.state,
       seconds: join?.duration ? Math.round(join.duration * 10) / 10 : undefined, file }));
   }));
 

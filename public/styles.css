@@ -502,3 +502,6 @@ audio.result-media { max-width: 420px; }
 .host-card .remote-url a { word-break: break-all; }
 details.remote-card > summary { cursor: pointer; }
 .account-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.ask-modal { width: min(460px, 100%); display: grid; gap: 10px; }
+.ask-modal input, .ask-modal textarea, .ask-modal select { width: 100%; box-sizing: border-box; }
+.ask-actions { display: flex; justify-content: flex-end; gap: 8px; }

@@ -1,4 +1,4 @@
-import { $, api, emit, h, on, pickAsset, state, toast } from './lib.js';
+import { $, api, emit, h, on, pickAsset, state, toast, askText } from './lib.js';
 
 // Characters: defined once (name, look, up to 4 reference photos), attached to generations by id.
 const local = { selected: new Set(), context: { mode: 'image', model: null } };
@@ -86,7 +86,7 @@ function renderView() {
 
 export function initCharacters() {
   $('#character-new').addEventListener('click', guard(async () => {
-    const name = prompt('Name this character or product');
+    const name = await askText('New character or product', { label: 'Name', placeholder: 'e.g. Mira, or “Blue sneaker”', okLabel: 'Create' });
     if (!name?.trim()) return;
     await api('/api/characters', { method: 'POST', body: { name } });
     await loadCharacters();

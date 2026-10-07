@@ -22,6 +22,57 @@ export function h(tag, props = {}, ...children) {
   return node;
 }
 
+// In-app replacement for window.prompt(), which the desktop app (Electron) does not support.
+// Resolves with the entered text (trimmed), or null when cancelled. `multiline` gives a textarea; `optional` allows ''.
+export function askText(title, { label = '', value = '', placeholder = '', multiline = false, optional = false, okLabel = 'OK' } = {}) {
+  return new Promise((resolve) => {
+    const field = h(multiline ? 'textarea' : 'input', { value, placeholder, rows: multiline ? 4 : undefined, type: multiline ? undefined : 'text', maxLength: 2000, 'aria-label': label || title });
+    const error = h('small.error-text');
+    const finish = (result) => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(result);
+    };
+    const submit = () => {
+      const text = field.value.trim();
+      if (!text && !optional) {
+        error.textContent = 'Type something first, or cancel.';
+        return field.focus();
+      }
+      return finish(text);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') { event.preventDefault(); finish(null); }
+      if (event.key === 'Enter' && (!multiline || event.ctrlKey || event.metaKey)) { event.preventDefault(); submit(); }
+    };
+    const overlay = h('div.modal-backdrop', { onclick: (event) => event.target === overlay && finish(null) },
+      h('div.modal.ask-modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        h('div.modal-head', {}, h('b', {}, title), h('button.ghost', { onclick: () => finish(null), 'aria-label': 'Cancel' }, '✕')),
+        label ? h('label.field-label', {}, label) : null, field, error,
+        h('div.ask-actions', {}, h('button.button.secondary.small', { onclick: () => finish(null) }, 'Cancel'), h('button.button.primary.small', { onclick: submit }, okLabel))));
+    document.addEventListener('keydown', onKey, true);
+    document.body.append(overlay);
+    field.focus();
+    if (!multiline) field.select();
+  });
+}
+
+// Pick one item from a list; resolves with the chosen item or null.
+export function askChoice(title, items, { describe = String, okLabel = 'Choose' } = {}) {
+  return new Promise((resolve) => {
+    const select = h('select', { 'aria-label': title }, ...items.map((item, index) => h('option', { value: index }, describe(item))));
+    const finish = (result) => { overlay.remove(); resolve(result); };
+    const overlay = h('div.modal-backdrop', { onclick: (event) => event.target === overlay && finish(null) },
+      h('div.modal.ask-modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        h('div.modal-head', {}, h('b', {}, title), h('button.ghost', { onclick: () => finish(null), 'aria-label': 'Cancel' }, '✕')),
+        select,
+        h('div.ask-actions', {}, h('button.button.secondary.small', { onclick: () => finish(null) }, 'Cancel'),
+          h('button.button.primary.small', { onclick: () => finish(items[Number(select.value)] ?? null) }, okLabel))));
+    document.body.append(overlay);
+    select.focus();
+  });
+}
+
 let toastTimer;
 export function toast(message, tone = 'info') {
   const node = $('#toast');

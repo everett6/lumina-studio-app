@@ -1,4 +1,4 @@
-import { $, api, downloadAsset, h, modelsFor, on, pickAsset, state, toast } from './lib.js';
+import { $, api, downloadAsset, h, modelsFor, on, pickAsset, state, toast, askText } from './lib.js';
 
 const ui = { books: [], detail: null, options: null, timers: new Map(), poll: null, cards: new Map() };
 const active = (jobs = []) => jobs.some((j) => ['queued', 'running'].includes(j.status));
@@ -410,7 +410,7 @@ function pageCard(page) {
   const briefArea = h('textarea', { rows: 3, value: page.illustrationBrief, placeholder: 'What the illustration shows', oninput: save('illustrationBrief') });
   const revise = h('button.text-button', {}, 'Revise with AI…');
   revise.addEventListener('click', guard(async () => {
-    const instruction = prompt('How should this page change? (e.g. "shorter, more rhythm")');
+    const instruction = await askText('Revise this page', { label: 'How should it change?', placeholder: 'e.g. shorter, more rhythm', multiline: true, okLabel: 'Revise' });
     if (!instruction?.trim()) return;
     await busy(revise, 'Revising…', async () => {
       const { page: updated } = await api(`/api/pages/${page.id}/revise`, { method: 'POST', body: { instruction, writer: ui.writer.value } });
@@ -487,7 +487,8 @@ function chapterCard(chapter) {
   const draft = h('button.button.secondary.small', {}, chapter.text ? 'Redraft with AI' : 'Draft with AI');
   draft.addEventListener('click', guard(async () => {
     if (chapter.text.trim() && !confirm('Replace this chapter\'s text with a new AI draft? The current text stays in History.')) return;
-    const instructions = chapter.text.trim() ? prompt('Anything the new draft should do differently? (optional)') ?? '' : '';
+    const instructions = chapter.text.trim() ? await askText('Redraft this chapter', { label: 'Anything the new draft should do differently? (optional)', multiline: true, optional: true, okLabel: 'Redraft' }) : '';
+    if (instructions === null) return;
     await busy(draft, 'Drafting…', async () => {
       const { chapter: updated } = await api(`/api/chapters/${chapter.id}/draft`, { method: 'POST', body: { writer: ui.writer.value, instructions } });
       Object.assign(chapter, updated);
@@ -497,7 +498,7 @@ function chapterCard(chapter) {
   }));
   const revise = h('button.text-button', {}, 'Revise with AI…');
   revise.addEventListener('click', guard(async () => {
-    const instruction = prompt('How should this chapter change? (e.g. "tighten the opening", "more dialogue in scene 2")');
+    const instruction = await askText('Revise this chapter', { label: 'How should it change?', placeholder: 'e.g. tighten the opening, more dialogue in scene 2', multiline: true, okLabel: 'Revise' });
     if (!instruction?.trim()) return;
     await busy(revise, 'Revising…', async () => {
       const { chapter: updated } = await api(`/api/chapters/${chapter.id}/revise`, { method: 'POST', body: { instruction, writer: ui.writer.value } });

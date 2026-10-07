@@ -1,4 +1,4 @@
-import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast } from './lib.js';
+import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast, askText } from './lib.js';
 
 // Storyboard: an idea becomes a shot list; each shot gets a still frame, then a clip; clips join into one video.
 const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '' };
@@ -35,17 +35,24 @@ function show(detail) {
 // Poll while any frame or clip is still being made.
 function watch() {
   clearTimeout(ui.timer);
-  const joiningNow = ui.detail?.sequence.join?.state === 'running';
+  const seq = ui.detail?.sequence;
+  const joiningNow = seq?.join?.state === 'running' || seq?.production?.state === 'running' || seq?.enhance?.state === 'running';
   if (!joiningNow && !ui.detail?.shots.some((s) => jobActive(s.frameJob) || jobActive(s.clipJob))) return;
   ui.timer = setTimeout(guard(async () => {
     if (!ui.detail || $('#storyboard-view').classList.contains('hidden')) return;
-    const snapshot = (d) => JSON.stringify([d.sequence.join, d.sequence.outputPath, d.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath])]);
+    const snapshot = (d) => JSON.stringify([d.sequence.join, d.sequence.production, d.sequence.enhance, d.sequence.outputPath, d.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath])]);
     const before = snapshot(ui.detail);
     const next = await call(`/api/storyboards/${ui.detail.sequence.id}`, 'GET');
     const after = snapshot(next);
     const join = next.sequence.join;
-    if (ui.detail.sequence.join?.state === 'running' && join?.state === 'completed') toast(`Joined ${join.total} clip(s) into a ${clock(join.duration ?? 0)} video${join.skipped ? `; ${join.skipped} shot(s) without a clip were skipped` : ''}.`);
+    if (ui.detail.sequence.join?.state === 'running' && join?.state === 'completed') toast(`Joined ${join.clips} clip(s) into a ${clock(join.duration ?? 0)} video${join.skipped ? `; ${join.skipped} shot(s) without a clip were skipped` : ''}.`);
     if (ui.detail.sequence.join?.state === 'running' && join?.state === 'failed') toast(join.error, 'error');
+    const [was, now] = [ui.detail.sequence.production, next.sequence.production];
+    if (was?.state === 'running' && now?.state === 'completed') toast('Your film is ready.');
+    if (was?.state === 'running' && now?.state === 'paused' && now.error) toast(now.error, 'error');
+    const [enhBefore, enhAfter] = [ui.detail.sequence.enhance, next.sequence.enhance];
+    if (enhBefore?.state === 'running' && enhAfter?.state === 'completed') toast(`Enhanced to ${enhAfter.width}×${enhAfter.height}. It is in the library.`);
+    if (enhBefore?.state === 'running' && enhAfter?.state === 'failed') toast(enhAfter.error, 'error');
     if (before === after) return watch();
     // Leaving a field saves it; do that before redrawing so typing is not lost.
     if ($('#sb-editor').contains(document.activeElement)) document.activeElement.blur();
@@ -156,10 +163,20 @@ function settingsPanel() {
       show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
     }) }, 'Animate all'),
     h('span.toolbar-sep'),
+    sequence.production?.state === 'running'
+      ? h('button.button.secondary.small', { onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/stop`))) }, 'Stop production')
+      : h('button.button.primary.small', {
+        disabled: !withFrames.length || !ui.options?.ffmpeg || joiningNow, title: 'Make every missing frame and clip, then join them into the finished film',
+        onclick: guard(async () => {
+          const missing = withFrames.filter((s) => !s.videoPath).length;
+          if (missing && !confirm(`Produce the film? Lumina will make ${missing} clip(s) (${clock(runtime)} in total)${settings.continuity === 'chain' ? ', one after another so each continues from the last' : ''}, then join them. Video takes minutes per clip.${clipCost ? `\n\nAt list prices: ${clipCost} for all clips.` : ''}`)) return;
+          show(await call(`/api/storyboards/${sequence.id}/produce`));
+        }),
+      }, '🎬 Produce film'),
     h('button.button.secondary.small', {
       disabled: !clips || !ui.options?.ffmpeg || Boolean(ui.busy) || joiningNow, title: ui.options?.ffmpeg ? '' : 'Needs ffmpeg installed on this computer (sudo apt install ffmpeg)',
       onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/stitch`))),
-    }, joiningNow ? `Joining… ${join.done}/${join.total} clips` : `Join ${clips} clip(s) into one video`),
+    }, joiningNow ? `Joining… step ${join.done}/${join.total}` : `Join ${clips} clip(s) into one video`),
     ui.options?.ffmpeg ? null : h('span.muted', {}, 'Joining needs ffmpeg, which isn\'t installed.'));
 
   return h('section.panel.sb-settings', {},
@@ -172,8 +189,9 @@ function settingsPanel() {
       h('label', {}, h('span.field-label', {}, 'FRAME'), aspect),
       h('label', {}, h('span.field-label', {}, 'STYLE'), style),
       modelPicker('image', 'generate', 'IMAGE MODEL (FRAMES)'),
-      modelPicker('video', 'video', 'VIDEO MODEL (CLIPS)')),
-    characters, actions,
+      modelPicker('video', 'video', 'VIDEO MODEL (CLIPS)'),
+      ...filmFields(settings)),
+    characters, actions, productionLine(sequence),
     h('p.muted', {}, [
       withFrames.length ? `Running time: ${clock(runtime)} across ${withFrames.length} shot(s)${settings.targetSeconds ? ` (target ${clock(settings.targetSeconds)})` : ''}.` : '',
       costLine ? `At list prices (${state.catalog?.pricesAsOf ?? 'recent'}): ${costLine}.` : '',
@@ -237,6 +255,57 @@ function shotCard(shot, index, total) {
         }) }, '✕'))));
 }
 
+// Film settings: how shots connect, clip length, look, and how the clips are joined.
+function filmFields(settings) {
+  const select = (label, key, options, value, cast = String) => {
+    const node = h('select', { 'aria-label': label, onchange: () => saveSettings({ [key]: cast(node.value) }) },
+      ...options.map(([v, text]) => h('option', { value: v }, text)));
+    node.value = String(value);
+    return h('label', {}, h('span.field-label', {}, label.toUpperCase()), node);
+  };
+  const lengths = videoChoice()?.model.durations?.length ? videoChoice().model.durations : defaultLengths;
+  return [
+    select('Continuity', 'continuity', [['frames', 'Separate shots (own frame each)'], ['chain', 'Continuous (each clip starts where the last ended)']], settings.continuity),
+    select('Clip length', 'clipLength', [['0', 'Writer decides'], ...lengths.map((d) => [String(d), `${d} s every shot`])], settings.clipLength ?? 0, Number),
+    select('Look', 'realistic', [['true', 'Realistic live action'], ['false', 'As written (any style)']], settings.realistic !== false, (v) => v === 'true'),
+    select('Transitions', 'transition', [['cut', 'Hard cuts'], ['crossfade', 'Crossfades (0.5 s)']], settings.transition ?? 'cut'),
+    select('Finish', 'finish', [['none', 'None'], ['cinematic', 'Cinematic (2.39:1 bars, grain, fades)']], settings.finish ?? 'none'),
+  ];
+}
+
+function productionLine(sequence) {
+  const production = sequence.production;
+  if (!production) return null;
+  if (production.state === 'running') return h('p.badge', { dataset: { tone: 'busy' } }, `In production: ${production.step}…`);
+  if (production.state === 'paused') return h('p.error-text', {}, `Production paused: ${production.error ?? production.step}`);
+  return h('p.muted', {}, `Production finished. ${production.step ?? ''}`);
+}
+
+function enhanceRow(sequence) {
+  const status = sequence.enhance;
+  const outputId = sequence.outputAssetId;
+  const start = (mode, download = false) => guard(async () => {
+    try {
+      await call(`/api/assets/${outputId}/enhance`, 'POST', { mode, download });
+    } catch (error) {
+      if (error.data?.needsDownload && !download) {
+        if (confirm('AI upscaling uses Real-ESRGAN, which runs on your NVIDIA GPU. It is not installed yet.\n\nDownload it now from the official GitHub release (about 47 MB) into Lumina\'s data folder?')) return start(mode, true)();
+        return undefined;
+      }
+      throw error;
+    }
+    return show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
+  });
+  const running = status?.state === 'running';
+  return h('div.key-row.sb-enhance', {},
+    h('span.field-label', {}, 'ENHANCE'),
+    h('button.button.secondary.small', { disabled: running, title: 'GPU upscaling (libplacebo, EWA Lanczos) to twice the size, up to 4K. Takes seconds to minutes.', onclick: start('fast') }, 'Sharpen + 2× (fast, GPU)'),
+    h('button.button.secondary.small', { disabled: running, title: 'Real-ESRGAN AI super-resolution on your NVIDIA GPU: adds real detail, but takes about a second or more per frame.', onclick: start('ai') }, 'AI upscale 2× (Real-ESRGAN, slow)'),
+    running ? h('span.badge', { dataset: { tone: 'busy' } }, `Enhancing (${status.mode === 'ai' ? 'AI' : 'fast'})… ${status.done}/${status.total}`) : null,
+    status?.state === 'failed' ? h('span.error-text', {}, status.error) : null,
+    status?.state === 'completed' ? h('span.muted', {}, `Enhanced copy (${status.width}×${status.height}) saved to the library.`) : null);
+}
+
 function render() {
   const editor = $('#sb-editor');
   if (!ui.detail) {
@@ -249,6 +318,7 @@ function render() {
       h('div.panel-topline', {}, h('span.section-title', {}, 'Joined video'),
         h('button.button.secondary.small', { onclick: () => downloadAsset(sequence.outputPath, `${sequence.title}.mp4`) }, 'Download')),
       h('video', { src: sequence.outputPath, controls: true, preload: 'metadata' }),
+      enhanceRow(sequence),
       h('p.muted.small-note', {}, 'Re-join after changing clips to update this video.')) : null,
     h('div.sb-shots', {}, ...shots.map((shot, index) => shotCard(shot, index, shots.length))),
     h('button.button.secondary.small', { disabled: shots.length >= (ui.options?.maxShots ?? 60), onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/shots`, 'POST', { description: '' }))) }, '+ Add a shot'),
@@ -258,7 +328,7 @@ function render() {
 export function initStoryboard() {
   $('#sb-select').addEventListener('change', guard(async () => show(await call(`/api/storyboards/${$('#sb-select').value}`, 'GET'))));
   $('#sb-new').addEventListener('click', guard(async () => {
-    const title = prompt('Name this storyboard', 'Untitled storyboard');
+    const title = await askText('New storyboard', { label: 'Title', value: 'Untitled storyboard', okLabel: 'Create' });
     if (title === null) return;
     const image = modelsFor('generate').find((o) => o.provider.ready);
     const video = modelsFor('video').find((o) => o.provider.ready);
