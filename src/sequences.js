@@ -232,10 +232,15 @@ export function createSequenceService({ repo, directors, keys, generations, asse
 
   const busyJob = (target) => ['queued', 'running'].includes(latest(target)?.status);
   const advancing = new Set();
+  const rerun = new Set(); // a job finished while advance() was busy: look again when it is done
 
   async function advance(id) {
     const production = producing.get(id);
-    if (production?.state !== 'running' || advancing.has(id)) return;
+    if (production?.state !== 'running') return;
+    if (advancing.has(id)) {
+      rerun.add(id);
+      return;
+    }
     advancing.add(id);
     try {
       const sequence = needSequence(id);
@@ -283,6 +288,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       Object.assign(production, { state: 'paused', error: error.message });
     } finally {
       advancing.delete(id);
+      if (rerun.delete(id)) await advance(id);
     }
   }
 

@@ -10,6 +10,27 @@ export const run = (command, args, timeout) => new Promise((resolve, reject) => 
   });
 });
 
+// A small NVENC probe can succeed even when a real encode later fails (for example after a driver reset).
+// Retry that command once with libx264 so a transient or unavailable GPU does not strand the job.
+export async function runVideo(args, timeout) {
+  try {
+    return await run('ffmpeg', args, timeout);
+  } catch (error) {
+    if (!args.includes('h264_nvenc')) throw error;
+    // Later encodes in this process use the CPU encoder too, so pieces of one film stay alike.
+    encoderChoice = Promise.resolve(cpuEncoder);
+    const fallback = [];
+    for (let index = 0; index < args.length; index += 1) {
+      if (args[index] === '-c:v' && args[index + 1] === 'h264_nvenc') {
+        fallback.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
+        index += 1;
+      } else if (['-preset', '-tune', '-rc', '-cq', '-b:v'].includes(args[index])) index += 1;
+      else fallback.push(args[index]);
+    }
+    return run('ffmpeg', fallback, timeout);
+  }
+}
+
 export async function hasFfmpeg() {
   try {
     await run('ffmpeg', ['-version'], 10_000);
@@ -27,13 +48,15 @@ export async function probe(file) {
   const [num, den] = String(video.avg_frame_rate || video.r_frame_rate || '30/1').split('/').map(Number);
   return {
     width: video.width, height: video.height, duration: Number(info.format?.duration ?? video.duration ?? 0),
-    fps: num && den ? num / den : 30, hasAudio: Boolean(info.streams?.some((s) => s.codec_type === 'audio')),
+    fps: num && den ? num / den : 30, frames: Number(video.nb_frames) || null,
+    hasAudio: Boolean(info.streams?.some((s) => s.codec_type === 'audio')),
   };
 }
 
 // H.264 encoder settings: NVIDIA NVENC when this computer's ffmpeg and GPU can use it (much faster), otherwise
 // libx264. Checked once with a tiny test encode. LUMINA_NO_NVENC=1 forces the CPU encoder.
 let encoderChoice = null;
+const cpuEncoder = { name: 'x264', args: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p'] };
 export function videoEncoder() {
   encoderChoice ??= (async () => {
     if (process.env.LUMINA_NO_NVENC !== '1') {
@@ -42,7 +65,7 @@ export function videoEncoder() {
         return { name: 'nvenc', args: ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '19', '-b:v', '0', '-pix_fmt', 'yuv420p'] };
       } catch { /* no usable NVIDIA encoder */ }
     }
-    return { name: 'x264', args: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p'] };
+    return cpuEncoder;
   })();
   return encoderChoice;
 }
@@ -87,7 +110,7 @@ export async function stitchClips(files, { onProgress, transition = 'cut', finis
       const info = infos[index];
       const part = path.join(dir, `part-${String(index).padStart(4, '0')}.mp4`);
       const audioInput = info.hasAudio ? [] : ['-f', 'lavfi', '-t', String(Math.max(0.1, info.duration)), '-i', 'anullsrc=r=48000:cl=stereo'];
-      await run('ffmpeg', ['-v', 'error', '-i', file, ...audioInput,
+      await runVideo(['-v', 'error', '-i', file, ...audioInput,
         '-map', '0:v:0', '-map', info.hasAudio ? '0:a:0' : '1:a:0',
         '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p`,
         '-af', audioFormat, ...encode, '-video_track_timescale', '15360', ...audioArgs, '-shortest', '-y', part], 600_000);
@@ -105,13 +128,13 @@ export async function stitchClips(files, { onProgress, transition = 'cut', finis
         const start = index > 0 ? fade : 0;
         const end = part.duration - (index < parts.length - 1 ? fade : 0);
         const body = path.join(dir, `body-${String(index).padStart(4, '0')}.mp4`);
-        await run('ffmpeg', ['-v', 'error', '-i', part.file, '-ss', start.toFixed(3), '-t', (end - start).toFixed(3),
+        await runVideo(['-v', 'error', '-i', part.file, '-ss', start.toFixed(3), '-t', (end - start).toFixed(3),
           ...encode, '-video_track_timescale', '15360', ...audioArgs, '-y', body], 600_000);
         pieces.push(body);
         step();
         if (index === parts.length - 1) break;
         const blend = path.join(dir, `blend-${String(index).padStart(4, '0')}.mp4`);
-        await run('ffmpeg', ['-v', 'error', '-ss', (part.duration - fade).toFixed(3), '-i', part.file, '-t', fade.toFixed(3), '-i', parts[index + 1].file,
+        await runVideo(['-v', 'error', '-ss', (part.duration - fade).toFixed(3), '-i', part.file, '-t', fade.toFixed(3), '-i', parts[index + 1].file,
           '-filter_complex', `[0:v]setpts=PTS-STARTPTS,fps=30[a];[1:v]setpts=PTS-STARTPTS,fps=30[b];[a][b]xfade=transition=fade:duration=${fade}:offset=0,format=yuv420p[v];`
             + `[0:a]asetpts=PTS-STARTPTS[x];[1:a]asetpts=PTS-STARTPTS[y];[x][y]acrossfade=d=${fade}[au]`,
           '-map', '[v]', '-map', '[au]', '-t', fade.toFixed(3), ...encode, '-video_track_timescale', '15360', ...audioArgs, '-y', blend], 600_000);
@@ -134,7 +157,7 @@ export async function stitchClips(files, { onProgress, transition = 'cut', finis
       if (width > height && bar >= 4) filters.push(`drawbox=x=0:y=0:w=iw:h=${bar}:color=black:t=fill`, `drawbox=x=0:y=ih-${bar}:w=iw:h=${bar}:color=black:t=fill`);
       filters.push('noise=alls=5:allf=t', `fade=t=in:st=0:d=1`, `fade=t=out:st=${fadeOut}:d=1.5`, 'format=yuv420p');
       const finished = path.join(dir, 'finished.mp4');
-      await run('ffmpeg', ['-v', 'error', '-i', out, '-vf', filters.join(','), '-af', `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOut}:d=1.5`,
+      await runVideo(['-v', 'error', '-i', out, '-vf', filters.join(','), '-af', `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOut}:d=1.5`,
         ...encode, ...audioArgs, '-movflags', '+faststart', '-y', finished], 1_800_000);
       out = finished;
       step();

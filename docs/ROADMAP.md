@@ -45,6 +45,9 @@
 - OpenRouter as a universal key: images, video and writing through one account.
 - Storyboards for longer films: up to 60 shots and a target length (5-minute films), model-aware shot lengths,
   background joining with progress.
+- Movie mode: Produce film, continuous (chained) shots, long takes, realistic direction, crossfades, cinematic finish.
+- Enhance video: libplacebo GPU scaling or Real-ESRGAN on the NVIDIA GPU.
+- In-app dialogs instead of window.prompt() (which the desktop app does not support).
 - One-click hosting: Cloudflare quick tunnel, the Lumina website behind an account sign-in (username and password), and the claude.ai/ChatGPT
   connector on the same address.
 
@@ -76,8 +79,9 @@
 - Inpainting sends a mask that is white where the image should change. fal's FLUX.1 Fill page does not state its mask convention;
   white-means-repaint is assumed and untested against the live API.
 - Joining storyboard clips needs ffmpeg and ffprobe on the computer. The joined video has no added narration or music.
-- Each storyboard clip starts from its own frame; continuity between shots depends on the frames and the character
-  references, not on the previous clip's last frame.
+- Continuous mode carries the picture from clip to clip, but each model still invents motion on its own, so faces and
+  props can drift over many shots; character references help. Sound is per clip (no soundtrack or narration across the film yet).
+- AI upscaling is slow (Real-ESRGAN x4plus, about a second or more per frame on an RTX card), so a five-minute film takes hours.
 - One-click hosting uses Cloudflare quick tunnels: a new random address each time, no uptime guarantee. Anyone with your
   Lumina password gets full use of Lumina and your provider credits.
 - Prices are list prices read on the date shown in the app. They can be out of date, and the provider's bill is what counts.

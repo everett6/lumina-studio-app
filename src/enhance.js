@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { probe, run, videoEncoder } from './video.js';
+import { probe, run, runVideo, videoEncoder } from './video.js';
 import { readZip } from './zip.js';
 
 // Video enhancement on this computer's GPU.
@@ -65,11 +65,11 @@ export function createEnhancer({ binDir, workDir, log = console }) {
   }
 
   // Returns { bytes, width, height, duration } for the enhanced MP4.
-  async function enhanceVideo(file, { mode = 'fast', allowDownload = false, onProgress } = {}) {
+  async function enhanceVideo(file, { mode = 'fast', allowDownload = false, onProgress, preparedTool } = {}) {
     const info = await probe(file);
     const size = targetSize(info.width, info.height);
     if (size.width <= info.width) throw Object.assign(new Error('This video is already 4K; there is nothing to upscale.'), { status: 400 });
-    const tool = mode === 'ai' ? await aiTool({ allowDownload }) : null;
+    const tool = mode === 'ai' ? preparedTool ?? await aiTool({ allowDownload }) : null;
     const { args: encode } = await videoEncoder();
     mkdirSync(workDir ?? path.dirname(file), { recursive: true });
     const dir = await mkdtemp(path.join(workDir ?? path.dirname(file), 'lumina-enhance-'));
@@ -80,17 +80,18 @@ export function createEnhancer({ binDir, workDir, log = console }) {
         onProgress?.(0, 1);
         const gpu = `libplacebo=w=${size.width}:h=${size.height}:upscaler=ewa_lanczossharp:format=yuv420p`;
         const cpu = `scale=${size.width}:${size.height}:flags=lanczos,format=yuv420p`;
+        const streams = ['-map', '0:v:0', ...(info.hasAudio ? ['-map', '0:a:0'] : [])];
         try {
-          await run('ffmpeg', ['-v', 'error', '-i', file, '-vf', `${gpu},unsharp=5:5:0.5`, ...encode, '-c:a', 'copy', '-movflags', '+faststart', '-y', out], 1_800_000);
+          await runVideo(['-v', 'error', '-i', file, ...streams, '-vf', `${gpu},unsharp=5:5:0.5`, ...encode, '-c:a', 'copy', '-movflags', '+faststart', '-y', out], 1_800_000);
         } catch (error) {
           log.info?.('GPU scaler unavailable, using CPU Lanczos', { detail: error.message });
-          await run('ffmpeg', ['-v', 'error', '-i', file, '-vf', `${cpu},unsharp=5:5:0.5`, ...encode, '-c:a', 'copy', '-movflags', '+faststart', '-y', out], 1_800_000);
+          await runVideo(['-v', 'error', '-i', file, ...streams, '-vf', `${cpu},unsharp=5:5:0.5`, ...encode, '-c:a', 'copy', '-movflags', '+faststart', '-y', out], 1_800_000);
         }
         onProgress?.(1, 1);
       } else {
         // In chunks of frames so the 4x intermediate images never fill the disk.
         const fps = info.fps || 30;
-        const totalFrames = Math.max(1, Math.round(info.duration * fps));
+        const totalFrames = Math.max(1, info.frames ?? Math.round(info.duration * fps));
         const chunks = Math.ceil(totalFrames / chunkFrames);
         const parts = [];
         for (let index = 0; index < chunks; index += 1) {
@@ -102,10 +103,15 @@ export function createEnhancer({ binDir, workDir, log = console }) {
           mkdirSync(upscaled);
           const first = index * chunkFrames;
           await run('ffmpeg', ['-v', 'error', '-ss', (first / fps).toFixed(4), '-i', file, '-frames:v', String(Math.min(chunkFrames, totalFrames - first)), '-start_number', '0', path.join(frames, '%05d.png')], 600_000);
-          if (!readdirSync(frames).length) break;
+          const inputFrames = readdirSync(frames).filter((name) => /^\d{5}\.png$/.test(name)).length;
+          // Container frame counts can overstate by a frame or two: an empty last chunk just ends the video.
+          if (!inputFrames && index > 0) break;
+          if (!inputFrames) throw new Error('Could not read any frames from this video.');
           await exec(tool.binary, ['-i', frames, '-o', upscaled, '-n', 'realesrgan-x4plus', '-s', '4', '-f', 'png', ...(tool.models ? ['-m', tool.models] : [])], { timeout: 1_800_000 });
+          const outputFrames = readdirSync(upscaled).filter((name) => /^\d{5}\.png$/.test(name)).length;
+          if (outputFrames !== inputFrames) throw new Error(`Real-ESRGAN returned ${outputFrames} of ${inputFrames} frames in chunk ${index + 1}.`);
           const part = path.join(dir, `part-${String(index).padStart(5, '0')}.mp4`);
-          await run('ffmpeg', ['-v', 'error', '-framerate', String(fps), '-start_number', '0', '-i', path.join(upscaled, '%05d.png'),
+          await runVideo(['-v', 'error', '-framerate', String(fps), '-start_number', '0', '-i', path.join(upscaled, '%05d.png'),
             '-vf', `scale=${size.width}:${size.height}:flags=lanczos,format=yuv420p`, ...encode, '-video_track_timescale', '15360', '-y', part], 600_000);
           parts.push(part);
           onProgress?.(index + 1, chunks);
@@ -127,13 +133,17 @@ export function createEnhancer({ binDir, workDir, log = console }) {
   const jobs = new Map();
   function start({ asset, assetStore, mode, allowDownload, onDone }) {
     if (jobs.get(asset.id)?.state === 'running') throw Object.assign(new Error('This video is already being enhanced.'), { status: 409 });
+    for (const [id, old] of jobs) {
+      if (jobs.size <= 100) break;
+      if (old.state !== 'running') jobs.delete(id);
+    }
     const job = { state: 'running', mode, done: 0, total: 1, error: null, assetId: null };
     jobs.set(asset.id, job);
-    const ready = mode === 'ai' ? aiTool({ allowDownload }) : Promise.resolve();
-    return ready.then(() => {
+    const ready = mode === 'ai' ? aiTool({ allowDownload }) : Promise.resolve(null);
+    return ready.then((preparedTool) => {
       (async () => {
         try {
-          const result = await enhanceVideo(assetStore.path(asset), { mode, onProgress: (done, total) => Object.assign(job, { done, total }) });
+          const result = await enhanceVideo(assetStore.path(asset), { mode, preparedTool, onProgress: (done, total) => Object.assign(job, { done, total }) });
           const saved = await assetStore.save({ bytes: result.bytes, projectId: asset.projectId, kind: 'video', label: `${asset.label ?? 'Video'} (enhanced ${result.width}×${result.height})`, parentAssetId: asset.id });
           Object.assign(job, { state: 'completed', assetId: saved.id, width: result.width, height: result.height });
           onDone?.(saved);

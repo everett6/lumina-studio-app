@@ -38,6 +38,8 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `create_storyboard` / `get_storyboard` / `update_shot` | Plan shots from an idea with a writer model, read the storyboard, edit a shot. |
 | `generate_shot` | Make one shot's still frame or video clip. **Spends money; clips are slow.** |
 | `generate_storyboard_shots` | Queue frames or clips for every shot at once (they run in the background); follow with `get_storyboard`. |
+| `produce_film` | Make every missing frame and clip and join the film in the background (continuous mode chains clips). |
+| `enhance_video` | 2x upscale of any video: fast GPU scaling or Real-ESRGAN AI on the NVIDIA GPU. |
 | `join_storyboard` | Join the clips into one MP4 in the background and wait up to 8 minutes for it (needs ffmpeg on the computer running Lumina). |
 | `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. `fixedLayout: true` makes a fixed-layout EPUB for a picture book. |
 

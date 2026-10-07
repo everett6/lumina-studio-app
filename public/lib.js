@@ -26,9 +26,12 @@ export function h(tag, props = {}, ...children) {
 // Resolves with the entered text (trimmed), or null when cancelled. `multiline` gives a textarea; `optional` allows ''.
 export function askText(title, { label = '', value = '', placeholder = '', multiline = false, optional = false, okLabel = 'OK' } = {}) {
   return new Promise((resolve) => {
+    let closed = false;
     const field = h(multiline ? 'textarea' : 'input', { value, placeholder, rows: multiline ? 4 : undefined, type: multiline ? undefined : 'text', maxLength: 2000, 'aria-label': label || title });
     const error = h('small.error-text');
     const finish = (result) => {
+      if (closed) return;
+      closed = true;
       overlay.remove();
       document.removeEventListener('keydown', onKey, true);
       resolve(result);
@@ -60,8 +63,19 @@ export function askText(title, { label = '', value = '', placeholder = '', multi
 // Pick one item from a list; resolves with the chosen item or null.
 export function askChoice(title, items, { describe = String, okLabel = 'Choose' } = {}) {
   return new Promise((resolve) => {
+    let closed = false;
     const select = h('select', { 'aria-label': title }, ...items.map((item, index) => h('option', { value: index }, describe(item))));
-    const finish = (result) => { overlay.remove(); resolve(result); };
+    const finish = (result) => {
+      if (closed) return;
+      closed = true;
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(result);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') { event.preventDefault(); finish(null); }
+      if (event.key === 'Enter') { event.preventDefault(); finish(items[Number(select.value)] ?? null); }
+    };
     const overlay = h('div.modal-backdrop', { onclick: (event) => event.target === overlay && finish(null) },
       h('div.modal.ask-modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
         h('div.modal-head', {}, h('b', {}, title), h('button.ghost', { onclick: () => finish(null), 'aria-label': 'Cancel' }, '✕')),
@@ -69,6 +83,7 @@ export function askChoice(title, items, { describe = String, okLabel = 'Choose' 
         h('div.ask-actions', {}, h('button.button.secondary.small', { onclick: () => finish(null) }, 'Cancel'),
           h('button.button.primary.small', { onclick: () => finish(items[Number(select.value)] ?? null) }, okLabel))));
     document.body.append(overlay);
+    document.addEventListener('keydown', onKey, true);
     select.focus();
   });
 }

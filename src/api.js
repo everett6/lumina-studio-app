@@ -261,9 +261,12 @@ export function createApiServer(ctx) {
   route('POST', `/api/assets/${uuid}/enhance`, async (req, [id]) => {
     const asset = repo.assets.get(id);
     if (!asset) throw new RequestError(404, 'Video not found.');
-    if (!asset.mimeType.startsWith('video/')) throw new RequestError(400, 'Only videos can be enhanced here (use Upscale for images).');
-    if (!(await hasFfmpeg())) throw new RequestError(501, 'Enhancing video needs ffmpeg (on Debian/Ubuntu: sudo apt install ffmpeg).');
     const body = await readBody(req, 1024);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new RequestError(400, 'Invalid request body.');
+    if (body.mode !== undefined && !['fast', 'ai'].includes(body.mode)) throw new RequestError(400, 'Choose fast or AI enhancement.');
+    if (body.download !== undefined && typeof body.download !== 'boolean') throw new RequestError(400, 'Download must be true or false.');
+    if (!asset.mimeType?.startsWith('video/')) throw new RequestError(400, 'Only videos can be enhanced here (use Upscale for images).');
+    if (!(await hasFfmpeg())) throw new RequestError(501, 'Enhancing video needs ffmpeg (on Debian/Ubuntu: sudo apt install ffmpeg).');
     try {
       const job = await enhancer.start({ asset, assetStore, mode: body.mode === 'ai' ? 'ai' : 'fast', allowDownload: body.download === true });
       return { status: 202, body: { enhance: job } };

@@ -337,6 +337,7 @@ test('Produce film: chained shots start from the previous clip\'s last frame, th
     assert.ok(Math.max(...row) < 30, 'top rows are black letterbox');
 
     const outputId = assets.find((a) => a.path === done.sequence.outputPath)?.id ?? (await t.call('GET', `/api/projects/${project.id}`)).body.assets.find((a) => a.path === done.sequence.outputPath).id;
+    assert.equal((await t.call('POST', `/api/assets/${outputId}/enhance`, { mode: 'unknown' })).status, 400);
     const enhance = await t.call('POST', `/api/assets/${outputId}/enhance`, { mode: 'fast' });
     assert.equal(enhance.status, 202, JSON.stringify(enhance.body));
     let status;
