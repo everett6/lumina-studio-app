@@ -67,10 +67,13 @@ async function render() {
 
 let remoteTimer = null;
 
+let goingOnline = false;
+
 async function renderRemote() {
   const status = await api('/api/settings/remote');
   const s = status.settings;
-  const url = h('input', { type: 'text', value: s.publicUrl, placeholder: 'https://your-tunnel.example.com', 'aria-label': 'Public HTTPS URL' });
+  const hosted = s.hosted && status.running;
+  const url = h('input', { type: 'text', value: hosted ? '' : s.publicUrl, placeholder: 'https://your-tunnel.example.com', 'aria-label': 'Public HTTPS URL' });
   const port = h('input', { type: 'number', min: 1024, max: 65535, value: s.port, 'aria-label': 'Local port' });
   const save = (enabled) => async () => {
     try {
@@ -80,13 +83,55 @@ async function renderRemote() {
       toast(error.message, 'error');
     }
   };
+  const goOnline = async (download = false) => {
+    goingOnline = true;
+    await renderRemote().catch(() => {});
+    try {
+      await api('/api/settings/remote/online', { method: 'POST', body: { download } });
+      toast('Lumina is online.');
+    } catch (error) {
+      if (error.data?.needsDownload && !download) {
+        goingOnline = false;
+        if (confirm('Hosting online uses Cloudflare\'s free "cloudflared" program (no account needed). It isn\'t installed.\n\nDownload it now from Cloudflare\'s official GitHub releases (about 40 MB) into Lumina\'s data folder?')) return goOnline(true);
+      } else {
+        toast(error.message, 'error');
+      }
+    } finally {
+      goingOnline = false;
+    }
+    return renderRemote();
+  };
   const pairing = status.pairing;
   const minutes = pairing ? Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60000)) : 0;
   const copy = (value) => () => navigator.clipboard?.writeText(value).then(() => toast('Copied.'), () => toast(value));
-  $('#remote-panel').replaceChildren(h('section.panel.remote-card', {},
-    h('p.muted', {}, 'Lets claude.ai connectors and ChatGPT apps use Lumina while this app is open. Your keys and files stay on this computer; you expose one local port through an HTTPS tunnel you control, and approve each new connection with a pairing code.'),
+  const pairingRow = status.running ? h('div.remote-url', {},
+    h('span.field-label', {}, 'PAIRING CODE'),
+    pairing ? h('code.pairing-code', {}, pairing.code) : h('span.muted', {}, 'none active'),
+    pairing ? h('span.muted', {}, `single use · expires in ~${minutes} min`) : null,
+    h('button.button.secondary.small', { onclick: async () => { await api('/api/settings/remote/pairing', { method: 'POST', body: {} }); await renderRemote(); } }, pairing ? 'New code' : 'Show a pairing code')) : null;
+
+  const tunnelState = status.tunnel?.state;
+  const busy = goingOnline || ['downloading', 'starting'].includes(tunnelState);
+  const oneClick = h('section.panel.remote-card.host-card', {},
+    h('div.key-head', {}, h('b', {}, 'Host Lumina online'), h(`span.badge${hosted ? '.ok' : ''}`, {}, hosted ? 'Online' : busy ? 'Starting…' : 'Off')),
+    h('p.muted', {}, 'One click gives Lumina a public https:// address through a free Cloudflare tunnel: open the website from any browser or phone, and add it to Claude (or ChatGPT) as a connector. Your keys and files stay on this computer, and it only works while Lumina is open.'),
+    hosted ? h('div.remote-url', {}, h('span.field-label', {}, 'WEBSITE'), h('a', { href: status.site, target: '_blank', rel: 'noopener noreferrer' }, status.site), h('button.text-button', { onclick: copy(status.site) }, 'Copy')) : null,
+    hosted ? h('div.remote-url', {}, h('span.field-label', {}, 'CLAUDE CONNECTOR URL'), h('code', {}, status.url), h('button.text-button', { onclick: copy(status.url) }, 'Copy')) : null,
+    hosted ? pairingRow : null,
+    hosted ? h('ol.remote-steps', {},
+      h('li', {}, 'Website: open the address above and sign in with the pairing code.'),
+      h('li', {}, 'Claude: claude.ai → Settings → Connectors → Add custom connector → paste the connector URL. When the approval page opens, enter a pairing code (each code works once — press "New code" for the next sign-in).'),
+      h('li', {}, 'The address changes each time Lumina goes online, so re-add the connector after a restart.')) : null,
+    h('div.key-row', {},
+      hosted
+        ? h('button.button.secondary.small', { onclick: async () => { await api('/api/settings/remote/offline', { method: 'POST', body: {} }); toast('Lumina is offline.'); await renderRemote(); } }, 'Take offline')
+        : h('button.button.primary', { disabled: busy, onclick: () => goOnline(false) }, busy ? (tunnelState === 'downloading' ? 'Downloading cloudflared…' : 'Going online…') : '🌐 Put Lumina online'),
+      status.tunnel?.error && !hosted ? h('span.error-text', {}, status.tunnel.error) : null));
+
+  const manual = h('details.panel.remote-card', { open: s.enabled && !s.hosted },
+    h('summary', {}, h('b', {}, 'Use your own tunnel instead'), h('span.muted', {}, ' — for a permanent address (named Cloudflare tunnel, Tailscale Funnel, ngrok)')),
     h('ol.remote-steps', {},
-      h('li', {}, 'Start a tunnel to ', h('code', {}, `http://127.0.0.1:${s.port}`), ' — for example ', h('code', {}, `cloudflared tunnel --url http://127.0.0.1:${s.port}`), ', ', h('code', {}, `tailscale funnel ${s.port}`), ' or ', h('code', {}, `ngrok http ${s.port}`), '.'),
+      h('li', {}, 'Start a tunnel to ', h('code', {}, `http://127.0.0.1:${s.port}`), ' — for example ', h('code', {}, `tailscale funnel ${s.port}`), ' or ', h('code', {}, `ngrok http ${s.port}`), '.'),
       h('li', {}, 'Paste the tunnel\'s https:// address below and turn remote access on.'),
       h('li', {}, 'In claude.ai, add a custom connector (Settings → Connectors). In ChatGPT, turn on developer mode and add a custom MCP connector. Use the connector URL shown below.'),
       h('li', {}, 'When the approval page opens, enter the pairing code from here.')),
@@ -94,28 +139,25 @@ async function renderRemote() {
       h('label', {}, h('span.field-label', {}, 'PUBLIC HTTPS URL (YOUR TUNNEL)'), url),
       h('label', {}, h('span.field-label', {}, 'LOCAL PORT'), port)),
     h('div.key-row', {},
-      status.running
+      status.running && !hosted
         ? h('button.button.secondary.small', { onclick: save(false) }, 'Turn off')
-        : h('button.button.primary.small', { onclick: save(true) }, 'Turn on remote access'),
-      status.running ? h('button.button.secondary.small', { onclick: save(true) }, 'Save changes') : null,
-      h('span.badge' + (status.running ? '.ok' : ''), {}, status.running ? 'Running' : 'Off')),
+        : h('button.button.secondary.small', { onclick: save(true) }, 'Turn on remote access'),
+      status.running && !hosted ? h('button.button.secondary.small', { onclick: save(true) }, 'Save changes') : null),
     status.error ? h('p.error-text', {}, status.error) : null,
-    status.running ? h('div.remote-url', {}, h('span.field-label', {}, 'CONNECTOR URL'), h('code', {}, status.url), h('button.text-button', { onclick: copy(status.url) }, 'Copy')) : null,
-    status.running ? h('div.remote-url', {},
-      h('span.field-label', {}, 'PAIRING CODE'),
-      pairing ? h('code.pairing-code', {}, pairing.code) : h('span.muted', {}, 'none active'),
-      pairing ? h('span.muted', {}, `single use · expires in ~${minutes} min`) : null,
-      h('button.button.secondary.small', { onclick: async () => { await api('/api/settings/remote/pairing', { method: 'POST', body: {} }); await renderRemote(); } }, pairing ? 'New code' : 'Show a pairing code')) : null,
+    status.running && !hosted ? h('div.remote-url', {}, h('span.field-label', {}, 'CONNECTOR URL'), h('code', {}, status.url), h('button.text-button', { onclick: copy(status.url) }, 'Copy')) : null,
+    status.running && !hosted ? pairingRow : null);
+
+  $('#remote-panel').replaceChildren(oneClick, manual, h('section.panel.remote-card', {},
     h('div.key-row', {},
-      h('span.muted', {}, `${status.clients} connected client(s) · ${status.activeTokens} active session(s)`),
-      h('button.text-button.danger', { disabled: !status.clients, onclick: async () => {
-        if (!confirm('Disconnect every remote client? They will need a new pairing code to reconnect.')) return;
+      h('span.muted', {}, `${status.clients} connected client(s) · ${status.activeTokens} active session(s) · ${status.webSessions ?? 0} website sign-in(s)`),
+      h('button.text-button.danger', { disabled: !status.clients && !status.webSessions, onclick: async () => {
+        if (!confirm('Disconnect every remote client and website sign-in? They will need a new pairing code.')) return;
         await api('/api/settings/remote/revoke', { method: 'POST', body: {} });
         await renderRemote();
       } }, 'Disconnect all')),
-    h('p.muted.small-print', {}, 'Anyone who connects can spend your provider credits, so only approve connections you started yourself. Remote tools can\'t write files outside Lumina\'s exports folder.')));
+    h('p.muted.small-print', {}, 'Anyone who signs in or connects can use your projects and spend your provider credits, so only share pairing codes with yourself. Remote tools can\'t write files outside Lumina\'s exports folder.')));
   clearTimeout(remoteTimer);
-  if (status.running && pairing) remoteTimer = setTimeout(() => renderRemote().catch(() => {}), 30_000);
+  if ((status.running && pairing) || busy) remoteTimer = setTimeout(() => renderRemote().catch(() => {}), busy ? 2000 : 30_000);
 }
 
 export function initSettings() {

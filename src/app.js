@@ -51,7 +51,9 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   if (recovered.interrupted || recovered.resumed) log.info?.('Recovered jobs', recovered);
 
   let origin = null;
-  const remote = createRemoteGateway({ repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), log });
+  const remote = createRemoteGateway({
+    repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), binDir: path.join(dataRoot, 'bin'), tunnelCommand: process.env.LUMINA_TUNNEL_COMMAND || null, log,
+  });
   const server = createApiServer({
     repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, jobs, token, remote,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
@@ -64,6 +66,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   origin = `http://127.0.0.1:${address.port}`;
   const remoteStatus = await remote.start();
   if (remoteStatus.error) log.error?.('Remote access not started', { detail: remoteStatus.error });
+  remote.resume(); // reconnects the one-click public address in the background
   // Tools like the MCP server find the running app through this file.
   writeFileSync(path.join(dataDir, 'endpoint.json'), JSON.stringify({ url: origin, pid: process.pid, mode }), { mode: 0o600 });
 
@@ -71,7 +74,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     origin, port: address.port, token, tokenFile, launchUrl: `${origin}/?token=${token}`, repo, jobs, generations, canvasRunner, keys,
     remote,
     async close() {
-      await remote.stop();
+      await remote.shutdown();
       await new Promise((resolve) => server.close(resolve));
       server.closeAllConnections?.();
       db.close();

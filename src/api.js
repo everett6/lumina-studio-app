@@ -170,6 +170,16 @@ export function createApiServer(ctx) {
   route('GET', '/api/settings/remote', () => remote.status());
   route('PUT', '/api/settings/remote', async (req) => remote.update(await readBody(req, 4096)));
   route('POST', '/api/settings/remote/pairing', () => ({ pairing: remote.newPairingCode() }));
+  route('POST', '/api/settings/remote/online', async (req) => {
+    const body = await readBody(req, 1024);
+    try {
+      return await remote.goOnline({ allowDownload: body.download === true });
+    } catch (error) {
+      if (error.needsDownload) return { status: 428, body: { error: error.message, needsDownload: true } };
+      throw error.status ? new RequestError(error.status, error.message) : error;
+    }
+  });
+  route('POST', '/api/settings/remote/offline', () => remote.goOffline());
   route('POST', '/api/settings/remote/revoke', () => {
     remote.revokeAll();
     return remote.status();

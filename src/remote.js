@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import http from 'node:http';
+import net from 'node:net';
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -6,6 +8,7 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelconte
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { registerLuminaTools } from '../mcp/tools.js';
+import { createTunnel } from './tunnel.js';
 
 // Remote MCP endpoint for claude.ai connectors and ChatGPT apps.
 //
@@ -13,6 +16,10 @@ import { registerLuminaTools } from '../mcp/tools.js';
 // (Cloudflare Tunnel, Tailscale Funnel, ngrok…) and enters the public URL in Settings. Connecting clients
 // register themselves (OAuth dynamic client registration), then the user approves the connection in a browser
 // page by typing the pairing code shown in Lumina's Settings. Keys, files and jobs never leave this computer.
+//
+// "Host online" does the tunnel part in one click (Cloudflare quick tunnel, see tunnel.js). The same public
+// address also serves the Lumina website itself: visitors sign in with a pairing code, then every request is
+// passed to the local app with its token. Website sign-ins last 30 days and are revoked with everything else.
 
 const accessTtlSeconds = 3600;
 const refreshTtlSeconds = 30 * 24 * 3600;
@@ -22,9 +29,12 @@ const hash = (value) => createHash('sha256').update(value).digest('hex');
 const newToken = () => randomBytes(32).toString('base64url');
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-export const defaultRemoteSettings = { enabled: false, publicUrl: '', port: 8787 };
+export const defaultRemoteSettings = { enabled: false, publicUrl: '', port: 8787, hosted: false };
+const webTtlMs = 30 * 24 * 3600 * 1000;
+const webCookie = (req) => /(?:^|;\s*)lumina_web=([A-Za-z0-9_-]+)/.exec(req.headers.cookie ?? '')?.[1];
 
-export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, log = console }) {
+export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, binDir, tunnelCommand, log = console }) {
+  const tunnel = createTunnel({ binDir: binDir ?? exportDir, log, command: tunnelCommand });
   const codes = new Map();
   let pairing = null;
   let failedAttempts = [];
@@ -183,7 +193,54 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     const notAllowed = (req, res) => res.status(405).set('allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
     app.get('/mcp', auth, notAllowed);
     app.delete('/mcp', auth, notAllowed);
-    app.get('/', (req, res) => res.type('text').send('Lumina Studio remote MCP endpoint. Add this server in Claude or ChatGPT using the /mcp URL.'));
+    // The website: sign in with a pairing code, then everything else is the normal Lumina app.
+    const secure = base.protocol === 'https:' ? '; Secure' : '';
+    const pageHeaders = (res) => {
+      res.setHeader('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
+      res.setHeader('x-frame-options', 'DENY');
+      res.setHeader('cache-control', 'no-store');
+    };
+    app.get('/login', (req, res) => {
+      pageHeaders(res);
+      res.type('html').send(loginPage({}));
+    });
+    app.post('/login', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
+      pageHeaders(res);
+      const problem = checkPairing(String(req.body?.pairing_code ?? '').trim());
+      if (problem) return res.status(400).type('html').send(loginPage({ error: problem }));
+      const session = newToken();
+      repo.oauth.saveToken({ tokenHash: hash(session), kind: 'web', clientId: 'website', scopes: ['web'], resource: null, expiresAt: Date.now() + webTtlMs });
+      log.info?.('Website sign-in approved');
+      res.setHeader('set-cookie', `lumina_web=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${webTtlMs / 1000}${secure}`);
+      return res.redirect(303, '/');
+    });
+    app.post('/logout', (req, res) => {
+      const session = webCookie(req);
+      if (session) repo.oauth.deleteToken(hash(session));
+      res.setHeader('set-cookie', `lumina_web=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
+      res.redirect(303, '/login');
+    });
+    app.use((req, res) => {
+      const session = webCookie(req);
+      const stored = session ? repo.oauth.getToken(hash(session)) : null;
+      if (!stored || stored.kind !== 'web' || stored.expiresAt < Date.now()) {
+        if (req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.startsWith('/assets/')) return res.redirect(302, '/login');
+        return res.status(401).json({ error: 'Sign in again at /login.' });
+      }
+      // Same-origin writes only, as the local app enforces for itself.
+      if (req.headers.origin && req.headers.origin !== base.origin) return res.status(403).json({ error: 'Forbidden origin' });
+      const target = new URL(localOrigin());
+      const headers = { ...req.headers, host: target.host, authorization: `Bearer ${localToken}` };
+      for (const name of ['cookie', 'origin', 'referer', 'connection', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'cf-connecting-ip']) delete headers[name];
+      const upstream = http.request({ hostname: target.hostname, port: target.port, method: req.method, path: req.originalUrl, headers }, (answer) => {
+        const out = { ...answer.headers };
+        delete out['set-cookie'];
+        res.writeHead(answer.statusCode ?? 502, out);
+        answer.pipe(res);
+      });
+      upstream.on('error', () => { if (!res.headersSent) res.status(502).json({ error: 'Lumina is not answering.' }); else res.end(); });
+      req.pipe(upstream);
+    });
     return app;
   }
 
@@ -220,9 +277,51 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     return status;
   }
 
-  return {
-    start, stop, settings,
-    status: () => ({ ...status, settings: settings(), pairing: pairingInfo(), ...repo.oauth.stats() }),
+  // One click: start a quick tunnel to the gateway port, then turn remote access on at the address it gives.
+  async function goOnline({ allowDownload = false } = {}) {
+    await stop();
+    const port = await usablePort(settings().port);
+    const url = await tunnel.start(port, { allowDownload });
+    repo.settings.set('remote', { ...settings(), port, enabled: true, publicUrl: url, hosted: true });
+    await start();
+    if (!status.running) {
+      const problem = status.error;
+      tunnel.stop();
+      repo.settings.set('remote', { ...settings(), enabled: false, hosted: false });
+      throw Object.assign(new Error(`Could not start remote access: ${problem}`), { status: 502 });
+    }
+    if (!pairingInfo()) newPairingCode();
+    return api.status();
+  }
+
+  async function goOffline() {
+    tunnel.stop();
+    repo.settings.set('remote', { ...settings(), enabled: false, hosted: false });
+    await stop();
+    return api.status();
+  }
+
+  const api = {
+    start, stop, settings, goOnline, goOffline,
+    // At launch: bring the public address back if it was on when Lumina last closed (it will be a new address).
+    async resume() {
+      if (!settings().hosted) return null;
+      try {
+        return await goOnline();
+      } catch (error) {
+        log.error?.('Could not go back online', { detail: error.message });
+        return null;
+      }
+    },
+    async shutdown() {
+      tunnel.stop();
+      await stop();
+    },
+    status: async () => {
+      const current = settings();
+      const site = status.running ? new URL('/', current.publicUrl).href : null;
+      return { ...status, site, settings: current, pairing: pairingInfo(), tunnel: await tunnel.status(), ...repo.oauth.stats() };
+    },
     async update(changes) {
       const next = { ...settings() };
       if (typeof changes.enabled === 'boolean') next.enabled = changes.enabled;
@@ -232,9 +331,14 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
         if (!Number.isInteger(port) || port < 1024 || port > 65535) throw Object.assign(new Error('Choose a port between 1024 and 65535.'), { status: 400 });
         next.port = port;
       }
+      // Typing an address by hand means the user runs their own tunnel.
+      if (typeof changes.publicUrl === 'string' && changes.publicUrl.trim() && next.hosted) {
+        tunnel.stop();
+        next.hosted = false;
+      }
       repo.settings.set('remote', next);
       await start();
-      return this.status();
+      return api.status();
     },
     newPairingCode: () => ({ ...newPairingCode() }),
     revokeAll() {
@@ -242,6 +346,31 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
       codes.clear();
     },
   };
+  return api;
+}
+
+// The configured port when it is free, otherwise any free one (one-click hosting should not fail on a busy port).
+function usablePort(preferred) {
+  const tryPort = (port) => new Promise((resolve) => {
+    const probe = net.createServer().once('error', () => resolve(null)).listen(port, '127.0.0.1', () => {
+      const { port: got } = probe.address();
+      probe.close(() => resolve(got));
+    });
+  });
+  return tryPort(preferred).then((port) => port ?? tryPort(0));
+}
+
+function loginPage({ error }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in · Lumina Studio</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;background:#11110f;color:#eeede8;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}
+main{max-width:400px;width:100%;background:#181816;border:1px solid #2b2b27;border-radius:12px;padding:24px;box-sizing:border-box}h1{font-size:20px;margin:0 0 8px}
+p{color:#b8b8ae}input{font:24px ui-monospace,monospace;letter-spacing:.3em;width:100%;padding:10px;box-sizing:border-box;background:#11110f;color:#eeede8;border:1px solid #3a3a34;border-radius:8px;text-align:center}
+button{width:100%;margin-top:16px;padding:10px;border-radius:8px;border:0;font-weight:600;cursor:pointer;background:#d4f579;color:#171812}.error{color:#ff8f7a}</style></head>
+<body><main><h1>Open Lumina Studio</h1>
+<p>Enter the 6-digit pairing code from <b>Lumina → Settings → Remote access</b> on the computer running Lumina.</p>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ''}
+<form method="post" action="/login"><input name="pairing_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus aria-label="Pairing code">
+<button>Sign in</button></form></main></body></html>`;
 }
 
 function consentPage({ clientName, redirect, fields, error }) {

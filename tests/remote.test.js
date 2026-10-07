@@ -118,3 +118,65 @@ test('remote settings validation: non-HTTPS public URLs are refused', async () =
     await t.close();
   }
 });
+
+test('one-click hosting: tunnel address becomes the public URL; the website needs a pairing-code sign-in, then serves the app', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const dir = mkdtempSync(path.join(tmpdir(), 'lumina-tunnel-'));
+  const fake = path.join(dir, 'fake-cloudflared');
+  // Stands in for cloudflared: prints a quick-tunnel address the way cloudflared does, then stays running.
+  writeFileSync(fake, '#!/bin/sh\necho "INF |  https://quiet-river-test.trycloudflare.com  |" >&2\nexec sleep 600\n', { mode: 0o755 });
+  process.env.LUMINA_TUNNEL_COMMAND = fake;
+  const t = await startTestApp();
+  delete process.env.LUMINA_TUNNEL_COMMAND;
+  const port = await freePort();
+  const local = `http://127.0.0.1:${port}`;
+  try {
+    assert.equal((await t.call('PUT', '/api/settings/remote', { port })).status, 200);
+    const online = await t.call('POST', '/api/settings/remote/online', {});
+    assert.equal(online.status, 200, JSON.stringify(online.body));
+    assert.equal(online.body.running, true, online.body.error);
+    assert.equal(online.body.settings.hosted, true);
+    assert.equal(online.body.site, 'https://quiet-river-test.trycloudflare.com/');
+    assert.equal(online.body.url, 'https://quiet-river-test.trycloudflare.com/mcp');
+    assert.equal(online.body.tunnel.state, 'online');
+    const code = online.body.pairing.code;
+
+    // Not signed in: pages go to /login, API calls get 401.
+    const page = await fetch(`${local}/`, { redirect: 'manual' });
+    assert.equal(page.status, 302);
+    assert.equal(page.headers.get('location'), '/login');
+    assert.equal((await fetch(`${local}/api/projects`)).status, 401);
+    assert.match(await (await fetch(`${local}/login`)).text(), /pairing code/);
+    const wrong = await fetch(`${local}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form({ pairing_code: code === '000000' ? '111111' : '000000' }), redirect: 'manual' });
+    assert.equal(wrong.status, 400);
+    const signedIn = await fetch(`${local}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form({ pairing_code: code }), redirect: 'manual' });
+    assert.equal(signedIn.status, 303);
+    const cookie = signedIn.headers.get('set-cookie');
+    assert.match(cookie, /lumina_web=[A-Za-z0-9_-]+; HttpOnly; SameSite=Strict; Path=\/; Max-Age=\d+; Secure/);
+    const session = cookie.split(';')[0];
+
+    // Signed in: the Lumina app and its API come through, reads and writes alike.
+    const html = await fetch(`${local}/`, { headers: { cookie: session } });
+    assert.equal(html.status, 200);
+    assert.match(await html.text(), /<title>[^<]*Lumina/);
+    const made = await fetch(`${local}/api/projects`, { method: 'POST', headers: { cookie: session, 'content-type': 'application/json', origin: 'https://quiet-river-test.trycloudflare.com' }, body: JSON.stringify({ name: 'From my phone' }) });
+    assert.equal(made.status, 201, await made.clone().text());
+    const projects = await (await fetch(`${local}/api/projects`, { headers: { cookie: session } })).json();
+    assert.ok(projects.projects.some((p) => p.name === 'From my phone'));
+    // Cross-site writes are refused even with the cookie.
+    assert.equal((await fetch(`${local}/api/projects`, { method: 'POST', headers: { cookie: session, 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{}' })).status, 403);
+    assert.equal((await t.call('GET', '/api/settings/remote')).body.webSessions, 1);
+
+    // Revoking signs the website out too; going offline stops the tunnel and the gateway.
+    await t.call('POST', '/api/settings/remote/revoke', {});
+    assert.equal((await fetch(`${local}/api/projects`, { headers: { cookie: session } })).status, 401);
+    const off = (await t.call('POST', '/api/settings/remote/offline', {})).body;
+    assert.equal(off.running, false);
+    assert.equal(off.settings.hosted, false);
+    assert.equal(off.tunnel.state, 'off');
+  } finally {
+    await t.close();
+  }
+});

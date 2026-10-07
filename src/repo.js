@@ -320,6 +320,7 @@ export function createRepo(db) {
     stats: () => ({
       clients: db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get().n,
       activeTokens: db.prepare("SELECT COUNT(*) AS n FROM oauth_tokens WHERE kind = 'access' AND expires_at > ?").get(Date.now()).n,
+      webSessions: db.prepare("SELECT COUNT(*) AS n FROM oauth_tokens WHERE kind = 'web' AND expires_at > ?").get(Date.now()).n,
     }),
   };
 

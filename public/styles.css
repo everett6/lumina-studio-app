@@ -498,3 +498,6 @@ audio.result-media { max-width: 420px; }
   .character-grid { grid-template-columns: 1fr; }
   .character-refs { grid-template-columns: repeat(4, 1fr); }
 }
+.host-card { border-color: var(--lime); }
+.host-card .remote-url a { word-break: break-all; }
+details.remote-card > summary { cursor: pointer; }

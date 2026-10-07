@@ -37,7 +37,8 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `import_manuscript` | Create a novel or nonfiction book from existing text, split into chapters at its headings. |
 | `create_storyboard` / `get_storyboard` / `update_shot` | Plan shots from an idea with a writer model, read the storyboard, edit a shot. |
 | `generate_shot` | Make one shot's still frame or video clip. **Spends money; clips are slow.** |
-| `join_storyboard` | Join the clips into one MP4 (needs ffmpeg on the computer running Lumina). |
+| `generate_storyboard_shots` | Queue frames or clips for every shot at once (they run in the background); follow with `get_storyboard`. |
+| `join_storyboard` | Join the clips into one MP4 in the background and wait up to 8 minutes for it (needs ffmpeg on the computer running Lumina). |
 | `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. `fixedLayout: true` makes a fixed-layout EPUB for a picture book. |
 
 Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft
@@ -99,22 +100,36 @@ for them that keeps everything on your computer:
 
 - Lumina serves **MCP over Streamable HTTP** at `/mcp` on `127.0.0.1:<port>` (default 8787). It exposes the same tools
   as the local server, except that remote clients can't choose where exported files are written.
-- **You** make that port reachable over HTTPS with a tunnel you control, for example:
-  `cloudflared tunnel --url http://127.0.0.1:8787`, `tailscale funnel 8787` or `ngrok http 8787`.
+- The same address serves the **Lumina website**: visitors sign in at `/login` with a pairing code (30-day sign-in
+  cookie, HttpOnly, Secure, SameSite=Strict) and then use the normal app; cross-site writes are refused.
 - Clients sign in with **OAuth 2.1**: metadata discovery, dynamic client registration, authorization code with PKCE,
   1-hour access tokens and rotating 30-day refresh tokens. Only hashes of tokens are stored.
 - The approval page asks for the **6-digit pairing code** shown in Lumina → Settings → Remote access. Each code works
   once, expires after 15 minutes, and repeated wrong guesses are locked out. Settings → *Disconnect all* revokes every
-  client and token.
-- Lumina must be open (and the tunnel running) for the connector to work.
+  client, token and website sign-in.
+- Lumina must be open for the connector and website to work.
 
-### Set up
+### One click: Host Lumina online
 
-1. Start your tunnel and copy its `https://` address.
-2. Lumina → Settings → Remote access: paste the address, press **Turn on remote access**, then **Show a pairing code**.
-3. **claude.ai:** Settings → Connectors → add a custom connector with the connector URL shown (`https://…/mcp`).
+Settings → Remote access → **Put Lumina online** starts a Cloudflare *quick tunnel* (`cloudflared tunnel --url …`, no
+Cloudflare account needed) and turns remote access on at the address it gets. If `cloudflared` isn't installed, Lumina
+asks, then downloads Cloudflare's official Linux build from GitHub into its data folder (`bin/cloudflared`).
+
+1. Press **Put Lumina online**. The card shows the **website** and the **Claude connector URL** (`https://….trycloudflare.com/mcp`) and a pairing code.
+2. **Website:** open the address in any browser or phone and sign in with the pairing code.
+3. **claude.ai:** Settings → Connectors → *Add custom connector* → paste the connector URL. When the approval page opens,
+   enter a pairing code (press *New code* first if you used the last one for the website).
    **ChatGPT:** turn on developer mode and add a custom MCP connector with the same URL.
-4. When the approval page opens, enter the pairing code.
+
+Quick-tunnel addresses are random and change every time Lumina goes online (Lumina reconnects automatically at
+launch if it was online when closed), so re-add the connector after a restart. For a permanent address use your own
+tunnel below.
+
+### Your own tunnel (permanent address)
+
+1. Start a tunnel to `http://127.0.0.1:8787` (a named Cloudflare tunnel, `tailscale funnel 8787`, `ngrok http 8787`…).
+2. Settings → Remote access → *Use your own tunnel instead*: paste the address, press **Turn on remote access**, then **Show a pairing code**.
+3. Add the connector URL in claude.ai or ChatGPT as above.
 
 ### Verified
 
@@ -123,5 +138,14 @@ with `resource_metadata`, discovery, registration, the consent page (a wrong cod
 once), a PKCE token exchange (a wrong verifier is rejected), MCP tool calls over HTTP (including an inline image),
 refresh-token rotation, and revocation.
 
-Not verified: an actual claude.ai or ChatGPT connection through a public tunnel. Those products may expect details
+The same file checks one-click hosting with a stand-in tunnel program: the tunnel address becomes the public URL,
+the website redirects to `/login`, a wrong code is refused, a right one signs in, the app and its API work through
+the proxy, cross-site writes are refused, revoking signs the website out, and going offline stops everything.
+
+On 2026-10-06 the real Cloudflare quick tunnel was run from a test instance: cloudflared was downloaded by the app,
+the public address answered from the internet (login redirect, sign-in, the app, OAuth metadata), and an MCP client
+completed registration, pairing-code approval and PKCE over the public address, then listed 38 tools, made an image,
+planned a storyboard, queued its clips and joined them.
+
+Not verified: an actual claude.ai or ChatGPT connection. Those products may expect details
 (scopes, metadata fields) that the local test doesn't cover. If a connection fails, the Lumina log shows the request.
