@@ -1,6 +1,7 @@
 import { $, api, emit, h, on, toast } from './lib.js';
 
 const keyProviders = [
+  { id: 'openrouter', label: 'OpenRouter — one key for everything', use: 'Universal key: images (Nano Banana, GPT Image, FLUX.2, Seedream), video (Veo 3.1, Kling 3.0, Seedance, Wan, Hailuo) and writing (Claude, GPT, Gemini) through one account', url: 'https://openrouter.ai/settings/keys' },
   { id: 'openai', label: 'OpenAI', use: 'GPT Image generation and edits; GPT creative director', url: 'https://platform.openai.com/api-keys' },
   { id: 'fal', label: 'fal.ai', use: 'FLUX generation and Kontext edits', url: 'https://fal.ai/dashboard/keys' },
   { id: 'gemini', label: 'Google Gemini', use: 'Gemini image generation and edits', url: 'https://aistudio.google.com/apikey' },

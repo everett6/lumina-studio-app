@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -30,33 +30,38 @@ async function probe(file) {
   };
 }
 
-// Joins clips end to end into one H.264/AAC MP4. Clips are scaled and padded to the first clip's frame size,
-// and clips without sound get silence so the audio track stays continuous.
-export async function stitchClips(files) {
+// Joins clips end to end into one H.264/AAC MP4. Each clip is first re-encoded on its own to the first clip's frame
+// size (scaled and padded), 30 fps and stereo AAC, with silence added to clips that have no sound; the uniform
+// pieces are then concatenated without re-encoding. Working clip by clip keeps memory flat, so a few minutes of
+// footage from dozens of shots joins as reliably as two. `onProgress(done, total)` reports each finished clip.
+export async function stitchClips(files, { onProgress } = {}) {
   if (!files.length) throw new Error('There are no clips to join.');
   const infos = [];
   for (const file of files) infos.push(await probe(file));
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
   const [width, height] = [even(infos[0].width), even(infos[0].height)];
-  const args = ['-v', 'error'];
-  files.forEach((file) => args.push('-i', file));
-  const silent = [];
-  infos.forEach((info, index) => {
-    if (info.hasAudio) return;
-    silent[index] = files.length + silent.filter((x) => x !== undefined).length;
-    args.push('-f', 'lavfi', '-t', String(Math.max(0.1, info.duration)), '-i', 'anullsrc=r=44100:cl=stereo');
-  });
-  const filters = infos.map((info, index) => [
-    `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v${index}]`,
-    `[${info.hasAudio ? index : silent[index]}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a${index}]`,
-  ].join(';'));
-  const concat = `${infos.map((_, index) => `[v${index}][a${index}]`).join('')}concat=n=${files.length}:v=1:a=1[v][a]`;
   const dir = await mkdtemp(path.join(tmpdir(), 'lumina-stitch-'));
-  const out = path.join(dir, 'out.mp4');
   try {
-    await run('ffmpeg', [...args, '-filter_complex', `${filters.join(';')};${concat}`, '-map', '[v]', '-map', '[a]',
-      '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', '-y', out], 900_000);
-    return { bytes: await readFile(out), width, height, duration: infos.reduce((sum, info) => sum + info.duration, 0) };
+    const parts = [];
+    for (const [index, file] of files.entries()) {
+      const info = infos[index];
+      const part = path.join(dir, `part-${String(index).padStart(4, '0')}.mp4`);
+      const audioInput = info.hasAudio ? [] : ['-f', 'lavfi', '-t', String(Math.max(0.1, info.duration)), '-i', 'anullsrc=r=44100:cl=stereo'];
+      await run('ffmpeg', ['-v', 'error', '-i', file, ...audioInput,
+        '-map', '0:v:0', '-map', info.hasAudio ? '0:a:0' : '1:a:0',
+        '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p`,
+        '-af', 'aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo',
+        '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-video_track_timescale', '15360',
+        '-c:a', 'aac', '-b:a', '160k', '-ar', '44100', '-ac', '2', '-shortest', '-y', part], 600_000);
+      parts.push(part);
+      onProgress?.(index + 1, files.length);
+    }
+    const list = path.join(dir, 'list.txt');
+    await writeFile(list, parts.map((part) => `file '${part.replace(/'/g, "'\\''")}'`).join('\n'));
+    const out = path.join(dir, 'out.mp4');
+    await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', out], 600_000);
+    const duration = (await probe(out)).duration;
+    return { bytes: await readFile(out), width, height, duration };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

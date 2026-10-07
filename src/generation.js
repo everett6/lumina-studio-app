@@ -18,6 +18,15 @@ export function providerPrompt(job) {
   return job.params?.characterNote ? `${composed}\n\n${job.params.characterNote}` : composed;
 }
 
+// The model's supported clip length closest to the one asked for (ties go to the longer one); the model's first
+// length when none was asked for.
+export function nearestDuration(durations, wanted) {
+  if (!durations?.length) return undefined;
+  const target = Number(wanted);
+  if (!Number.isFinite(target) || target <= 0) return durations[0];
+  return durations.reduce((best, d) => (Math.abs(d - target) < Math.abs(best - target) || (Math.abs(d - target) === Math.abs(best - target) && d > best) ? d : best));
+}
+
 // Validates a generation request against the chosen model's declared capabilities, then queues it.
 export function createGenerationService({ repo, providers, directors, keys, jobs }) {
   function resolveDirector(director) {
@@ -94,7 +103,7 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
       if (model.requiresImage && !inputAssetIds.length) throw new RequestError(400, `${model.label} needs a start image.`);
       params = media === 'speech'
         ? { voice: model.voices?.includes(input.voice) ? input.voice : model.voices?.[0] ?? null, style: typeof input.style === 'string' ? input.style.slice(0, 500) : null }
-        : { duration: model.durations?.includes(Number(input.duration)) ? Number(input.duration) : model.durations?.[0], aspect: model.aspects?.includes(input.aspect) ? input.aspect : model.aspects?.[0] ?? null };
+        : { duration: nearestDuration(model.durations, input.duration), aspect: model.aspects?.includes(input.aspect) ? input.aspect : model.aspects?.[0] ?? null };
       // A video's input image is its start frame, so characters contribute their description only.
       if (media === 'video') Object.assign(params, applyCharacters(input, { model, inputAssetIds, canTakeImages: false }));
     } else {

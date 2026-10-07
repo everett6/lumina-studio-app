@@ -4,6 +4,8 @@ import openai from '../src/providers/openai.js';
 import fal from '../src/providers/fal.js';
 import gemini from '../src/providers/gemini.js';
 import replicate from '../src/providers/replicate.js';
+import openrouter from '../src/providers/openrouter.js';
+import { createDirectors } from '../src/directors/index.js';
 import { userMessage } from '../src/providers/http.js';
 import { fakeFetch, tinyPng } from './helpers.js';
 
@@ -136,5 +138,47 @@ test('rate limits and non-https result URLs are categorized', async () => {
     await assert.rejects(replicate.run({ key: 'k', model: 'black-forest-labs/flux-schnell', prompt: 'p', size: '1024x1024', images: [] }), /non-HTTPS/);
   } finally {
     insecure.restore();
+  }
+});
+
+test('openrouter: one key for images (with references), video (start frame, poll, download) and the writer', async () => {
+  process.env.LUMINA_OPENROUTER_POLL_MS = '1';
+  const clip = Buffer.from('fake-mp4-bytes');
+  let polls = 0;
+  const fake = fakeFetch((url) => {
+    if (url.endsWith('/api/v1/images')) return { body: { data: [{ b64_json: b64, media_type: 'image/png' }], usage: { cost: 0.04 } } };
+    if (url.endsWith('/api/v1/videos')) return { body: { id: 'job1', polling_url: 'https://openrouter.ai/api/v1/videos/job1', status: 'pending' } };
+    if (url.endsWith('/api/v1/videos/job1')) {
+      polls += 1;
+      return { body: polls < 2 ? { id: 'job1', status: 'in_progress' } : { id: 'job1', status: 'completed', unsigned_urls: ['https://openrouter.ai/api/v1/videos/job1/content?index=0'], usage: { cost: 0.48 } } };
+    }
+    if (url.includes('/content')) return { body: clip };
+    if (url.endsWith('/chat/completions')) return { body: { choices: [{ message: { content: 'a refined prompt' }, finish_reason: 'stop' }] } };
+    if (url.endsWith('/api/v1/key')) return { body: { data: { limit_remaining: 12.5 } } };
+    return { status: 404, body: {} };
+  });
+  try {
+    const out = await openrouter.run({ key: 'or-key', model: 'google/gemini-3.1-flash-image', prompt: 'p', size: '1536x1024', images: [image] });
+    assert.deepEqual(out.bytes, png);
+    const sent = JSON.parse(fake.calls[0].options.body);
+    assert.equal(fake.calls[0].options.headers.authorization, 'Bearer or-key');
+    assert.equal(sent.aspect_ratio, '3:2');
+    assert.match(sent.input_references[0].image_url.url, /^data:image\/png;base64,/);
+
+    const video = await openrouter.video({ key: 'or-key', model: 'kwaivgi/kling-v3.0-pro', prompt: 'waves', image, duration: 12, aspect: '16:9' });
+    assert.deepEqual(video.bytes, clip);
+    const job = JSON.parse(fake.calls[1].options.body);
+    assert.equal(job.duration, 12);
+    assert.equal(job.aspect_ratio, '16:9');
+    assert.equal(job.frame_images[0].frame_type, 'first_frame');
+    const download = fake.calls.find((c) => c.url.includes('/content'));
+    assert.equal(download.options.headers.authorization, 'Bearer or-key');
+
+    const writer = createDirectors().get('openrouter');
+    assert.equal(await writer.refine({ key: 'or-key', model: 'anthropic/claude-sonnet-5.5', idea: 'apple' }), 'a refined prompt');
+    assert.match((await openrouter.validateKey('or-key')).message, /12\.50/);
+  } finally {
+    delete process.env.LUMINA_OPENROUTER_POLL_MS;
+    fake.restore();
   }
 });

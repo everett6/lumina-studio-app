@@ -11,7 +11,7 @@ import { envNames } from './keys.js';
 import { presetGroups, presets } from './presets.js';
 import { priceFor, pricesAsOf } from './pricing.js';
 import { userMessage } from './providers/http.js';
-import { cleanSequenceSettings } from './sequences.js';
+import { cleanSequenceSettings, maxShots, maxTargetSeconds } from './sequences.js';
 import { hasFfmpeg } from './video.js';
 
 const staticTypes = {
@@ -210,7 +210,7 @@ export function createApiServer(ctx) {
   });
 
   // ---------- Storyboards ----------
-  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings() }));
+  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings(), maxShots, maxTargetSeconds }));
   route('GET', `/api/projects/${uuid}/storyboards`, (req, [projectId]) => {
     needProject(projectId);
     return { storyboards: repo.sequences.listByProject(projectId) };
@@ -229,12 +229,16 @@ export function createApiServer(ctx) {
     return { deleted: repo.sequences.remove(id) };
   });
   route('POST', `/api/storyboards/${uuid}/plan`, async (req, [id]) => sequences.plan(id, await readBody(req, 4096)));
-  route('POST', `/api/storyboards/${uuid}/stitch`, (req, [id]) => sequences.stitch(id));
+  route('POST', `/api/storyboards/${uuid}/stitch`, async (req, [id]) => {
+    const body = await readBody(req, 1024);
+    const result = await sequences.stitch(id, { wait: body.wait === true });
+    return body.wait === true ? result : { status: 202, body: result };
+  });
   route('POST', `/api/storyboards/${uuid}/shots`, async (req, [id]) => {
     sequences.needSequence(id);
     const body = await readBody(req, 16_384);
     const count = repo.shots.listBySequence(id).length;
-    if (count >= 24) throw new RequestError(400, 'A storyboard can have at most 24 shots.');
+    if (count >= maxShots) throw new RequestError(400, `A storyboard can have at most ${maxShots} shots.`);
     repo.shots.insert(id, { position: count + 1, description: String(body.description ?? '').slice(0, 2000) });
     return { status: 201, body: sequences.detail(id) };
   });

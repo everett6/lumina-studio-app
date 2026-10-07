@@ -403,7 +403,8 @@ export function registerLuminaTools(server, client) {
   // ---------- Storyboards ----------
   const storyboardSummary = ({ sequence, shots }) => ({
     id: sequence.id, projectId: sequence.projectId, title: sequence.title, idea: sequence.idea, writer: sequence.writer, settings: sequence.settings,
-    hasJoinedVideo: Boolean(sequence.outputAssetId), joinedVideoAssetId: sequence.outputAssetId ?? undefined,
+    hasJoinedVideo: Boolean(sequence.outputAssetId), joinedVideoAssetId: sequence.outputAssetId ?? undefined, join: sequence.join ?? undefined,
+    runningSeconds: shots.reduce((sum, s) => sum + (s.duration ?? 0), 0),
     shots: shots.map((s) => ({
       id: s.id, position: s.position, description: s.description, camera: s.camera, duration: s.duration, frameAssetId: s.imageAssetId, clipAssetId: s.videoAssetId,
       frameStatus: s.frameJob?.status, clipStatus: s.clipJob?.status,
@@ -412,14 +413,15 @@ export function registerLuminaTools(server, client) {
 
   server.registerTool('create_storyboard', {
     title: 'Create storyboard',
-    description: 'Turn an idea into a storyboard: a writer model plans the shots (description, camera move, length). Next: generate_shot for frames and clips, then join_storyboard for one video. Planning costs a little on the writer\'s provider account.',
+    description: 'Turn an idea into a storyboard: a writer model plans the shots (description, camera move, length). For a film of a given length set targetMinutes (up to 15) and enough shots (a 5-minute film is about 30-40 shots). Next: generate_storyboard_shots (or generate_shot) for frames and clips, then join_storyboard for one video. Planning costs a little on the writer\'s provider account.',
     inputSchema: {
-      projectId: z.string(), title: z.string().min(1).max(80), idea: z.string().min(1).max(6000), shotCount: z.number().int().min(1).max(24).optional(),
+      projectId: z.string(), title: z.string().min(1).max(80), idea: z.string().min(1).max(6000), shotCount: z.number().int().min(1).max(60).optional(),
+      targetMinutes: z.number().min(0).max(15).optional().describe('Total running time the writer aims for'),
       aspect: z.enum(['16:9', '9:16', '1:1']).optional(), style: z.string().optional().describe('A style preset id from list_presets'), characterIds: charactersArg,
       writer: z.string().optional().describe('Writer model as "provider:model" (see list_models directors); defaults to the first ready one'),
       plan: z.boolean().optional().describe('Plan the shots now (default true)'),
     },
-  }, safe(async ({ projectId, title, idea, shotCount, aspect, style, characterIds, writer, plan = true }) => {
+  }, safe(async ({ projectId, title, idea, shotCount, targetMinutes, aspect, style, characterIds, writer, plan = true }) => {
     const { providers, directors } = await client.call('GET', '/api/catalog');
     const first = (operation) => providers.filter((p) => p.ready).flatMap((p) => p.models.filter((m) => m.operations.includes(operation)).map((m) => [p.id, m.id]))[0] ?? [];
     const readyWriter = directors.find((d) => d.ready);
@@ -427,7 +429,7 @@ export function registerLuminaTools(server, client) {
     const [videoProvider, videoModel] = first('video');
     const created = await client.call('POST', `/api/projects/${projectId}/storyboards`, {
       title, idea, writer: writer ?? (readyWriter ? `${readyWriter.id}:${readyWriter.models[0]}` : null),
-      settings: { shotCount, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel },
+      settings: { shotCount, targetSeconds: targetMinutes ? Math.round(targetMinutes * 60) : undefined, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel },
     });
     return ok(text(storyboardSummary(plan ? await client.call('POST', `/api/storyboards/${created.sequence.id}/plan`, {}) : created)));
   }));
@@ -453,14 +455,37 @@ export function registerLuminaTools(server, client) {
     return waitAndShow(generation, { shotId });
   }));
 
+  server.registerTool('generate_storyboard_shots', {
+    title: 'Generate all storyboard frames or clips',
+    description: 'Queue the still frame ("frames") or video clip ("clips") for every shot that does not have one yet (or every shot with redo: true). Returns at once; the jobs run in the background two at a time. Check progress with get_storyboard. Clips for a long film cost real money (e.g. 300 seconds of video) — confirm the price with the user first.',
+    inputSchema: { storyboardId: z.string(), kind: z.enum(['frames', 'clips']), redo: z.boolean().optional() },
+  }, safe(async ({ storyboardId, kind, redo = false }) => {
+    const detail = await client.call('GET', `/api/storyboards/${storyboardId}`);
+    const busy = (job) => job && ['queued', 'running'].includes(job.status);
+    const todo = detail.shots.filter((s) => s.description.trim() && (kind === 'frames'
+      ? (redo || !s.imageAssetId) && !busy(s.frameJob)
+      : (redo || !s.videoAssetId) && !busy(s.clipJob)));
+    const queued = [];
+    for (const shot of todo) queued.push((await client.call('POST', `/api/shots/${shot.id}/${kind === 'frames' ? 'frame' : 'animate'}`, {})).generation.id);
+    return ok(text({ queued: queued.length, generationIds: queued, next: 'Call get_storyboard to follow progress; join_storyboard once the clips are done.' }));
+  }));
+
   server.registerTool('join_storyboard', {
     title: 'Join storyboard clips',
-    description: 'Join the storyboard\'s clips, in shot order, into one MP4 saved in the project library. Needs ffmpeg on the computer running Lumina. Shots without a clip are skipped.',
+    description: 'Join the storyboard\'s clips, in shot order, into one MP4 saved in the project library. Needs ffmpeg on the computer running Lumina. Shots without a clip are skipped. Long films take a few minutes; if it is still running when this returns, call get_storyboard later.',
     inputSchema: { storyboardId: z.string() },
   }, safe(async ({ storyboardId }) => {
-    const result = await client.call('POST', `/api/storyboards/${storyboardId}/stitch`, {});
-    const file = client.localFile && result.sequence.outputPath ? client.localFile(result.sequence.outputPath) : undefined;
-    return ok(text({ ...storyboardSummary(result), joined: result.joined, skipped: result.skipped, seconds: Math.round(result.duration * 10) / 10, file }));
+    let result = await client.call('POST', `/api/storyboards/${storyboardId}/stitch`, {});
+    const deadline = Date.now() + 8 * 60_000;
+    while (result.sequence.join?.state === 'running' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      result = await client.call('GET', `/api/storyboards/${storyboardId}`);
+    }
+    const join = result.sequence.join;
+    if (join?.state === 'failed') throw new Error(join.error);
+    const file = client.localFile && join?.state === 'completed' && result.sequence.outputPath ? client.localFile(result.sequence.outputPath) : undefined;
+    return ok(text({ ...storyboardSummary(result), joined: join?.total, skipped: join?.skipped, done: join?.done, state: join?.state,
+      seconds: join?.duration ? Math.round(join.duration * 10) / 10 : undefined, file }));
   }));
 
   server.registerTool('export_book', {

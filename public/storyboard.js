@@ -4,6 +4,19 @@ import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor,
 const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '' };
 const jobActive = (job) => job && ['queued', 'running'].includes(job.status);
 const statusText = { queued: 'Queued', running: 'Generating…', failed: 'Failed', interrupted: 'Interrupted' };
+const defaultLengths = [4, 5, 6, 8, 10];
+const clock = (seconds) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
+
+// The chosen video model, and the clip length it will actually make for a shot (the nearest one it supports).
+function videoChoice() {
+  const settings = ui.detail?.sequence.settings ?? {};
+  return modelsFor('video').find((o) => o.provider.id === settings.videoProvider && o.model.id === settings.videoModel) ?? null;
+}
+function clipLength(duration) {
+  const lengths = videoChoice()?.model.durations;
+  if (!lengths?.length) return duration;
+  return lengths.reduce((best, d) => (Math.abs(d - duration) < Math.abs(best - duration) || (Math.abs(d - duration) === Math.abs(best - duration) && d > best) ? d : best));
+}
 
 const guard = (fn) => async (...args) => {
   try { await fn(...args); } catch (error) { toast(error.message, 'error'); }
@@ -22,12 +35,17 @@ function show(detail) {
 // Poll while any frame or clip is still being made.
 function watch() {
   clearTimeout(ui.timer);
-  if (!ui.detail?.shots.some((s) => jobActive(s.frameJob) || jobActive(s.clipJob))) return;
+  const joiningNow = ui.detail?.sequence.join?.state === 'running';
+  if (!joiningNow && !ui.detail?.shots.some((s) => jobActive(s.frameJob) || jobActive(s.clipJob))) return;
   ui.timer = setTimeout(guard(async () => {
     if (!ui.detail || $('#storyboard-view').classList.contains('hidden')) return;
-    const before = JSON.stringify(ui.detail.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath]));
+    const snapshot = (d) => JSON.stringify([d.sequence.join, d.sequence.outputPath, d.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath])]);
+    const before = snapshot(ui.detail);
     const next = await call(`/api/storyboards/${ui.detail.sequence.id}`, 'GET');
-    const after = JSON.stringify(next.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath]));
+    const after = snapshot(next);
+    const join = next.sequence.join;
+    if (ui.detail.sequence.join?.state === 'running' && join?.state === 'completed') toast(`Joined ${join.total} clip(s) into a ${clock(join.duration ?? 0)} video${join.skipped ? `; ${join.skipped} shot(s) without a clip were skipped` : ''}.`);
+    if (ui.detail.sequence.join?.state === 'running' && join?.state === 'failed') toast(join.error, 'error');
     if (before === after) return watch();
     // Leaving a field saves it; do that before redrawing so typing is not lost.
     if ($('#sb-editor').contains(document.activeElement)) document.activeElement.blur();
@@ -82,7 +100,18 @@ function settingsPanel() {
   const writer = h('select', { 'aria-label': 'Writer', onchange: () => saveFields({ writer: writer.value }) }, h('option', { value: '' }, 'Choose…'),
     ...(state.catalog?.directors ?? []).flatMap((d) => d.models.map((m) => h('option', { value: `${d.id}:${m}`, disabled: !d.ready }, `${d.label} · ${m}${d.ready ? '' : ' (add key)'}`))));
   writer.value = sequence.writer ?? '';
-  const count = h('input', { type: 'number', min: 1, max: 24, value: settings.shotCount, 'aria-label': 'Number of shots', onchange: () => saveSettings({ shotCount: Number(count.value) }) });
+  const maxShots = ui.options?.maxShots ?? 60;
+  const count = h('input', { type: 'number', min: 1, max: maxShots, value: settings.shotCount, 'aria-label': 'Number of shots', onchange: () => saveSettings({ shotCount: Number(count.value) }) });
+  // Target length in minutes; picking one also suggests a shot count that fits the video model's longest clip.
+  const target = h('input', { type: 'number', min: 0, max: (ui.options?.maxTargetSeconds ?? 900) / 60, step: 0.5, value: settings.targetSeconds ? settings.targetSeconds / 60 : '', placeholder: 'Any',
+    'aria-label': 'Target length in minutes', onchange: () => {
+      const seconds = Math.round(Number(target.value || 0) * 60);
+      const longest = Math.max(...(videoChoice()?.model.durations ?? [8]));
+      const typical = Math.min(longest, 8);
+      const change = { targetSeconds: seconds };
+      if (seconds) change.shotCount = Math.min(maxShots, Math.max(settings.shotCount, Math.ceil(seconds / typical)));
+      saveSettings(change);
+    } });
   const aspect = h('select', { 'aria-label': 'Frame', onchange: () => saveSettings({ aspect: aspect.value }) }, ...['16:9', '9:16', '1:1'].map((a) => h('option', { value: a }, a)));
   aspect.value = settings.aspect;
   const style = h('select', { 'aria-label': 'Style', onchange: () => saveSettings({ style: style.value }) }, h('option', { value: '' }, 'None'),
@@ -100,12 +129,16 @@ function settingsPanel() {
   // List-price estimates for the two bulk actions.
   const sizes = { '16:9': '1536x1024', '9:16': '1024x1536', '1:1': '1024x1024' };
   const pick = (kind, operation) => modelsFor(operation).find((o) => o.provider.id === settings[`${kind}Provider`] && o.model.id === settings[`${kind}Model`]);
-  const [imageChoice, videoChoice] = [pick('image', 'generate'), pick('video', 'video')];
+  const imageChoice = pick('image', 'generate');
+  const clipModel = pick('video', 'video');
   const total = (choice, jobs) => (choice && !choice.provider.keyless ? describeTotal(sumCosts(jobs.map((job) => estimateCost(choice.model, job)))) : '');
   const frameCost = total(imageChoice, withFrames.map(() => ({ size: sizes[settings.aspect] })));
-  const clipCost = total(videoChoice, withFrames.map((s) => ({ duration: videoChoice?.model.durations?.includes(s.duration) ? s.duration : videoChoice?.model.durations?.[0] })));
+  const clipCost = total(clipModel, withFrames.map((s) => ({ duration: clipLength(s.duration) })));
+  const runtime = withFrames.reduce((sum, s) => sum + clipLength(s.duration), 0);
   const costLine = [frameCost && `all frames ${frameCost}`, clipCost && `all clips ${clipCost}`].filter(Boolean).join(' · ');
   const clips = shots.filter((s) => s.videoPath).length;
+  const join = sequence.join;
+  const joiningNow = join?.state === 'running';
   const busy = (label, key) => (ui.busy === key ? 'Working…' : label);
   const actions = h('div.book-toolbar', {},
     h('button.button.primary.small', { disabled: Boolean(ui.busy), onclick: guard(async () => {
@@ -124,14 +157,9 @@ function settingsPanel() {
     }) }, 'Animate all'),
     h('span.toolbar-sep'),
     h('button.button.secondary.small', {
-      disabled: !clips || !ui.options?.ffmpeg || Boolean(ui.busy), title: ui.options?.ffmpeg ? '' : 'Needs ffmpeg installed on this computer (sudo apt install ffmpeg)',
-      onclick: guard(async () => work('stitch', async () => {
-        const result = await call(`/api/storyboards/${sequence.id}/stitch`);
-        emit('assets-changed');
-        toast(`Joined ${result.joined} clip(s)${result.skipped ? `; ${result.skipped} shot(s) without a clip were skipped` : ''}.`);
-        show(result);
-      })),
-    }, busy(`Join ${clips} clip(s) into one video`, 'stitch')),
+      disabled: !clips || !ui.options?.ffmpeg || Boolean(ui.busy) || joiningNow, title: ui.options?.ffmpeg ? '' : 'Needs ffmpeg installed on this computer (sudo apt install ffmpeg)',
+      onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/stitch`))),
+    }, joiningNow ? `Joining… ${join.done}/${join.total} clips` : `Join ${clips} clip(s) into one video`),
     ui.options?.ffmpeg ? null : h('span.muted', {}, 'Joining needs ffmpeg, which isn\'t installed.'));
 
   return h('section.panel.sb-settings', {},
@@ -139,13 +167,18 @@ function settingsPanel() {
       h('label.sb-wide', {}, h('span.field-label', {}, 'TITLE'), title),
       h('label.sb-wide', {}, h('span.field-label', {}, 'IDEA'), idea),
       h('label', {}, h('span.field-label', {}, 'WRITER (PLANS THE SHOTS)'), writer),
+      h('label', {}, h('span.field-label', {}, 'TARGET LENGTH (MINUTES)'), target),
       h('label', {}, h('span.field-label', {}, 'SHOTS'), count),
       h('label', {}, h('span.field-label', {}, 'FRAME'), aspect),
       h('label', {}, h('span.field-label', {}, 'STYLE'), style),
       modelPicker('image', 'generate', 'IMAGE MODEL (FRAMES)'),
       modelPicker('video', 'video', 'VIDEO MODEL (CLIPS)')),
     characters, actions,
-    costLine ? h('p.muted', {}, `At list prices (${state.catalog?.pricesAsOf ?? 'recent'}): ${costLine}.`) : null);
+    h('p.muted', {}, [
+      withFrames.length ? `Running time: ${clock(runtime)} across ${withFrames.length} shot(s)${settings.targetSeconds ? ` (target ${clock(settings.targetSeconds)})` : ''}.` : '',
+      costLine ? `At list prices (${state.catalog?.pricesAsOf ?? 'recent'}): ${costLine}.` : '',
+    ].filter(Boolean).join(' ')),
+    join?.state === 'failed' ? h('p.error-text', {}, join.error) : null);
 }
 
 async function work(key, fn) {
@@ -174,8 +207,10 @@ function shotCard(shot, index, total) {
     ...ui.presets.filter((p) => p.group === 'camera').map((p) => h('option', { value: p.id }, p.label)));
   camera.value = shot.camera ?? '';
   camera.onchange = guard(async () => show(await call(`/api/shots/${shot.id}`, 'PATCH', { camera: camera.value || null })));
-  const duration = h('select', { 'aria-label': 'Length' }, ...[4, 5, 6, 8, 10].map((d) => h('option', { value: d }, `${d} s`)));
-  duration.value = String([4, 5, 6, 8, 10].includes(shot.duration) ? shot.duration : 5);
+  const offered = videoChoice()?.model.durations?.length ? videoChoice().model.durations : defaultLengths;
+  const lengths = offered.includes(clipLength(shot.duration)) ? offered : [...offered, shot.duration].sort((x, y) => x - y);
+  const duration = h('select', { 'aria-label': 'Length' }, ...lengths.map((d) => h('option', { value: d }, `${d} s`)));
+  duration.value = String(clipLength(shot.duration));
   duration.onchange = guard(async () => show(await call(`/api/shots/${shot.id}`, 'PATCH', { duration: Number(duration.value) })));
   const start = (kind) => guard(async () => {
     if (description.value !== shot.description || document.activeElement === description) await call(`/api/shots/${shot.id}`, 'PATCH', { description: description.value });
@@ -216,7 +251,7 @@ function render() {
       h('video', { src: sequence.outputPath, controls: true, preload: 'metadata' }),
       h('p.muted.small-note', {}, 'Re-join after changing clips to update this video.')) : null,
     h('div.sb-shots', {}, ...shots.map((shot, index) => shotCard(shot, index, shots.length))),
-    h('button.button.secondary.small', { disabled: shots.length >= 24, onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/shots`, 'POST', { description: '' }))) }, '+ Add a shot'),
+    h('button.button.secondary.small', { disabled: shots.length >= (ui.options?.maxShots ?? 60), onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/shots`, 'POST', { description: '' }))) }, '+ Add a shot'),
   ].filter(Boolean));
 }
 

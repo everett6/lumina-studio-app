@@ -21,12 +21,12 @@ function fakeMp4(seed) {
 
 // With ffmpeg installed the mock makes a real one-second clip (a flat colour from the prompt), so players and
 // stitching can be exercised offline. Without ffmpeg it falls back to the placeholder header.
-async function colourClip(seed, aspect) {
+async function colourClip(seed, aspect, seconds = 1) {
   const dir = await mkdtemp(path.join(tmpdir(), 'lumina-mock-'));
   const file = path.join(dir, 'clip.mp4');
   const colour = `0x${seed.subarray(0, 3).toString('hex')}`;
   try {
-    await new Promise((resolve, reject) => execFile('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=${colour}:s=${aspect === '9:16' ? '180x320' : '320x180'}:d=1:r=12`,
+    await new Promise((resolve, reject) => execFile('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=${colour}:s=${aspect === '9:16' ? '180x320' : '320x180'}:d=${seconds}:r=12`,
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', file], { timeout: 20_000 }, (error) => (error ? reject(error) : resolve())));
     return await readFile(file);
   } catch {
@@ -55,7 +55,7 @@ export default {
   models: [
     { id: 'mock-image', label: 'Mock image', operations: ['generate', 'edit'], sizes, qualities: ['low', 'medium', 'high'], maxReferences: 4, note: 'Local test renderer, no network' },
     { id: 'mock-voice', label: 'Mock voice', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0, voices: ['tone-low', 'tone-high'], note: 'Sine tone, length follows the text' },
-    { id: 'mock-video', label: 'Mock video', operations: ['video'], sizes: [], qualities: [], maxReferences: 1, durations: [4, 8], aspects: ['16:9', '9:16'], note: 'One-second colour clip (needs ffmpeg; otherwise a placeholder file)' },
+    { id: 'mock-video', label: 'Mock video', operations: ['video'], sizes: [], qualities: [], maxReferences: 1, durations: [4, 8, 10], aspects: ['16:9', '9:16'], note: 'One-second colour clip (needs ffmpeg; otherwise a placeholder file)' },
     { id: 'mock-tools', label: 'Mock image tools', operations: ['upscale', 'remove-background', 'inpaint'], sizes: [], qualities: [], maxReferences: 1, scales: [2, 4], note: 'Local test renderer, no network' },
   ],
   async validateKey() {
@@ -82,9 +82,9 @@ export default {
     await sleep(Number(process.env.LUMINA_MOCK_DELAY_MS ?? 300));
     return { bytes: toneWav(Math.min(30, 0.05 * text.length + 0.2), voice === 'tone-high' ? 660 : 330), usage: { mock: true } };
   },
-  async video({ prompt, image, aspect }) {
+  async video({ prompt, image, aspect, duration }) {
     if (prompt.includes('[fail]')) throw new ProviderError('policy', 'Mock failure requested');
     await sleep(Number(process.env.LUMINA_MOCK_DELAY_MS ?? 300));
-    return { bytes: await colourClip(createHash('sha256').update(`${prompt}|${image ? 1 : 0}`).digest(), aspect), usage: { mock: true } };
+    return { bytes: await colourClip(createHash('sha256').update(`${prompt}|${image ? 1 : 0}`).digest(), aspect, process.env.LUMINA_MOCK_FULL_CLIPS === '1' ? duration : 1), usage: { mock: true } };
   },
 };

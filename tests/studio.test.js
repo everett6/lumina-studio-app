@@ -126,7 +126,7 @@ test('storyboard: idea → shot list → frames → clips → one joined video',
     assert.ok(detail.shots[1].videoPath && !detail.shots[2].videoPath);
 
     if (has('ffmpeg') && has('ffprobe')) {
-      const stitched = await t.call('POST', `/api/storyboards/${id}/stitch`, {});
+      const stitched = await t.call('POST', `/api/storyboards/${id}/stitch`, { wait: true });
       assert.equal(stitched.status, 200, JSON.stringify(stitched.body));
       assert.equal(stitched.body.joined, 2);
       assert.equal(stitched.body.skipped, 2);
@@ -225,6 +225,48 @@ test('catalog carries list prices and the estimate helper follows each pricing u
     assert.equal(model('replicate', 'black-forest-labs/flux-1.1-pro').price, null);
     assert.match(model('openai', 'gpt-image-2.5-sunburst').price.text, /per token/);
   } finally {
+    await t.close();
+  }
+});
+
+test('a five-minute film: 30 planned shots aimed at 300 seconds, clips at each shot\'s length, joined in the background', { skip: !has('ffmpeg') && 'needs ffmpeg', timeout: 240_000 }, async () => {
+  process.env.LUMINA_MOCK_FULL_CLIPS = '1';
+  const t = await startTestApp();
+  try {
+    const project = (await t.call('POST', '/api/projects', { name: 'Feature' })).body.project;
+    const created = await t.call('POST', `/api/projects/${project.id}/storyboards`, {
+      title: 'Lake', idea: 'A fox crosses the valley to reach a frozen lake.', writer: 'mock:mock-director',
+      settings: { shotCount: 30, targetSeconds: 300, imageProvider: 'mock', imageModel: 'mock-image', videoProvider: 'mock', videoModel: 'mock-video' },
+    });
+    const id = created.body.sequence.id;
+    assert.equal(created.body.sequence.settings.targetSeconds, 300);
+    const planned = (await t.call('POST', `/api/storyboards/${id}/plan`, {})).body;
+    assert.equal(planned.shots.length, 30);
+    for (const shot of planned.shots) assert.ok([4, 8, 10].includes(shot.duration), `shot length ${shot.duration} is one the video model makes`);
+    for (const shot of planned.shots) await t.call('PATCH', `/api/shots/${shot.id}`, { duration: 10 });
+    // A length the model does not offer becomes the nearest one it does.
+    const odd = await done(t, await t.call('POST', '/api/generate', { projectId: project.id, operation: 'video', prompt: 'x', provider: 'mock', model: 'mock-video', duration: 7 }));
+    assert.equal(odd.params.duration, 8);
+    const ids = [];
+    for (const shot of planned.shots) ids.push((await t.call('POST', `/api/shots/${shot.id}/animate`, {})).body.generation.id);
+    for (const gid of ids) assert.equal((await t.call('POST', `/api/generations/${gid}/wait`, { timeoutMs: 60_000 })).body.generation.status, 'completed');
+    const started = await t.call('POST', `/api/storyboards/${id}/stitch`, {});
+    assert.equal(started.status, 202);
+    assert.equal(started.body.sequence.join.state, 'running');
+    assert.equal((await t.call('POST', `/api/storyboards/${id}/stitch`, {})).status, 409);
+    let detail = started.body;
+    while (detail.sequence.join.state === 'running') {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      detail = (await t.call('GET', `/api/storyboards/${id}`)).body;
+    }
+    assert.equal(detail.sequence.join.state, 'completed', detail.sequence.join.error);
+    assert.equal(detail.sequence.join.done, 30);
+    const file = path.join(t.dataRoot, 'feature.mp4');
+    writeFileSync(file, await bytesOf(t, detail.sequence.outputPath));
+    const seconds = Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]).toString());
+    assert.ok(Math.abs(seconds - 300) < 2, `joined film runs ${seconds} s`);
+  } finally {
+    delete process.env.LUMINA_MOCK_FULL_CLIPS;
     await t.close();
   }
 });

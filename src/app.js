@@ -40,7 +40,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const generations = createGenerationService({ repo, providers, directors, keys, jobs });
   const canvasRunner = createCanvasRunner({ repo, generations, jobs, directors, keys });
   const books = createBookService({ repo, directors, keys, generations, providers, assetStore });
-  const sequences = createSequenceService({ repo, directors, keys, generations, assetStore });
+  const sequences = createSequenceService({ repo, directors, keys, generations, assetStore, providers });
   jobs.events.on('update', books.onGenerationUpdate);
   jobs.events.on('update', sequences.onGenerationUpdate);
   const tokenFile = path.join(dataDir, 'api-token');

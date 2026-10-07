@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 
 export const envNames = {
-  openai: 'OPENAI_API_KEY', fal: 'FAL_KEY', gemini: 'GEMINI_API_KEY', replicate: 'REPLICATE_API_TOKEN',
+  openrouter: 'OPENROUTER_API_KEY', openai: 'OPENAI_API_KEY', fal: 'FAL_KEY', gemini: 'GEMINI_API_KEY', replicate: 'REPLICATE_API_TOKEN',
   anthropic: 'ANTHROPIC_API_KEY', nemotron: 'NEMOTRON_API_KEY',
 };
 

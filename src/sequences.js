@@ -1,12 +1,13 @@
 import { extractJson } from './books.js';
-import { RequestError } from './generation.js';
+import { nearestDuration, RequestError } from './generation.js';
 import { presets } from './presets.js';
 import { hasFfmpeg, stitchClips } from './video.js';
 
 const cameraPresets = presets.filter((p) => p.group === 'camera');
 const stylePresets = presets.filter((p) => p.group === 'style');
 const aspects = { '16:9': '1536x1024', '9:16': '1024x1536', '1:1': '1024x1024' };
-const maxShots = 24;
+export const maxShots = 60;
+export const maxTargetSeconds = 900;
 
 const system = 'You are a film director and storyboard artist. You break an idea into a short sequence of shots that cut together well: '
   + 'vary shot sizes and angles, keep continuity of characters, wardrobe, location and light between shots, and give each shot one clear action. '
@@ -17,6 +18,8 @@ export function cleanSequenceSettings(input = {}, base = {}) {
   const text = (v) => typeof v === 'string' && v.length < 200;
   return {
     shotCount: Math.min(maxShots, Math.max(1, Math.round(Number(input.shotCount ?? base.shotCount ?? 5)) || 5)),
+    // Optional total running time the writer aims for (0 = let the shot count decide).
+    targetSeconds: Math.min(maxTargetSeconds, Math.max(0, Math.round(Number(input.targetSeconds ?? base.targetSeconds ?? 0)) || 0)),
     aspect: pick('aspect', (v) => v in aspects, '16:9'),
     style: pick('style', (v) => v === '' || stylePresets.some((p) => p.id === v), ''),
     characterIds: Array.isArray(input.characterIds) ? input.characterIds.filter((id) => typeof id === 'string').slice(0, 4) : base.characterIds ?? [],
@@ -27,7 +30,8 @@ export function cleanSequenceSettings(input = {}, base = {}) {
 
 // Storyboards: an idea becomes a shot list, each shot gets a still frame and then a clip, and the clips are
 // joined into one video.
-export function createSequenceService({ repo, directors, keys, generations, assetStore }) {
+export function createSequenceService({ repo, directors, keys, generations, assetStore, providers }) {
+  const joining = new Map(); // storyboard id -> { state, done, total, error }
   const needSequence = (id) => repo.sequences.get(id) ?? (() => { throw new RequestError(404, 'Storyboard not found.'); })();
   const needShot = (id) => repo.shots.get(id) ?? (() => { throw new RequestError(404, 'Shot not found.'); })();
 
@@ -40,7 +44,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const sequence = needSequence(id);
     const asset = (assetId) => (assetId ? repo.assets.get(assetId) : null);
     return {
-      sequence: { ...sequence, outputPath: asset(sequence.outputAssetId)?.path ?? null },
+      sequence: { ...sequence, outputPath: asset(sequence.outputAssetId)?.path ?? null, join: joining.get(id) ?? null },
       shots: repo.shots.listBySequence(id).map((shot) => ({
         ...shot, imagePath: asset(shot.imageAssetId)?.path ?? null, videoPath: asset(shot.videoAssetId)?.path ?? null,
         frameJob: latest(`shot-image:${shot.id}`), clipJob: latest(`shot-video:${shot.id}`),
@@ -80,18 +84,25 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     if (!director || !director.models.includes(model)) throw new RequestError(400, 'Unknown writer model.');
     const key = director.keyless ? null : keys.get(director.keyProvider);
     if (!director.keyless && !key) throw new RequestError(400, `Add a ${director.label} key in Settings to use this writer.`);
-    const count = sequence.settings.shotCount;
+    const { shotCount: count, targetSeconds } = sequence.settings;
+    const videoModel = providers?.model(sequence.settings.videoProvider, sequence.settings.videoModel);
+    const allowed = videoModel?.durations?.length ? videoModel.durations : null;
+    const [low, high] = allowed ? [Math.min(...allowed), Math.max(...allowed)] : [4, 10];
+    const length = targetSeconds
+      ? `The whole film should run about ${targetSeconds} seconds (${(targetSeconds / 60).toFixed(1)} minutes), so the shot durations must add up to roughly ${targetSeconds}. Tell the story with a clear beginning, middle and end across all ${count} shots.`
+      : '';
     const prompt = [
       `Break this idea into a sequence of shots. SHOT_COUNT=${count}`,
       `Idea: ${sequence.idea}`,
       characterLines(sequence),
+      length,
       `Frame: ${sequence.settings.aspect}.`,
       `Camera moves you may use (by id): ${cameraPresets.map((p) => `${p.id} (${p.blurb})`).join('; ')}.`,
-      `Return JSON: {"shots":[{"description":"what we see and what happens in this shot, in one or two sentences, written so it stands alone as an image prompt","camera":"one camera id from the list","duration":5}]} with exactly ${count} shots. Durations are in seconds, between 4 and 10.`,
+      `Return JSON: {"shots":[{"description":"what we see and what happens in this shot, in one or two sentences, written so it stands alone as an image prompt","camera":"one camera id from the list","duration":5}]} with exactly ${count} shots. Durations are whole seconds${allowed ? `, each one of: ${allowed.join(', ')}` : `, between ${low} and ${high}`}.`,
     ].filter(Boolean).join('\n\n');
     let text;
     try {
-      text = await director.complete({ key, model, system, prompt, task: 'shots', maxTokens: 8000 });
+      text = await director.complete({ key, model, system, prompt, task: 'shots', maxTokens: Math.max(8000, count * 400) });
     } catch (error) {
       throw new RequestError(502, `Writer failed: ${error.detail || error.message}`);
     }
@@ -99,7 +110,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const list = (Array.isArray(parsed.shots) ? parsed.shots : []).map((shot) => ({
       description: String(shot?.description ?? '').trim().slice(0, 2000),
       camera: cameraPresets.some((p) => p.id === shot?.camera) ? shot.camera : null,
-      duration: Math.min(10, Math.max(4, Math.round(Number(shot?.duration)) || 5)),
+      duration: allowed ? nearestDuration(allowed, Number(shot?.duration) || 5) : Math.min(high, Math.max(low, Math.round(Number(shot?.duration)) || 5)),
     })).filter((shot) => shot.description).slice(0, maxShots);
     if (!list.length) throw new RequestError(502, 'The writer returned no shots. Try again.');
     repo.shots.replaceAll(id, list);
@@ -141,22 +152,33 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     };
   }
 
-  async function stitch(id) {
+  // Joining runs in the background (a five-minute film can take several minutes); poll detail().join for
+  // progress. `wait: true` resolves when the join finishes, for callers that want the result directly.
+  async function stitch(id, { wait = false } = {}) {
     const sequence = needSequence(id);
+    if (joining.get(id)?.state === 'running') throw new RequestError(409, 'This storyboard is already being joined.');
     const shots = repo.shots.listBySequence(id);
     const clips = shots.map((shot) => (shot.videoAssetId ? repo.assets.get(shot.videoAssetId) : null));
     const ready = clips.filter(Boolean);
     if (!ready.length) throw new RequestError(400, 'Animate at least one shot first.');
     if (!(await hasFfmpeg())) throw new RequestError(501, 'Joining clips needs ffmpeg, which is not installed on this computer (on Debian/Ubuntu: sudo apt install ffmpeg).');
-    let result;
-    try {
-      result = await stitchClips(ready.map((asset) => assetStore.path(asset)));
-    } catch (error) {
-      throw new RequestError(502, `Could not join the clips: ${error.message}`);
+    const state = { state: 'running', done: 0, total: ready.length, skipped: clips.length - ready.length, error: null, duration: null };
+    joining.set(id, state);
+    const job = (async () => {
+      try {
+        const result = await stitchClips(ready.map((asset) => assetStore.path(asset)), { onProgress: (done) => { state.done = done; } });
+        const asset = await assetStore.save({ bytes: result.bytes, projectId: sequence.projectId, kind: 'video', label: `${sequence.title} (storyboard)` });
+        repo.sequences.update(id, { outputAssetId: asset.id });
+        Object.assign(state, { state: 'completed', duration: result.duration });
+      } catch (error) {
+        Object.assign(state, { state: 'failed', error: `Could not join the clips: ${error.message}` });
+      }
+    })();
+    if (wait) {
+      await job;
+      if (state.state === 'failed') throw new RequestError(502, state.error);
     }
-    const asset = await assetStore.save({ bytes: result.bytes, projectId: sequence.projectId, kind: 'video', label: `${sequence.title} (storyboard)` });
-    repo.sequences.update(id, { outputAssetId: asset.id });
-    return { ...detail(id), joined: ready.length, skipped: clips.length - ready.length, duration: result.duration };
+    return { ...detail(id), joined: ready.length, skipped: state.skipped, duration: state.duration };
   }
 
   function onGenerationUpdate(generation) {

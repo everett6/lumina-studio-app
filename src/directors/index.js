@@ -78,6 +78,26 @@ const nemotron = {
   },
 };
 
+// OpenRouter's chat completions endpoint (OpenAI-compatible), so the one OpenRouter key also covers writing.
+const openrouter = {
+  id: 'openrouter',
+  label: 'OpenRouter',
+  keyProvider: 'openrouter',
+  models: ['anthropic/claude-sonnet-5.5', 'anthropic/claude-opus-5.5', 'openai/gpt-6.1-sol', 'google/gemini-3.5-flash-lite', 'deepseek/deepseek-v4.1-flash'],
+  async complete({ key, model, system, prompt, maxTokens = 16000 }) {
+    const body = await requestJson('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST', timeoutMs: 300_000,
+      headers: { authorization: `Bearer ${requireKey(key)}`, 'content-type': 'application/json', 'x-title': 'Lumina Studio' },
+      body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
+    });
+    const choice = body?.choices?.[0];
+    if (choice?.finish_reason === 'length') throw new ProviderError('provider', 'The writer ran out of output space; try fewer shots or pages');
+    const text = choice?.message?.content;
+    if (!text) throw new ProviderError('provider', 'OpenRouter returned no text');
+    return text;
+  },
+};
+
 const mock = {
   id: 'mock',
   label: 'Mock writer (offline test)',
@@ -88,12 +108,12 @@ const mock = {
   },
 };
 
-for (const writer of [openai, anthropic, nemotron, mock]) {
+for (const writer of [openai, anthropic, openrouter, nemotron, mock]) {
   writer.refine = async ({ key, model, idea }) => checkedPrompt(await writer.complete({ key, model, system: directorInstructions, prompt: idea, maxTokens: 2000, task: 'refine' }));
 }
 
 export function createDirectors({ enableMock = process.env.LUMINA_MOCK === '1' } = {}) {
-  const list = [openai, anthropic, nemotron, ...(enableMock ? [mock] : [])];
+  const list = [openrouter, openai, anthropic, nemotron, ...(enableMock ? [mock] : [])];
   const byId = new Map(list.map((director) => [director.id, director]));
   return { list, get: (id) => byId.get(id) };
 }
