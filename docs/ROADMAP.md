@@ -23,7 +23,7 @@
 - Print bleed with trim and bleed boxes, full-bleed picture-book layout, non-Latin scripts in PDF.
 - Narration (OpenAI and Gemini TTS), audiobook export, text-to-speech in Create.
 - Video (Veo 3.1, Kling 3 Pro): Create video mode, a canvas video node, animated picture-book pages.
-- Remote MCP endpoint for claude.ai and ChatGPT: OAuth, pairing codes, through your own tunnel.
+- Remote MCP endpoint for claude.ai and ChatGPT: OAuth, pairing codes (replaced by an account in v0.7), through your own tunnel.
 
 ## Done (v0.5)
 
@@ -45,7 +45,7 @@
 - OpenRouter as a universal key: images, video and writing through one account.
 - Storyboards for longer films: up to 60 shots and a target length (5-minute films), model-aware shot lengths,
   background joining with progress.
-- One-click hosting: Cloudflare quick tunnel, the Lumina website behind a pairing-code sign-in, and the claude.ai/ChatGPT
+- One-click hosting: Cloudflare quick tunnel, the Lumina website behind an account sign-in (username and password), and the claude.ai/ChatGPT
   connector on the same address.
 
 ## Next
@@ -78,8 +78,8 @@
 - Joining storyboard clips needs ffmpeg and ffprobe on the computer. The joined video has no added narration or music.
 - Each storyboard clip starts from its own frame; continuity between shots depends on the frames and the character
   references, not on the previous clip's last frame.
-- One-click hosting uses Cloudflare quick tunnels: a new random address each time, no uptime guarantee. Anyone with a
-  pairing code you share gets full use of Lumina and your provider credits.
+- One-click hosting uses Cloudflare quick tunnels: a new random address each time, no uptime guarantee. Anyone with your
+  Lumina password gets full use of Lumina and your provider credits.
 - Prices are list prices read on the date shown in the app. They can be out of date, and the provider's bill is what counts.
 - Manuscript import splits at headings only ("# Title", "## Chapter", Word heading styles, or lines like "Chapter 3"). PDF, .doc and
   .odt files are not supported.

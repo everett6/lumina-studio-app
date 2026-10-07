@@ -23,7 +23,7 @@ the MCP server. Everything runs on your computer.
        ├─ src/sequences.js    storyboards: shot planning, frames, clips; src/video.js joins clips with ffmpeg
        ├─ src/manuscript.js   .txt/.md/.docx import into chapters
        ├─ src/pricing.js      list prices per model, shown as estimates
-       ├─ src/remote.js       MCP over Streamable HTTP + OAuth 2.1 (pairing-code consent) for claude.ai / ChatGPT
+       ├─ src/remote.js       MCP over Streamable HTTP + OAuth 2.1 (account sign-in consent), website proxy for claude.ai / ChatGPT
        │     └─ mcp/tools.js    the tool set, shared with the local stdio server
        ├─ src/keys.js         0600 key file, encrypted when a cipher is supplied
        ├─ src/assets.js       image files, type sniffing, lineage

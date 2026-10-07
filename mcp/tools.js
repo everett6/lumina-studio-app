@@ -46,6 +46,28 @@ export function registerLuminaTools(server, client) {
     return options[0];
   }
 
+  // search + fetch: the read-only pair ChatGPT connectors and deep research require (OpenAI's compatibility schema).
+  const citeUrl = (id) => (client.siteUrl ? `${client.siteUrl.replace(/\/$/, '')}/#${id}` : `lumina://${id.replace(':', '/')}`);
+  const structured = (value) => ({ structuredContent: value, content: [{ type: 'text', text: JSON.stringify(value) }] });
+  server.registerTool('search', {
+    title: 'Search Lumina',
+    description: 'Search the user\'s Lumina work — projects, books, chapters, storyboards and characters — by keywords. Returns ids to pass to fetch. An empty query lists recent items.',
+    inputSchema: { query: z.string().describe('Keywords to look for') },
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ query }) => {
+    const { results } = await client.call('GET', `/api/search?q=${encodeURIComponent(query ?? '')}`);
+    return structured({ results: results.map((d) => ({ id: d.id, title: d.title, url: citeUrl(d.id) })) });
+  }));
+  server.registerTool('fetch', {
+    title: 'Fetch a Lumina item',
+    description: 'Read the full text of a search result (a book with its pages or chapter list, a chapter\'s text, a storyboard\'s shots, a character\'s look) by its id from search.',
+    inputSchema: { id: z.string().describe('An id returned by search, such as "chapter:<uuid>"') },
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ id }) => {
+    const doc = await client.call('GET', `/api/search/document?id=${encodeURIComponent(id)}`);
+    return structured({ id: doc.id, title: doc.title, text: doc.text, url: citeUrl(doc.id), metadata: doc.metadata });
+  }));
+
   server.registerTool('list_projects', {
     title: 'List projects',
     description: 'List Lumina Studio projects, most recently updated first.',
@@ -506,4 +528,19 @@ export function registerLuminaTools(server, client) {
     ].filter(Boolean);
     return ok(text({ savedOnUsersComputer: target, format, notes: notes.length ? notes : undefined }));
   }));
+
+  // Tool schemas are generated with a "$schema" keyword; some clients (ChatGPT's connector validator among the
+  // strict ones) only want the plain object schema, so list tools without it.
+  const handlers = server.server._requestHandlers;
+  const listTools = handlers?.get('tools/list');
+  if (listTools) {
+    handlers.set('tools/list', async (...args) => {
+      const result = await listTools(...args);
+      for (const tool of result.tools ?? []) {
+        if (tool.inputSchema) delete tool.inputSchema.$schema;
+        if (tool.outputSchema) delete tool.outputSchema.$schema;
+      }
+      return result;
+    });
+  }
 }

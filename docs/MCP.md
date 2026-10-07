@@ -100,13 +100,16 @@ for them that keeps everything on your computer:
 
 - Lumina serves **MCP over Streamable HTTP** at `/mcp` on `127.0.0.1:<port>` (default 8787). It exposes the same tools
   as the local server, except that remote clients can't choose where exported files are written.
-- The same address serves the **Lumina website**: visitors sign in at `/login` with a pairing code (30-day sign-in
-  cookie, HttpOnly, Secure, SameSite=Strict) and then use the normal app; cross-site writes are refused.
+- The same address serves the **Lumina website**: visitors sign in at `/login` with the Lumina account (30-day
+  sign-in cookie, HttpOnly, Secure, SameSite=Strict) and then use the normal app; cross-site writes are refused.
 - Clients sign in with **OAuth 2.1**: metadata discovery, dynamic client registration, authorization code with PKCE,
   1-hour access tokens and rotating 30-day refresh tokens. Only hashes of tokens are stored.
-- The approval page asks for the **6-digit pairing code** shown in Lumina → Settings → Remote access. Each code works
-  once, expires after 15 minutes, and repeated wrong guesses are locked out. Settings → *Disconnect all* revokes every
-  client, token and website sign-in.
+- The approval page asks you to sign in with your **Lumina account** (one username and password, created in
+  Settings → Remote access; the password is stored as a salted scrypt hash). Eight wrong sign-ins in ten minutes lock
+  sign-in for ten minutes. Changing the password, or Settings → *Disconnect all*, revokes every client, token and
+  website sign-in.
+- `search` and `fetch` tools in OpenAI's compatibility shape (ids like `chapter:<uuid>`) let ChatGPT connectors and
+  deep research find and read your projects, books, chapters, storyboards and characters.
 - Lumina must be open for the connector and website to work.
 
 ### One click: Host Lumina online
@@ -115,11 +118,12 @@ Settings → Remote access → **Put Lumina online** starts a Cloudflare *quick 
 Cloudflare account needed) and turns remote access on at the address it gets. If `cloudflared` isn't installed, Lumina
 asks, then downloads Cloudflare's official Linux build from GitHub into its data folder (`bin/cloudflared`).
 
-1. Press **Put Lumina online**. The card shows the **website** and the **Claude connector URL** (`https://….trycloudflare.com/mcp`) and a pairing code.
-2. **Website:** open the address in any browser or phone and sign in with the pairing code.
+1. Create your Lumina account (username and password) at the top of Remote access, then press **Put Lumina online**. The card shows the **website** and the **Claude connector URL** (`https://….trycloudflare.com/mcp`).
+2. **Website:** open the address in any browser or phone and sign in with your account.
 3. **claude.ai:** Settings → Connectors → *Add custom connector* → paste the connector URL. When the approval page opens,
-   enter a pairing code (press *New code* first if you used the last one for the website).
-   **ChatGPT:** turn on developer mode and add a custom MCP connector with the same URL.
+   sign in with your account and press Approve.
+   **ChatGPT:** Settings → Apps & Connectors → Advanced → developer mode, then Create a connector with the same URL
+   (authentication: OAuth) and approve by signing in.
 
 Quick-tunnel addresses are random and change every time Lumina goes online (Lumina reconnects automatically at
 launch if it was online when closed), so re-add the connector after a restart. For a permanent address use your own
@@ -128,7 +132,7 @@ tunnel below.
 ### Your own tunnel (permanent address)
 
 1. Start a tunnel to `http://127.0.0.1:8787` (a named Cloudflare tunnel, `tailscale funnel 8787`, `ngrok http 8787`…).
-2. Settings → Remote access → *Use your own tunnel instead*: paste the address, press **Turn on remote access**, then **Show a pairing code**.
+2. Settings → Remote access → *Use your own tunnel instead*: paste the address, press **Turn on remote access**.
 3. Add the connector URL in claude.ai or ChatGPT as above.
 
 ### Verified
@@ -139,13 +143,19 @@ once), a PKCE token exchange (a wrong verifier is rejected), MCP tool calls over
 refresh-token rotation, and revocation.
 
 The same file checks one-click hosting with a stand-in tunnel program: the tunnel address becomes the public URL,
-the website redirects to `/login`, a wrong code is refused, a right one signs in, the app and its API work through
-the proxy, cross-site writes are refused, revoking signs the website out, and going offline stops everything.
+the website redirects to `/login`, a wrong password is refused, the right one signs in, the app and its API work through
+the proxy, cross-site writes are refused, changing the password needs the current one and signs the website out, and going offline stops everything.
 
 On 2026-10-06 the real Cloudflare quick tunnel was run from a test instance: cloudflared was downloaded by the app,
 the public address answered from the internet (login redirect, sign-in, the app, OAuth metadata), and an MCP client
-completed registration, pairing-code approval and PKCE over the public address, then listed 38 tools, made an image,
+completed registration, approval and PKCE over the public address, then listed 38 tools, made an image,
 planned a storyboard, queued its clips and joined them.
 
-Not verified: an actual claude.ai or ChatGPT connection. Those products may expect details
+On 2026-10-07 a real ChatGPT connector signed in (dynamic registration, token, refresh) but stopped with "action
+discovery failed". In response Lumina added the `search` and `fetch` tools ChatGPT connectors require, lists tool
+schemas without the `$schema` keyword, and advertises `offline_access`; ChatGPT's request sequence (resource set to the
+site root, an immediate token refresh, initialize, tools/list) was replayed against Lumina and succeeds. ChatGPT itself
+has not been re-tried since.
+
+Not verified: an actual claude.ai connection. Those products may expect details
 (scopes, metadata fields) that the local test doesn't cover. If a connection fails, the Lumina log shows the request.

@@ -15,8 +15,12 @@ const freePort = () => new Promise((resolve) => {
 
 const form = (fields) => new URLSearchParams(fields).toString();
 
-test('remote MCP: discovery → registration → pairing-code consent → PKCE token → tools over HTTP → refresh → revoke', async () => {
+const owner = { username: 'everett', password: 'correct horse battery' };
+
+test('remote MCP: discovery → registration → account sign-in consent → PKCE token → tools over HTTP → refresh → revoke', async () => {
   const t = await startTestApp();
+  assert.equal((await t.call('PUT', '/api/settings/account', { username: 'x', password: 'short' })).status, 400);
+  assert.equal((await t.call('PUT', '/api/settings/account', owner)).status, 200);
   const port = await freePort();
   const base = `http://localhost:${port}`;
   try {
@@ -53,19 +57,17 @@ test('remote MCP: discovery → registration → pairing-code consent → PKCE t
     const hidden = Object.fromEntries([...page.matchAll(/name="([a-z_]+)" value="([^"]*)"/g)].map((m) => [m[1], m[2].replace(/&amp;/g, '&')]));
 
     const approve = (fields) => fetch(`${base}/authorize/approve`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form(fields) });
-    const wrong = await approve({ ...hidden, decision: 'approve', pairing_code: '000000' });
+    assert.match(page, /name="password"/);
+    const wrong = await approve({ ...hidden, decision: 'approve', username: owner.username, password: 'not the password' });
     assert.equal(wrong.status, 400);
-    assert.match(await wrong.text(), /wrong or expired/);
+    assert.match(await wrong.text(), /Wrong username or password/);
 
-    const { pairing } = (await t.call('POST', '/api/settings/remote/pairing', {})).body;
-    assert.match(pairing.code, /^\d{6}$/);
-    const approved = await approve({ ...hidden, decision: 'approve', pairing_code: pairing.code });
+    const approved = await approve({ ...hidden, decision: 'approve', ...owner, username: 'Everett' });
     assert.equal(approved.status, 302);
     const back = new URL(approved.headers.get('location'));
     assert.equal(`${back.origin}${back.pathname}`, redirect);
     assert.equal(back.searchParams.get('state'), 'st8');
     const code = back.searchParams.get('code');
-    assert.equal((await approve({ ...hidden, decision: 'approve', pairing_code: pairing.code })).status, 400, 'pairing code is single-use');
 
     const token = async (fields) => fetch(meta.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form(fields) });
     const badVerifier = await token({ grant_type: 'authorization_code', code, code_verifier: 'nope-nope-nope-nope-nope-nope-nope-nope-nope', client_id: client.client_id, redirect_uri: redirect });
@@ -82,6 +84,11 @@ test('remote MCP: discovery → registration → pairing-code consent → PKCE t
     const mcp = await connect(tokens.access_token);
     const { tools } = await mcp.listTools();
     assert.ok(tools.some((tool) => tool.name === 'create_book'));
+    // ChatGPT connectors require search + fetch in OpenAI's compatibility shape.
+    const found = await mcp.callTool({ name: 'search', arguments: { query: 'claude' } });
+    const fetched = await mcp.callTool({ name: 'fetch', arguments: { id: (await mcp.callTool({ name: 'search', arguments: { query: '' } })).structuredContent.results[0]?.id ?? 'none' } });
+    assert.ok(Array.isArray(found.structuredContent.results));
+    assert.ok(fetched.isError || fetched.structuredContent.text !== undefined);
     const created = await mcp.callTool({ name: 'create_project', arguments: { name: 'From claude.ai' } });
     assert.equal(JSON.parse(created.content[0].text).name, 'From claude.ai');
     const image = await mcp.callTool({ name: 'generate_image', arguments: { projectId: JSON.parse(created.content[0].text).id, prompt: 'a lighthouse', provider: 'mock', model: 'mock-image' } });
@@ -119,7 +126,7 @@ test('remote settings validation: non-HTTPS public URLs are refused', async () =
   }
 });
 
-test('one-click hosting: tunnel address becomes the public URL; the website needs a pairing-code sign-in, then serves the app', async () => {
+test('one-click hosting: needs an account; tunnel address becomes the public URL; the website needs a sign-in, then serves the app', async () => {
   const { mkdtempSync, writeFileSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const path = await import('node:path');
@@ -134,6 +141,10 @@ test('one-click hosting: tunnel address becomes the public URL; the website need
   const local = `http://127.0.0.1:${port}`;
   try {
     assert.equal((await t.call('PUT', '/api/settings/remote', { port })).status, 200);
+    const noAccount = await t.call('POST', '/api/settings/remote/online', {});
+    assert.equal(noAccount.status, 428);
+    assert.equal(noAccount.body.needsAccount, true);
+    await t.call('PUT', '/api/settings/account', owner);
     const online = await t.call('POST', '/api/settings/remote/online', {});
     assert.equal(online.status, 200, JSON.stringify(online.body));
     assert.equal(online.body.running, true, online.body.error);
@@ -141,17 +152,17 @@ test('one-click hosting: tunnel address becomes the public URL; the website need
     assert.equal(online.body.site, 'https://quiet-river-test.trycloudflare.com/');
     assert.equal(online.body.url, 'https://quiet-river-test.trycloudflare.com/mcp');
     assert.equal(online.body.tunnel.state, 'online');
-    const code = online.body.pairing.code;
+    assert.equal(online.body.account.username, 'everett');
 
     // Not signed in: pages go to /login, API calls get 401.
     const page = await fetch(`${local}/`, { redirect: 'manual' });
     assert.equal(page.status, 302);
     assert.equal(page.headers.get('location'), '/login');
     assert.equal((await fetch(`${local}/api/projects`)).status, 401);
-    assert.match(await (await fetch(`${local}/login`)).text(), /pairing code/);
-    const wrong = await fetch(`${local}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form({ pairing_code: code === '000000' ? '111111' : '000000' }), redirect: 'manual' });
+    assert.match(await (await fetch(`${local}/login`)).text(), /name="password"/);
+    const wrong = await fetch(`${local}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form({ username: 'everett', password: 'nope nope nope' }), redirect: 'manual' });
     assert.equal(wrong.status, 400);
-    const signedIn = await fetch(`${local}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form({ pairing_code: code }), redirect: 'manual' });
+    const signedIn = await fetch(`${local}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form(owner), redirect: 'manual' });
     assert.equal(signedIn.status, 303);
     const cookie = signedIn.headers.get('set-cookie');
     assert.match(cookie, /lumina_web=[A-Za-z0-9_-]+; HttpOnly; SameSite=Strict; Path=\/; Max-Age=\d+; Secure/);
@@ -169,8 +180,9 @@ test('one-click hosting: tunnel address becomes the public URL; the website need
     assert.equal((await fetch(`${local}/api/projects`, { method: 'POST', headers: { cookie: session, 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{}' })).status, 403);
     assert.equal((await t.call('GET', '/api/settings/remote')).body.webSessions, 1);
 
-    // Revoking signs the website out too; going offline stops the tunnel and the gateway.
-    await t.call('POST', '/api/settings/remote/revoke', {});
+    // Changing the password needs the current one and signs the website out.
+    assert.equal((await t.call('PUT', '/api/settings/account', { password: 'another long password', currentPassword: 'wrong' })).status, 403);
+    assert.equal((await t.call('PUT', '/api/settings/account', { password: 'another long password', currentPassword: owner.password })).status, 200);
     assert.equal((await fetch(`${local}/api/projects`, { headers: { cookie: session } })).status, 401);
     const off = (await t.call('POST', '/api/settings/remote/offline', {})).body;
     assert.equal(off.running, false);

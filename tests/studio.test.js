@@ -270,3 +270,22 @@ test('a five-minute film: 30 planned shots aimed at 300 seconds, clips at each s
     await t.close();
   }
 });
+
+test('search and fetch (ChatGPT connector shape): projects, storyboards and characters are found by keyword and read in full', async () => {
+  const t = await startTestApp();
+  try {
+    const project = (await t.call('POST', '/api/projects', { name: 'Lighthouse film' })).body.project;
+    const board = (await t.call('POST', `/api/projects/${project.id}/storyboards`, { title: 'Keeper', idea: 'A keeper rows out at dawn.', settings: {} })).body.sequence;
+    await t.call('POST', `/api/storyboards/${board.id}/shots`, { description: 'Wide shot of the rowing boat leaving the rocks.' });
+    await t.call('POST', '/api/characters', { name: 'Ada', description: 'lighthouse keeper, grey wool coat' });
+    const results = (await t.call('GET', '/api/search?q=lighthouse')).body.results;
+    assert.deepEqual(results.map((r) => r.id.split(':')[0]).sort(), ['character', 'project']);
+    const shots = (await t.call('GET', '/api/search?q=rowing')).body.results;
+    assert.equal(shots[0].id, `storyboard:${board.id}`);
+    const doc = (await t.call('GET', `/api/search/document?id=${encodeURIComponent(shots[0].id)}`)).body;
+    assert.match(doc.text, /Shot 1 .*rowing boat/);
+    assert.equal((await t.call('GET', '/api/search/document?id=book:nope')).status, 404);
+  } finally {
+    await t.close();
+  }
+});

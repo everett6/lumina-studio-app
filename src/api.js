@@ -12,6 +12,7 @@ import { presetGroups, presets } from './presets.js';
 import { priceFor, pricesAsOf } from './pricing.js';
 import { userMessage } from './providers/http.js';
 import { cleanSequenceSettings, maxShots, maxTargetSeconds } from './sequences.js';
+import { createSearch } from './search.js';
 import { hasFfmpeg } from './video.js';
 
 const staticTypes = {
@@ -78,6 +79,9 @@ export function createApiServer(ctx) {
     };
   }
 
+  const finder = createSearch(repo);
+  route('GET', '/api/search', (req, match, url) => ({ results: finder.search(url.searchParams.get('q') ?? '', Math.min(50, Number(url.searchParams.get('limit')) || 20)) }));
+  route('GET', '/api/search/document', (req, match, url) => finder.fetch(url.searchParams.get('id') ?? '') ?? (() => { throw new RequestError(404, 'No document with that id.'); })());
   route('GET', '/api/health', () => ({ ok: true, version: info.version, mode: info.mode, jobs: jobs.stats() }));
   route('GET', '/api/catalog', catalog);
   route('GET', '/api/presets', () => ({ groups: presetGroups, presets }));
@@ -169,13 +173,20 @@ export function createApiServer(ctx) {
 
   route('GET', '/api/settings/remote', () => remote.status());
   route('PUT', '/api/settings/remote', async (req) => remote.update(await readBody(req, 4096)));
-  route('POST', '/api/settings/remote/pairing', () => ({ pairing: remote.newPairingCode() }));
+  route('GET', '/api/settings/account', () => remote.account());
+  route('PUT', '/api/settings/account', async (req) => {
+    try {
+      return remote.setAccount(await readBody(req, 4096));
+    } catch (error) {
+      throw error.status ? new RequestError(error.status, error.message) : error;
+    }
+  });
   route('POST', '/api/settings/remote/online', async (req) => {
     const body = await readBody(req, 1024);
     try {
       return await remote.goOnline({ allowDownload: body.download === true });
     } catch (error) {
-      if (error.needsDownload) return { status: 428, body: { error: error.message, needsDownload: true } };
+      if (error.needsDownload || error.needsAccount) return { status: 428, body: { error: error.message, needsDownload: Boolean(error.needsDownload), needsAccount: Boolean(error.needsAccount) } };
       throw error.status ? new RequestError(error.status, error.message) : error;
     }
   });

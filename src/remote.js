@@ -1,4 +1,5 @@
-import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import express from 'express';
@@ -10,21 +11,22 @@ import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/
 import { registerLuminaTools } from '../mcp/tools.js';
 import { createTunnel } from './tunnel.js';
 
+const luminaVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
 // Remote MCP endpoint for claude.ai connectors and ChatGPT apps.
 //
 // Lumina listens on 127.0.0.1:<port>; the user exposes that port through an HTTPS tunnel of their choice
 // (Cloudflare Tunnel, Tailscale Funnel, ngrok…) and enters the public URL in Settings. Connecting clients
 // register themselves (OAuth dynamic client registration), then the user approves the connection in a browser
-// page by typing the pairing code shown in Lumina's Settings. Keys, files and jobs never leave this computer.
+// page by signing in with the Lumina account set up in Settings. Keys, files and jobs never leave this computer.
 //
 // "Host online" does the tunnel part in one click (Cloudflare quick tunnel, see tunnel.js). The same public
-// address also serves the Lumina website itself: visitors sign in with a pairing code, then every request is
+// address also serves the Lumina website itself: visitors sign in with the same account, then every request is
 // passed to the local app with its token. Website sign-ins last 30 days and are revoked with everything else.
 
 const accessTtlSeconds = 3600;
 const refreshTtlSeconds = 30 * 24 * 3600;
 const codeTtlMs = 5 * 60_000;
-const pairingTtlMs = 15 * 60_000;
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const newToken = () => randomBytes(32).toString('base64url');
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -36,30 +38,50 @@ const webCookie = (req) => /(?:^|;\s*)lumina_web=([A-Za-z0-9_-]+)/.exec(req.head
 export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, binDir, tunnelCommand, log = console }) {
   const tunnel = createTunnel({ binDir: binDir ?? exportDir, log, command: tunnelCommand });
   const codes = new Map();
-  let pairing = null;
   let failedAttempts = [];
   let server = null;
   let status = { running: false, error: null, url: null };
 
   const settings = () => ({ ...defaultRemoteSettings, ...repo.settings.get('remote', {}) });
 
-  function newPairingCode() {
-    pairing = { code: String(randomInt(0, 1_000_000)).padStart(6, '0'), expiresAt: Date.now() + pairingTtlMs };
-    return pairing;
-  }
-  const pairingInfo = () => (pairing && pairing.expiresAt > Date.now() ? { code: pairing.code, expiresAt: pairing.expiresAt } : null);
+  // One owner account (username + scrypt password hash) guards both the website and connector approvals.
+  const account = () => repo.settings.get('account', null);
+  const passwordHash = (password, salt) => scryptSync(String(password).normalize('NFKC'), Buffer.from(salt, 'base64'), 64).toString('base64');
 
-  function checkPairing(given) {
+  function setAccount({ username, password, currentPassword }) {
+    const existing = account();
+    const name = String(username ?? existing?.username ?? '').trim();
+    if (!/^[A-Za-z0-9._@-]{3,64}$/.test(name)) throw Object.assign(new Error('Choose a username of 3–64 letters, numbers or . _ @ -'), { status: 400 });
+    if (typeof password !== 'string' || password.length < 10 || password.length > 200) throw Object.assign(new Error('Choose a password of at least 10 characters.'), { status: 400 });
+    if (existing && !passwordMatches(existing, currentPassword)) throw Object.assign(new Error('Your current password is not right.'), { status: 403 });
+    const salt = randomBytes(16).toString('base64');
+    repo.settings.set('account', { username: name, salt, hash: passwordHash(password, salt), updatedAt: new Date().toISOString() });
+    // A new password signs every website and connector out.
+    if (existing) repo.oauth.revokeAll();
+    return accountInfo();
+  }
+
+  function passwordMatches(stored, password) {
+    if (!stored || typeof password !== 'string') return false;
+    const given = Buffer.from(passwordHash(password, stored.salt), 'base64');
+    const expected = Buffer.from(stored.hash, 'base64');
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  }
+
+  const accountInfo = () => ({ configured: Boolean(account()), username: account()?.username ?? null });
+
+  // Returns an error message, or null when the username and password are right. Wrong guesses are rate limited.
+  function checkLogin(username, password) {
     const now = Date.now();
     failedAttempts = failedAttempts.filter((t) => now - t < 10 * 60_000);
-    if (failedAttempts.length >= 8) return 'Too many wrong codes. Wait ten minutes, then try again with a new code.';
-    const current = pairingInfo();
-    const ok = current && typeof given === 'string' && given.length === current.code.length && timingSafeEqual(Buffer.from(given), Buffer.from(current.code));
-    if (!ok) {
+    if (failedAttempts.length >= 8) return 'Too many failed sign-ins. Wait ten minutes, then try again.';
+    const stored = account();
+    if (!stored) return 'No Lumina account is set up yet. Create one in Lumina → Settings → Remote access.';
+    const nameOk = String(username ?? '').trim().toLowerCase() === stored.username.toLowerCase();
+    if (!passwordMatches(stored, password) || !nameOk) {
       failedAttempts.push(now);
-      return 'That code is wrong or expired. Check Lumina → Settings → Remote access.';
+      return 'Wrong username or password.';
     }
-    pairing = null; // single use
     return null;
   }
 
@@ -80,7 +102,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
         return client;
       },
     },
-    // The consent page: the person connecting must type the pairing code shown inside Lumina.
+    // The consent page: the person connecting signs in with their Lumina account to approve.
     async authorize(client, params, res) {
       const fields = {
         client_id: client.client_id, redirect_uri: params.redirectUri, code_challenge: params.codeChallenge,
@@ -133,6 +155,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     fetchRaw: (route) => fetch(`${localOrigin()}${route}`, { headers: { authorization: `Bearer ${localToken}` }, signal: AbortSignal.timeout(660_000) }),
     exportDir: () => exportDir,
     allowOutputPath: false,
+    get siteUrl() { return settings().enabled ? settings().publicUrl : null; },
   };
 
   function buildApp(publicUrl) {
@@ -143,7 +166,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     // Tunnels forward from localhost; trust one proxy hop so rate limits see the real client address.
     app.set('trust proxy', 1);
     app.use(mcpAuthRouter({
-      provider, issuerUrl: base, baseUrl: base, resourceServerUrl: mcpUrl, scopesSupported: ['lumina'], resourceName: 'Lumina Studio',
+      provider, issuerUrl: base, baseUrl: base, resourceServerUrl: mcpUrl, scopesSupported: ['lumina', 'offline_access'], resourceName: 'Lumina Studio',
     }));
     app.post('/authorize/approve', express.urlencoded({ extended: false, limit: '16kb' }), async (req, res) => {
       const body = req.body ?? {};
@@ -158,7 +181,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
         if (fields.state) url.searchParams.set('state', fields.state);
         return res.redirect(302, url.href);
       }
-      const problem = checkPairing(String(body.pairing_code ?? '').trim());
+      const problem = checkLogin(body.username, body.password);
       if (problem) return res.status(400).type('html').send(consentPage({ clientName: client.client_name || 'An MCP client', redirect, fields, error: problem }));
       const code = newToken();
       codes.set(code, {
@@ -175,7 +198,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     const auth = requireBearerAuth({ verifier: provider, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpUrl) });
     // Stateless Streamable HTTP: a fresh server + transport per request, no session affinity needed through a tunnel.
     app.post('/mcp', auth, express.json({ limit: '4mb' }), async (req, res) => {
-      const mcp = new McpServer({ name: 'lumina-studio', version: '0.4.0' });
+      const mcp = new McpServer({ name: 'lumina-studio', version: luminaVersion });
       registerLuminaTools(mcp, toolClient);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {
@@ -193,7 +216,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     const notAllowed = (req, res) => res.status(405).set('allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
     app.get('/mcp', auth, notAllowed);
     app.delete('/mcp', auth, notAllowed);
-    // The website: sign in with a pairing code, then everything else is the normal Lumina app.
+    // The website: sign in with the Lumina account, then everything else is the normal Lumina app.
     const secure = base.protocol === 'https:' ? '; Secure' : '';
     const pageHeaders = (res) => {
       res.setHeader('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
@@ -202,12 +225,12 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     };
     app.get('/login', (req, res) => {
       pageHeaders(res);
-      res.type('html').send(loginPage({}));
+      res.type('html').send(loginPage({ ready: Boolean(account()) }));
     });
-    app.post('/login', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
+    app.post('/login', express.urlencoded({ extended: false, limit: '8kb' }), (req, res) => {
       pageHeaders(res);
-      const problem = checkPairing(String(req.body?.pairing_code ?? '').trim());
-      if (problem) return res.status(400).type('html').send(loginPage({ error: problem }));
+      const problem = checkLogin(req.body?.username, req.body?.password);
+      if (problem) return res.status(400).type('html').send(loginPage({ ready: Boolean(account()), error: problem, username: req.body?.username }));
       const session = newToken();
       repo.oauth.saveToken({ tokenHash: hash(session), kind: 'web', clientId: 'website', scopes: ['web'], resource: null, expiresAt: Date.now() + webTtlMs });
       log.info?.('Website sign-in approved');
@@ -279,6 +302,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
 
   // One click: start a quick tunnel to the gateway port, then turn remote access on at the address it gives.
   async function goOnline({ allowDownload = false } = {}) {
+    if (!account()) throw Object.assign(new Error('Create a Lumina account first: it is how you sign in to the website and approve Claude or ChatGPT.'), { status: 428, needsAccount: true });
     await stop();
     const port = await usablePort(settings().port);
     const url = await tunnel.start(port, { allowDownload });
@@ -290,7 +314,6 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
       repo.settings.set('remote', { ...settings(), enabled: false, hosted: false });
       throw Object.assign(new Error(`Could not start remote access: ${problem}`), { status: 502 });
     }
-    if (!pairingInfo()) newPairingCode();
     return api.status();
   }
 
@@ -320,7 +343,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     status: async () => {
       const current = settings();
       const site = status.running ? new URL('/', current.publicUrl).href : null;
-      return { ...status, site, settings: current, pairing: pairingInfo(), tunnel: await tunnel.status(), ...repo.oauth.stats() };
+      return { ...status, site, settings: current, account: accountInfo(), tunnel: await tunnel.status(), ...repo.oauth.stats() };
     },
     async update(changes) {
       const next = { ...settings() };
@@ -340,7 +363,8 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
       await start();
       return api.status();
     },
-    newPairingCode: () => ({ ...newPairingCode() }),
+    account: accountInfo,
+    setAccount,
     revokeAll() {
       repo.oauth.revokeAll();
       codes.clear();
@@ -360,35 +384,33 @@ function usablePort(preferred) {
   return tryPort(preferred).then((port) => port ?? tryPort(0));
 }
 
-function loginPage({ error }) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in · Lumina Studio</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;background:#11110f;color:#eeede8;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}
-main{max-width:400px;width:100%;background:#181816;border:1px solid #2b2b27;border-radius:12px;padding:24px;box-sizing:border-box}h1{font-size:20px;margin:0 0 8px}
-p{color:#b8b8ae}input{font:24px ui-monospace,monospace;letter-spacing:.3em;width:100%;padding:10px;box-sizing:border-box;background:#11110f;color:#eeede8;border:1px solid #3a3a34;border-radius:8px;text-align:center}
-button{width:100%;margin-top:16px;padding:10px;border-radius:8px;border:0;font-weight:600;cursor:pointer;background:#d4f579;color:#171812}.error{color:#ff8f7a}</style></head>
-<body><main><h1>Open Lumina Studio</h1>
-<p>Enter the 6-digit pairing code from <b>Lumina → Settings → Remote access</b> on the computer running Lumina.</p>
+const pageStyle = `<style>body{font:15px/1.5 system-ui,sans-serif;background:#11110f;color:#eeede8;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}
+main{max-width:420px;width:100%;background:#181816;border:1px solid #2b2b27;border-radius:12px;padding:24px;box-sizing:border-box}h1{font-size:20px;margin:0 0 8px}
+p{color:#b8b8ae}code{background:#24241f;padding:1px 6px;border-radius:4px}label{display:block;margin-top:12px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8f8f87}
+input[type=text],input[type=password]{font:16px system-ui,sans-serif;width:100%;margin-top:4px;padding:10px;box-sizing:border-box;background:#11110f;color:#eeede8;border:1px solid #3a3a34;border-radius:8px}
+.row{display:flex;gap:10px;margin-top:18px}button{flex:1;padding:10px;border-radius:8px;border:0;font-weight:600;cursor:pointer}
+.approve{background:#d4f579;color:#171812}.deny{background:#2a2a25;color:#eeede8}.error{color:#ff8f7a}</style>`;
+
+const credentialFields = (username = '') => `<label>Username<input type="text" name="username" autocomplete="username" required autofocus value="${escapeHtml(username)}"></label>
+<label>Password<input type="password" name="password" autocomplete="current-password" required></label>`;
+
+function loginPage({ ready, error, username }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in · Lumina Studio</title>${pageStyle}</head>
+<body><main><h1>Sign in to Lumina Studio</h1>
+${ready ? '<p>Use the Lumina account you created in Settings → Remote access.</p>' : '<p class="error">No account is set up yet. Create one in Lumina → Settings → Remote access on the computer running Lumina.</p>'}
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ''}
-<form method="post" action="/login"><input name="pairing_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus aria-label="Pairing code">
-<button>Sign in</button></form></main></body></html>`;
+<form method="post" action="/login">${credentialFields(username)}<div class="row"><button class="approve">Sign in</button></div></form></main></body></html>`;
 }
 
 function consentPage({ clientName, redirect, fields, error }) {
   const host = (() => { try { return new URL(redirect).host; } catch { return redirect; } })();
   const hidden = Object.entries(fields).map(([k, v]) => `<input type="hidden" name="${k}" value="${escapeHtml(v)}">`).join('');
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect to Lumina Studio</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;background:#11110f;color:#eeede8;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}
-main{max-width:440px;background:#181816;border:1px solid #2b2b27;border-radius:12px;padding:24px}h1{font-size:20px;margin:0 0 8px}
-p{color:#b8b8ae}code{background:#24241f;padding:1px 6px;border-radius:4px}input[name=pairing_code]{font:24px ui-monospace,monospace;letter-spacing:.3em;width:100%;padding:10px;box-sizing:border-box;background:#11110f;color:#eeede8;border:1px solid #3a3a34;border-radius:8px;text-align:center}
-.row{display:flex;gap:10px;margin-top:16px}button{flex:1;padding:10px;border-radius:8px;border:0;font-weight:600;cursor:pointer}
-.approve{background:#d4f579;color:#171812}.deny{background:#2a2a25;color:#eeede8}.error{color:#ff8f7a}</style></head>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect to Lumina Studio</title>${pageStyle}</head>
 <body><main><h1>Connect ${escapeHtml(clientName)} to Lumina Studio?</h1>
 <p>It will be able to use your Lumina projects and <b>spend credits on your AI provider keys</b> (images, video, narration, writing). It will return to <code>${escapeHtml(host)}</code>.</p>
-<p>Enter the 6-digit pairing code from <b>Lumina → Settings → Remote access</b>:</p>
+<p>Sign in with your Lumina account to approve.</p>
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ''}
-<form method="post" action="/authorize/approve">${hidden}
-<input name="pairing_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" autofocus aria-label="Pairing code">
+<form method="post" action="/authorize/approve">${hidden}${credentialFields()}
 <div class="row"><button class="deny" name="decision" value="deny" formnovalidate>Deny</button><button class="approve" name="decision" value="approve">Approve</button></div>
 </form></main></body></html>`;
 }
-
