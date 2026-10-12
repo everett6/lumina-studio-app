@@ -1,10 +1,18 @@
 import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast, askText } from './lib.js';
 
 // Storyboard: an idea becomes a shot list; each shot gets a still frame, then a clip; clips join into one video.
-const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '' };
+const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0 };
 const jobActive = (job) => job && ['queued', 'running'].includes(job.status);
 const statusText = { queued: 'Queued', running: 'Generating…', failed: 'Failed', interrupted: 'Interrupted' };
 const defaultLengths = [4, 5, 6, 8, 10];
+const reviewLabels = {
+  pending: 'Not checked yet', needs_review: 'Needs your review', accepted: 'Accepted', needs_repair: 'Needs repair', needs_regeneration: 'Redo', rejected: 'Rejected',
+};
+const reviewTone = { accepted: 'ok', needs_review: 'busy', pending: 'busy', needs_repair: 'error', needs_regeneration: 'error', rejected: 'error' };
+const people = () => (state.characters ?? []).filter((c) => c.kind !== 'location');
+const places = () => (state.characters ?? []).filter((c) => c.kind === 'location');
+const voiceOptions = () => modelsFor('speech').flatMap(({ provider, model }) => (model.voices?.length ? model.voices : [null])
+  .map((voice) => ({ value: JSON.stringify({ provider: provider.id, model: model.id, voice }), label: `${provider.label} · ${model.label}${voice ? ` · ${voice}` : ''}`, ready: provider.ready })));
 const clock = (seconds) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
 
 // The chosen video model, and the clip length it will actually make for a shot (the nearest one it supports).
@@ -26,6 +34,13 @@ const call = (path, method = 'POST', body = {}) => api(path, { method, body: met
 
 function show(detail) {
   ui.detail = detail;
+  // What finishing the film would still cost (still shots are free), worked out by the app.
+  api(`/api/storyboards/${detail.sequence.id}/estimate`).then((estimate) => {
+    if (ui.detail?.sequence.id !== detail.sequence.id) return;
+    const changed = JSON.stringify(estimate) !== JSON.stringify(ui.estimate);
+    ui.estimate = estimate;
+    if (changed && !$('#sb-editor').contains(document.activeElement)) render();
+  }).catch(() => {});
   const option = [...$('#sb-select').options].find((o) => o.value === detail.sequence.id);
   if (option) option.textContent = `${detail.sequence.title} (${detail.shots.length} shots)`;
   render();
@@ -37,10 +52,10 @@ function watch() {
   clearTimeout(ui.timer);
   const seq = ui.detail?.sequence;
   const joiningNow = seq?.join?.state === 'running' || seq?.production?.state === 'running' || seq?.enhance?.state === 'running';
-  if (!joiningNow && !ui.detail?.shots.some((s) => jobActive(s.frameJob) || jobActive(s.clipJob))) return;
+  if (!joiningNow && Date.now() > ui.pollUntil && !ui.detail?.shots.some((s) => jobActive(s.frameJob) || jobActive(s.clipJob))) return;
   ui.timer = setTimeout(guard(async () => {
     if (!ui.detail || $('#storyboard-view').classList.contains('hidden')) return;
-    const snapshot = (d) => JSON.stringify([d.sequence.join, d.sequence.production, d.sequence.enhance, d.sequence.outputPath, d.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath])]);
+    const snapshot = (d) => JSON.stringify([d.sequence.join, d.sequence.production, d.sequence.enhance, d.sequence.outputPath, d.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath, s.review?.status, s.review?.checkedAt, s.details?.dialogue?.map((l) => l.assetId)])]);
     const before = snapshot(ui.detail);
     const next = await call(`/api/storyboards/${ui.detail.sequence.id}`, 'GET');
     const after = snapshot(next);
@@ -169,7 +184,8 @@ function settingsPanel() {
         disabled: !withFrames.length || !ui.options?.ffmpeg || joiningNow, title: 'Make every missing frame and clip, then join them into the finished film',
         onclick: guard(async () => {
           const missing = withFrames.filter((s) => !s.videoPath).length;
-          if (missing && !confirm(`Produce the film? Lumina will make ${missing} clip(s) (${clock(runtime)} in total)${settings.continuity === 'chain' ? ', one after another so each continues from the last' : ''}, then join them. Video takes minutes per clip.${clipCost ? `\n\nAt list prices: ${clipCost} for all clips.` : ''}`)) return;
+          const left = ui.estimate?.totalUsd ? `\n\nStill to spend at list prices: about $${ui.estimate.totalUsd.toFixed(2)}${ui.estimate.unpriced ? ` plus ${ui.estimate.unpriced} job(s) without a listed price` : ''}${ui.estimate.fits === false ? ' — MORE THAN YOUR REMAINING BUDGET' : ''}.` : (clipCost ? `\n\nAt list prices: ${clipCost} for all clips.` : '');
+          if (missing && !confirm(`Produce the film? Lumina will make ${missing} clip(s) (${clock(runtime)} in total)${settings.continuity === 'chain' ? ', one after another so each continues from the last' : ''}, then join them.${settings.requireApproval ? ' It will stop for you to approve the frames, then the clips.' : ''} Video takes minutes per clip.${left}`)) return;
           show(await call(`/api/storyboards/${sequence.id}/produce`));
         }),
       }, '🎬 Produce film'),
@@ -191,11 +207,12 @@ function settingsPanel() {
       modelPicker('image', 'generate', 'IMAGE MODEL (FRAMES)'),
       modelPicker('video', 'video', 'VIDEO MODEL (CLIPS)'),
       ...filmFields(settings)),
-    characters, actions, productionLine(sequence),
+    characters, filmPanels(sequence), actions, productionLine(sequence),
     h('p.muted', {}, [
       withFrames.length ? `Running time: ${clock(runtime)} across ${withFrames.length} shot(s)${settings.targetSeconds ? ` (target ${clock(settings.targetSeconds)})` : ''}.` : '',
       costLine ? `At list prices (${state.catalog?.pricesAsOf ?? 'recent'}): ${costLine}.` : '',
     ].filter(Boolean).join(' ')),
+    estimateLine(),
     join?.state === 'failed' ? h('p.error-text', {}, join.error) : null);
 }
 
@@ -215,10 +232,99 @@ function jobBadge(job, label) {
   return h('span.badge', { dataset: { tone: jobActive(job) ? 'busy' : 'error' }, title: job.error ?? '' }, `${label}: ${statusText[job.status] ?? job.status}`);
 }
 
+// A shot's continuity details: who and where, the action, the words, how it starts and ends, what must not change.
+function shotDetails(shot) {
+  const d = shot.details;
+  const locked = d.locked;
+  const save = (patch) => guard(async () => show(await call(`/api/shots/${shot.id}`, 'PATCH', { details: patch })))();
+  const text = (label, key, max, placeholder, story = true) => {
+    const node = h('input', { type: 'text', value: d[key] ?? '', maxLength: max, placeholder, disabled: locked && story, 'aria-label': label, onchange: () => save({ [key]: node.value }) });
+    return h('label', {}, h('span.field-label', {}, label.toUpperCase()), node);
+  };
+  const location = h('select', { 'aria-label': 'Location', onchange: () => save({ locationId: location.value || null }) },
+    h('option', { value: '' }, places().length ? 'No saved location' : 'Add a location on the Characters tab'), ...places().map((c) => h('option', { value: c.id }, c.name)));
+  location.value = d.locationId ?? '';
+  const cast = new Set(d.characterIds);
+  const castChips = h('div.applied-presets', {}, h('span.field-label', {}, 'IN THIS SHOT'),
+    ...people().map((c) => h(`button.character-chip${cast.has(c.id) ? '.selected' : ''}`, { 'aria-pressed': String(cast.has(c.id)), onclick: () => {
+      if (cast.has(c.id)) cast.delete(c.id); else cast.add(c.id);
+      save({ characterIds: [...cast] });
+    } }, c.references[0] ? h('img', { src: c.references[0].path, alt: '' }) : null, c.name)),
+    h('small.muted', {}, cast.size ? '' : 'None picked: the film\'s whole cast is used.'));
+
+  // Dialogue: one row per line; any change saves the whole list.
+  const rows = d.dialogue.map((line) => ({ ...line }));
+  const speakers = [['narrator', 'Narrator'], ...people().map((c) => [c.id, c.name])];
+  const saveLines = () => save({ dialogue: rows.filter((r) => r.text.trim()).map(({ speaker, text: words, start }) => ({ speaker, text: words, start })) });
+  const lineRow = (row, i) => {
+    const speaker = h('select', { disabled: locked, 'aria-label': 'Speaker', onchange: () => { row.speaker = speaker.value; saveLines(); } }, ...speakers.map(([v, label]) => h('option', { value: v }, label)));
+    speaker.value = row.speaker;
+    const words = h('input', { type: 'text', value: row.text, maxLength: 1000, disabled: locked, 'aria-label': 'Line', onchange: () => { row.text = words.value; saveLines(); } });
+    const start = h('input', { type: 'number', min: 0, step: 0.1, value: row.start ?? '', placeholder: 'auto', disabled: locked, 'aria-label': 'Starts at (seconds into the shot)', title: 'Seconds into the shot (empty = one after another)',
+      onchange: () => { row.start = start.value === '' ? null : Number(start.value); saveLines(); } });
+    return h('div.key-row.sb-line', {}, speaker, words, start,
+      row.audioPath ? h('audio', { src: row.audioPath, controls: true, preload: 'none' }) : h('span.muted', {}, 'not recorded'),
+      locked ? null : h('button.ghost', { 'aria-label': 'Remove line', onclick: () => { rows.splice(i, 1); saveLines(); } }, '✕'));
+  };
+  const videoModels = modelsFor('video');
+  const model = h('select', { 'aria-label': 'Video model for this shot', onchange: () => save({ model: model.value }) },
+    h('option', { value: '' }, 'Storyboard\'s video model'), ...videoModels.map(({ provider, model: m, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${m.label}`)));
+  model.value = d.model ?? '';
+  const method = h('select', { 'aria-label': 'Shot type', onchange: () => save({ method: method.value }) },
+    h('option', { value: 'video' }, 'Video clip (paid)'), h('option', { value: 'still' }, 'Still shot with camera move (free)'));
+  method.value = d.method;
+  const motion = h('select', { 'aria-label': 'Still-shot move', onchange: () => save({ motion: motion.value }) },
+    ...(ui.options?.stillMotions ?? ['push-in', 'pull-out', 'pan-left', 'pan-right', 'rise', 'hold']).map((m) => h('option', { value: m }, m)));
+  motion.value = d.motion;
+  const toggle = (label, key) => {
+    const box = h('input', { type: 'checkbox', checked: Boolean(d[key]), onchange: () => save({ [key]: box.checked }) });
+    return h('label.check-row', {}, box, h('span', {}, label));
+  };
+  return h('details.panel-details.sb-details', {},
+    h('summary', {}, [d.scene || 'Continuity details', locked ? '🔒 locked' : '', d.dialogue.length ? `${d.dialogue.length} line(s)` : ''].filter(Boolean).join(' · ')),
+    h('div.sb-grid', {},
+      text('Scene', 'scene', 80, 'e.g. 3 – Rooftop at night', false),
+      h('label', {}, h('span.field-label', {}, 'LOCATION'), location),
+      h('label', {}, h('span.field-label', {}, 'SHOT TYPE'), method),
+      d.method === 'still' ? h('label', {}, h('span.field-label', {}, 'STILL-SHOT MOVE'), motion) : h('label', {}, h('span.field-label', {}, 'VIDEO MODEL'), model),
+      text('Action', 'action', 1000, 'The one thing that must happen'),
+      text('Starts with', 'startState', 500, 'Situation at the first frame'),
+      text('Ends with', 'endState', 500, 'Situation at the last frame'),
+      text('Must not change', 'forbidden', 500, 'e.g. the red scarf, the scar on her left cheek', false)),
+    castChips,
+    h('div.sb-dialogue', {}, h('span.field-label', {}, 'DIALOGUE'), ...rows.map(lineRow),
+      locked ? null : h('button.text-button', { onclick: () => { rows.push({ speaker: speakers[1]?.[0] ?? 'narrator', text: '', start: null }); render(); } }, '+ Add a line')),
+    h('div.key-row', {},
+      toggle('Smooth to 30 fps', 'interpolate'), toggle('Mute the clip\'s own sound', 'muteClipSound'),
+      h('label.check-row', { title: 'Locked shots keep their story (description, action, dialogue, start and end) until you unlock them.' },
+        h('input', { type: 'checkbox', checked: locked, onchange: (event) => save({ locked: event.target.checked }) }), h('span', {}, 'Lock story'))));
+}
+
+// Review: the free checks' findings and the person's decision.
+function reviewRow(shot) {
+  const r = shot.review ?? {};
+  const settings = ui.detail.sequence.settings;
+  const act = (path, body) => guard(async () => show(await call(path, 'POST', body)));
+  const problems = (r.checks ?? []).filter((c) => !c.ok);
+  const frameApproved = r.frameApproved && r.frameApproved === shot.imageAssetId;
+  return h('div.sb-review', {},
+    h('div.key-row', {},
+      shot.videoPath ? h('span.badge', { dataset: { tone: reviewTone[r.status] ?? 'busy' }, title: r.notes || '' }, reviewLabels[r.status] ?? 'Not checked yet') : null,
+      settings.requireApproval && shot.imagePath && !shot.videoPath
+        ? h('button.button.secondary.small', { onclick: act(`/api/shots/${shot.id}/approve-frame`, { approved: !frameApproved }) }, frameApproved ? '✓ Frame approved' : 'Approve frame')
+        : null,
+      shot.videoPath ? h('button.button.secondary.small', { disabled: r.status === 'accepted', onclick: act(`/api/shots/${shot.id}/review`, { status: 'accepted' }) }, r.status === 'accepted' ? '✓ Accepted' : 'Accept') : null,
+      shot.videoPath ? h('button.text-button', { onclick: act(`/api/shots/${shot.id}/review`, { status: 'needs_regeneration' }) }, 'Mark for redo') : null,
+      shot.videoPath ? h('button.text-button.danger', { onclick: act(`/api/shots/${shot.id}/review`, { status: 'rejected' }) }, 'Leave out') : null,
+      shot.videoPath ? h('button.text-button', { title: 'Run the free checks again', onclick: act(`/api/shots/${shot.id}/checks`, {}) }, 'Re-check') : null),
+    problems.length ? h('ul.sb-problems', {}, ...problems.map((c) => h('li', { dataset: { severity: c.severity } }, c.detail))) : null);
+}
+
 function shotCard(shot, index, total) {
   const id = ui.detail.sequence.id;
   const act = (path, method, body) => guard(async () => show(await call(path, method, body)));
-  const description = h('textarea', { rows: 3, maxLength: 2000, value: shot.description, 'aria-label': `Shot ${shot.position} description`, placeholder: 'What we see and what happens in this shot.',
+  const locked = shot.details.locked;
+  const description = h('textarea', { rows: 3, maxLength: 2000, value: shot.description, disabled: locked, 'aria-label': `Shot ${shot.position} description`, placeholder: 'What we see and what happens in this shot.',
     oninput: () => { shot.description = description.value; },
     onchange: guard(async () => { await call(`/api/shots/${shot.id}`, 'PATCH', { description: description.value }); }) });
   const camera = h('select', { 'aria-label': 'Camera move' }, h('option', { value: '' }, 'No camera move'),
@@ -231,10 +337,13 @@ function shotCard(shot, index, total) {
   duration.value = String(clipLength(shot.duration));
   duration.onchange = guard(async () => show(await call(`/api/shots/${shot.id}`, 'PATCH', { duration: Number(duration.value) })));
   const start = (kind) => guard(async () => {
-    if (description.value !== shot.description || document.activeElement === description) await call(`/api/shots/${shot.id}`, 'PATCH', { description: description.value });
-    await call(`/api/shots/${shot.id}/${kind}`);
-    show(await call(`/api/storyboards/${id}`, 'GET'));
+    if (!locked && (description.value !== shot.description || document.activeElement === description)) await call(`/api/shots/${shot.id}`, 'PATCH', { description: description.value });
+    const result = await call(`/api/shots/${shot.id}/${kind}`);
+    if (result.alreadyRunning) toast('That job is already running.');
+    show(result.sequence ? result : await call(`/api/storyboards/${id}`, 'GET'));
   });
+  const still = shot.details.method === 'still';
+  const unrecorded = shot.details.dialogue.filter((l) => !l.assetId).length;
   const media = shot.videoPath ? h('video', { src: shot.videoPath, controls: true, loop: true, preload: 'metadata', poster: shot.imagePath ?? '' })
     : shot.imagePath ? h('img', { src: shot.imagePath, alt: `Frame for shot ${shot.position}`, loading: 'lazy' })
       : h('div.sb-placeholder.muted', {}, 'No frame yet');
@@ -242,17 +351,27 @@ function shotCard(shot, index, total) {
     h('div.sb-media', { dataset: { aspect: ui.detail.sequence.settings.aspect } }, media, h('span.sb-number', {}, String(shot.position))),
     h('div.sb-shot-fields', {},
       description,
-      h('div.key-row', {}, camera, duration),
+      h('div.key-row', {}, camera, duration, still ? h('span.badge', {}, 'Still shot · free') : null),
       h('div.key-row.sb-shot-actions', {},
         h('button.button.secondary.small', { disabled: jobActive(shot.frameJob), onclick: start('frame') }, shot.imagePath ? 'Redo frame' : 'Make frame'),
-        h('button.button.secondary.small', { disabled: jobActive(shot.clipJob), onclick: start('animate') }, shot.videoPath ? 'Redo clip' : 'Animate'),
+        still
+          ? h('button.button.secondary.small', { disabled: !shot.imagePath, onclick: start('still') }, shot.videoPath ? 'Re-render still' : 'Render still (free)')
+          : h('button.button.secondary.small', { disabled: jobActive(shot.clipJob), onclick: start('animate') }, shot.videoPath ? 'Redo clip' : 'Animate'),
+        unrecorded ? h('button.button.secondary.small', { title: 'Speak the dialogue in each character\'s voice', onclick: guard(async () => {
+          const result = await call(`/api/shots/${shot.id}/dialogue`);
+          if (result.missingVoices.length) toast(`No voice set for: ${result.missingVoices.join(', ')}. Pick one on the Characters tab (or a narrator voice).`, 'error');
+          ui.pollUntil = Date.now() + 90_000;
+          watch();
+        }) }, `Voice ${unrecorded} line(s)`) : null,
         jobBadge(shot.frameJob, 'Frame'), jobBadge(shot.clipJob, 'Clip'),
         h('span.sb-spacer'),
         h('button.ghost', { disabled: index === 0, title: 'Move earlier', 'aria-label': 'Move earlier', onclick: act(`/api/shots/${shot.id}/move`, 'POST', { direction: 'up' }) }, '↑'),
         h('button.ghost', { disabled: index === total - 1, title: 'Move later', 'aria-label': 'Move later', onclick: act(`/api/shots/${shot.id}/move`, 'POST', { direction: 'down' }) }, '↓'),
         h('button.ghost', { title: 'Delete shot', 'aria-label': 'Delete shot', onclick: guard(async () => {
           if (confirm(`Delete shot ${shot.position}?`)) show(await call(`/api/shots/${shot.id}`, 'DELETE'));
-        }) }, '✕'))));
+        }) }, '✕')),
+      reviewRow(shot),
+      shotDetails(shot)));
 }
 
 // Film settings: how shots connect, clip length, look, and how the clips are joined.
@@ -264,13 +383,110 @@ function filmFields(settings) {
     return h('label', {}, h('span.field-label', {}, label.toUpperCase()), node);
   };
   const lengths = videoChoice()?.model.durations?.length ? videoChoice().model.durations : defaultLengths;
+  const lastFrame = Boolean(videoChoice()?.model.lastFrame);
   return [
-    select('Continuity', 'continuity', [['frames', 'Separate shots (own frame each)'], ['chain', 'Continuous (each clip starts where the last ended)']], settings.continuity),
+    select('Continuity', 'continuity', [
+      ['frames', 'Each shot from its approved frame'],
+      ['keyframes', `Start and end frames${lastFrame ? '' : ' (this video model can\'t take an end frame)'}`],
+      ['chain', 'Continuous (each clip starts where the last ended)'],
+    ], settings.continuity),
     select('Clip length', 'clipLength', [['0', 'Writer decides'], ...lengths.map((d) => [String(d), `${d} s every shot`])], settings.clipLength ?? 0, Number),
-    select('Look', 'realistic', [['true', 'Realistic live action'], ['false', 'As written (any style)']], settings.realistic !== false, (v) => v === 'true'),
+    select('Look', 'look', [['live-action', 'Live-action film'], ['anime', 'Anime feature film'], ['as-written', 'As written (any style)']], settings.look ?? 'live-action'),
     select('Transitions', 'transition', [['cut', 'Hard cuts'], ['crossfade', 'Crossfades (0.5 s)']], settings.transition ?? 'cut'),
     select('Finish', 'finish', [['none', 'None'], ['cinematic', 'Cinematic (2.39:1 bars, grain, fades)']], settings.finish ?? 'none'),
   ];
+}
+
+// Upload a music, ambience or voice file; resolves with the saved audio asset.
+function chooseAudio() {
+  return new Promise((resolve, reject) => {
+    const input = h('input', { type: 'file', accept: 'audio/mpeg,audio/wav,audio/ogg,audio/flac,.mp3,.wav,.ogg,.flac' });
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      try {
+        const response = await fetch(`/api/projects/${state.project.id}/audio`, { method: 'POST', credentials: 'same-origin', body: file, headers: { 'x-lumina-label': file.name.slice(0, 120) } });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Upload failed.');
+        resolve(data.asset);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    input.click();
+  });
+}
+
+// The settings that make a film look like one film and sound finished: look bible and seed, delivery size and
+// upscaler, approval, and the soundtrack.
+function filmPanels(sequence) {
+  const { settings } = sequence;
+  const check = (label, key, hint) => {
+    const box = h('input', { type: 'checkbox', checked: Boolean(settings[key]), onchange: () => saveSettings({ [key]: box.checked }) });
+    return h('label.check-row', { title: hint }, box, h('span', {}, label));
+  };
+  const select = (label, key, options, cast = String) => {
+    const node = h('select', { 'aria-label': label, onchange: () => saveSettings({ [key]: cast(node.value) }) }, ...options.map(([v, text]) => h('option', { value: v }, text)));
+    node.value = String(settings[key]);
+    return h('label', {}, h('span.field-label', {}, label.toUpperCase()), node);
+  };
+  const bible = h('textarea', { rows: 3, maxLength: 1500, value: settings.lookBible ?? '', 'aria-label': 'Look bible',
+    placeholder: 'Sent with every frame and clip. e.g. “Muted teal-and-amber palette, 35 mm anamorphic lens, soft rim light, light film grain, late-1970s Tokyo.”',
+    onchange: () => saveSettings({ lookBible: bible.value }) });
+  const seed = h('input', { type: 'number', min: 0, value: settings.seed ?? '', placeholder: 'None', 'aria-label': 'Seed', onchange: () => saveSettings({ seed: seed.value === '' ? null : Number(seed.value) }) });
+  const screenplay = h('textarea', { rows: 8, maxLength: 60000, value: sequence.screenplay ?? '', 'aria-label': 'Screenplay',
+    placeholder: 'Optional. Paste a screenplay: the writer follows its scenes in order and keeps the dialogue word for word.', onchange: () => saveFields({ screenplay: screenplay.value }) });
+  const budgetSeconds = h('input', { type: 'number', min: 0, max: 900, value: settings.videoSecondsBudget || '', placeholder: 'No limit', 'aria-label': 'Seconds of paid video',
+    onchange: () => saveSettings({ videoSecondsBudget: Number(budgetSeconds.value || 0) }) });
+  const level = (label, value, onchange) => {
+    const node = h('input', { type: 'range', min: 0, max: 1.5, step: 0.05, value, 'aria-label': label, onchange: () => onchange(Number(node.value)) });
+    return h('label', {}, h('span.field-label', {}, `${label.toUpperCase()}`), node);
+  };
+  const bed = (key, label) => {
+    const current = settings[key];
+    return h('div.key-row', {},
+      h('span.field-label', {}, label.toUpperCase()),
+      current ? h('span.muted', {}, 'Uploaded track') : h('span.muted', {}, 'None'),
+      h('button.button.secondary.small', { onclick: guard(async () => {
+        const asset = await chooseAudio();
+        if (asset) saveSettings({ [key]: { assetId: asset.id, volume: current?.volume ?? (key === 'music' ? 0.3 : 0.25) } });
+      }) }, current ? 'Replace…' : 'Upload…'),
+      current ? level('Level', current.volume, (volume) => saveSettings({ [key]: { ...current, volume } })) : null,
+      current ? h('button.text-button.danger', { onclick: () => saveSettings({ [key]: null }) }, 'Remove') : null);
+  };
+  const narrator = h('select', { 'aria-label': 'Narrator voice', onchange: () => saveSettings({ narratorVoice: narrator.value ? JSON.parse(narrator.value) : null }) },
+    h('option', { value: '' }, 'No narrator voice'), ...voiceOptions().map((o) => h('option', { value: o.value, disabled: !o.ready }, o.label + (o.ready ? '' : ' (add key)'))));
+  narrator.value = settings.narratorVoice ? JSON.stringify({ provider: settings.narratorVoice.provider, model: settings.narratorVoice.model, voice: settings.narratorVoice.voice ?? null }) : '';
+  return h('div.sb-film-panels', {},
+    h('details.panel-details', { open: !sequence.outputAssetId }, h('summary', {}, 'Look and continuity — keep every face, set and colour the same'),
+      h('div.sb-grid', {},
+        h('label.sb-wide', {}, h('span.field-label', {}, 'LOOK BIBLE (EVERY SHOT)'), bible),
+        h('label', {}, h('span.field-label', {}, 'SEED (SAME FOR EVERY SHOT)'), seed),
+        h('label', {}, h('span.field-label', {}, 'PAID VIDEO LIMIT (SECONDS)'), budgetSeconds),
+        check('Approve frames and clips before they are used', 'requireApproval', 'Production stops for you to approve every frame (before video is paid for) and every clip (before the film is joined).')),
+      h('p.muted.small-note', {}, 'Characters and locations you add above are attached to every shot they appear in (description and reference photos). Lock a character once it looks right.')),
+    h('details.panel-details', {}, h('summary', {}, 'Screenplay'), screenplay),
+    h('details.panel-details', {}, h('summary', {}, 'Delivery — size and upscaling'),
+      h('div.sb-grid', {},
+        select('Output size', 'outputHeight', [['720', '720p'], ['1080', '1080p (Full HD)'], ['1440', '1440p'], ['2160', '2160p (4K)']], Number),
+        select('Upscaler for smaller clips', 'upscale', [['none', 'None (Lanczos fit only)'], ['anime', 'AI — anime (Real-ESRGAN anime video)'], ['ai', 'AI — live action (Real-ESRGAN x4plus)'], ['fast', 'Fast GPU (sharp Lanczos)']]),
+        select('Frame rate', 'interpolateFps', [['0', 'As generated'], ['30', 'Smooth to 30 fps (RIFE)']], Number)),
+      h('p.muted.small-note', {}, 'Each clip is enlarged once, from its original, straight to the output size; working files are near-lossless and the film is encoded once at the end.')),
+    h('details.panel-details', {}, h('summary', {}, 'Sound — dialogue, music, ambience'),
+      h('label', {}, h('span.field-label', {}, 'NARRATOR VOICE'), narrator),
+      bed('music', 'Music'), bed('ambience', 'Ambience'),
+      level('Clip sound (effects from the video model)', settings.clipVolume ?? 1, (clipVolume) => saveSettings({ clipVolume })),
+      h('p.muted.small-note', {}, 'Dialogue is spoken in each character\'s voice (set it on the Characters tab), levelled to match, and the music ducks under it.')));
+}
+
+function estimateLine() {
+  const e = ui.estimate;
+  if (!e || !e.lines.length) return null;
+  const parts = [`Still to spend: about $${e.totalUsd.toFixed(2)} for ${e.lines.length} job(s)`];
+  if (e.unpriced) parts.push(`${e.unpriced} without a listed price`);
+  if (e.stillSeconds) parts.push(`${clock(e.stillSeconds)} of free still shots`);
+  if (e.remainingUsd != null) parts.push(`budget left $${e.remainingUsd.toFixed(2)}`);
+  return h(e.fits === false ? 'p.error-text' : 'p.muted', {}, `${parts.join(' · ')}${e.fits === false ? ' — over your budget.' : '.'}`);
 }
 
 function productionLine(sequence) {
@@ -278,18 +494,19 @@ function productionLine(sequence) {
   if (!production) return null;
   if (production.state === 'running') return h('p.badge', { dataset: { tone: 'busy' } }, `In production: ${production.step}…`);
   if (production.state === 'paused') return h('p.error-text', {}, `Production paused: ${production.error ?? production.step}`);
+  if (production.state === 'review') return h('p.badge', { dataset: { tone: 'busy' } }, `Waiting for you: ${production.step}.`);
   return h('p.muted', {}, `Production finished. ${production.step ?? ''}`);
 }
 
 function enhanceRow(sequence) {
   const status = sequence.enhance;
   const outputId = sequence.outputAssetId;
-  const start = (mode, download = false) => guard(async () => {
+  const start = (mode, download = false, target = undefined) => guard(async () => {
     try {
-      await call(`/api/assets/${outputId}/enhance`, 'POST', { mode, download });
+      await call(`/api/assets/${outputId}/enhance`, 'POST', { mode, download, height: target });
     } catch (error) {
       if (error.data?.needsDownload && !download) {
-        if (confirm('AI upscaling uses Real-ESRGAN, which runs on your NVIDIA GPU. It is not installed yet.\n\nDownload it now from the official GitHub release (about 47 MB) into Lumina\'s data folder?')) return start(mode, true)();
+        if (confirm('AI upscaling uses Real-ESRGAN, which runs on your NVIDIA GPU. It is not installed yet.\n\nDownload it now from the official GitHub release (about 47 MB) into Lumina\'s data folder?')) return start(mode, true, target)();
         return undefined;
       }
       throw error;
@@ -297,11 +514,14 @@ function enhanceRow(sequence) {
     return show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
   });
   const running = status?.state === 'running';
+  const height = h('select', { 'aria-label': 'Target height' }, h('option', { value: '' }, '2× size'), ...[1080, 1440, 2160].map((v) => h('option', { value: v }, `${v}p`)));
+  const go = (mode) => (event) => start(mode, false, height.value ? Number(height.value) : undefined)(event);
   return h('div.key-row.sb-enhance', {},
-    h('span.field-label', {}, 'ENHANCE'),
-    h('button.button.secondary.small', { disabled: running, title: 'GPU upscaling (libplacebo, EWA Lanczos) to twice the size, up to 4K. Takes seconds to minutes.', onclick: start('fast') }, 'Sharpen + 2× (fast, GPU)'),
-    h('button.button.secondary.small', { disabled: running, title: 'Real-ESRGAN AI super-resolution on your NVIDIA GPU: adds real detail, but takes about a second or more per frame.', onclick: start('ai') }, 'AI upscale 2× (Real-ESRGAN, slow)'),
-    running ? h('span.badge', { dataset: { tone: 'busy' } }, `Enhancing (${status.mode === 'ai' ? 'AI' : 'fast'})… ${status.done}/${status.total}`) : null,
+    h('span.field-label', {}, 'ENHANCE'), height,
+    h('button.button.secondary.small', { disabled: running, title: 'GPU upscaling (libplacebo, EWA Lanczos). Takes seconds to minutes.', onclick: go('fast') }, 'Sharpen (fast, GPU)'),
+    h('button.button.secondary.small', { disabled: running, title: 'Real-ESRGAN anime-video model: clean lines and flat colours stay crisp, no smearing.', onclick: go('anime') }, 'AI upscale — anime'),
+    h('button.button.secondary.small', { disabled: running, title: 'Real-ESRGAN x4plus on your GPU: adds real detail to live action, but takes about a second or more per frame.', onclick: go('ai') }, 'AI upscale — live action'),
+    running ? h('span.badge', { dataset: { tone: 'busy' } }, `Enhancing (${status.mode})… ${status.done}/${status.total}`) : null,
     status?.state === 'failed' ? h('span.error-text', {}, status.error) : null,
     status?.state === 'completed' ? h('span.muted', {}, `Enhanced copy (${status.width}×${status.height}) saved to the library.`) : null);
 }

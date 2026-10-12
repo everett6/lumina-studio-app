@@ -1,4 +1,4 @@
-import { $, api, emit, h, on, toast } from './lib.js';
+import { $, api, askText, emit, h, on, toast } from './lib.js';
 
 const keyProviders = [
   { id: 'openrouter', label: 'OpenRouter — one key for everything', use: 'Universal key: images (Nano Banana, GPT Image, FLUX.2, Seedream), video (Veo 3.1, Kling 3.0, Seedance, Wan, Hailuo) and writing (Claude, GPT, Gemini) through one account', url: 'https://openrouter.ai/settings/keys' },
@@ -191,9 +191,93 @@ async function renderRemote() {
   if (busy) remoteTimer = setTimeout(() => renderRemote().catch(() => {}), 2000);
 }
 
+// Budget: hard spending limits checked before any paid job starts, approvals waiting for a decision, charges
+// whose outcome is unknown, and the live model list.
+async function renderBudget() {
+  const [status, models] = await Promise.all([api('/api/budget'), api('/api/models/status').catch(() => null)]);
+  const s = status.settings;
+  const money = (v) => (v == null ? '—' : `$${Number(v).toFixed(2)}`);
+  const field = (label, key, attrs = {}) => {
+    const input = h('input', { type: 'number', min: 0, step: 0.01, value: s[key] ?? '', placeholder: 'No limit', 'aria-label': label, ...attrs });
+    return [input, h('label', {}, h('span.field-label', {}, label.toUpperCase()), input)];
+  };
+  const enabled = h('input', { type: 'checkbox', checked: s.enabled });
+  const mcp = h('input', { type: 'checkbox', checked: s.mcpCanApprove });
+  const [total, totalLabel] = field('Total budget (USD)', 'totalUsd');
+  const [daily, dailyLabel] = field('Per day', 'dailyUsd');
+  const [project, projectLabel] = field('Per project', 'projectUsd');
+  const [perRequest, perRequestLabel] = field('Per request (also the ceiling for unpriced models)', 'perRequestUsd');
+  const [approval, approvalLabel] = field('Ask me above', 'approvalAboveUsd');
+  const [retry, retryLabel] = field('Kept back for retries', 'retryReserveUsd');
+  const num = (input) => (input.value === '' ? null : Number(input.value));
+  const save = (extra = {}) => async () => {
+    try {
+      await api('/api/budget', { method: 'PUT', body: { enabled: enabled.checked, mcpCanApprove: mcp.checked, totalUsd: num(total) ?? 0, dailyUsd: num(daily), projectUsd: num(project),
+        perRequestUsd: num(perRequest), approvalAboveUsd: num(approval), retryReserveUsd: num(retry) ?? 0, ...extra } });
+      toast('Budget saved.');
+      await renderBudget();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  };
+  const decide = (id, approve) => async () => {
+    try {
+      await api(`/api/budget/approvals/${id}`, { method: 'POST', body: { approve } });
+      await renderBudget();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  };
+  const resolve = (row) => async () => {
+    const answer = await askText('What did this job cost?', {
+      label: `Check ${row.provider}'s dashboard for ${row.model}. Enter the charge in USD (0 if it was not charged).`, value: String(row.estimatedUsd ?? ''), okLabel: 'Save' });
+    if (answer === null || answer.trim() === '' || !Number.isFinite(Number(answer))) return;
+    try {
+      await api(`/api/budget/spend/${row.generationId}`, { method: 'POST', body: { actualUsd: Number(answer) } });
+      await renderBudget();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  };
+  const unknown = (status.recent ?? []).filter((r) => r.status === 'unknown');
+  const refresh = async () => {
+    try {
+      await api('/api/models/refresh', { method: 'POST', body: {} });
+      toast('Model list and prices updated from OpenRouter.');
+      emit('keys-changed');
+      await renderBudget();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  };
+  $('#budget-panel').replaceChildren(h('section.panel.remote-card', {},
+    h('div.key-head', {}, h('b', {}, 'Spending limits'), h(`span.badge${s.enabled ? '.ok' : ''}`, {}, s.enabled ? `${money(status.spentUsd)} of ${money(s.totalUsd)} used` : 'Off')),
+    h('p.muted', {}, 'When on, every paid job is priced and checked against these limits before it starts; the amount is reserved until the provider reports the real cost. Requests from Claude or ChatGPT can never change the limits.'),
+    h('label.check-row', {}, enabled, h('span', {}, 'Enforce these limits')),
+    h('div.remote-grid', {}, totalLabel, dailyLabel, projectLabel, perRequestLabel, approvalLabel, retryLabel),
+    h('label.check-row', {}, mcp, h('span', {}, 'Let Claude or ChatGPT approve spends above the threshold (off = only you, here)')),
+    h('div.key-row', {},
+      h('button.button.primary.small', { onclick: save() }, 'Save limits'),
+      h('button.text-button', { title: 'Count spending from now on (the history is kept)', onclick: save({ resetSpending: true }) }, 'Start counting again from now'),
+      h('span.muted', {}, `Today: ${money(status.todayUsd)} · Remaining: ${money(status.remainingUsd)}`)),
+    status.approvals?.length ? h('div', {}, h('span.field-label', {}, 'WAITING FOR YOUR APPROVAL'),
+      ...status.approvals.map((a) => h('div.key-row', {},
+        h('span', {}, `${money(a.estimatedUsd)} · ${a.summary?.operation ?? ''} ${a.summary?.model ?? ''} · asked by ${a.requestedBy === 'mcp' ? 'Claude/ChatGPT' : 'the app'}`),
+        h('button.button.secondary.small', { onclick: decide(a.id, true) }, 'Approve'),
+        h('button.text-button.danger', { onclick: decide(a.id, false) }, 'Deny')))) : null,
+    unknown.length ? h('div', {}, h('span.field-label', {}, 'OUTCOME UNKNOWN (THE PROVIDER MAY HAVE CHARGED)'),
+      ...unknown.map((r) => h('div.key-row', {}, h('span', {}, `${r.provider} · ${r.model} · reserved ${money(r.estimatedUsd)}`),
+        h('button.button.secondary.small', { onclick: resolve(r) }, 'Enter the real charge')))) : null,
+    status.byModel?.length ? h('details.panel-details', {}, h('summary', {}, 'Spending by model'),
+      ...status.byModel.map((m) => h('div.muted', {}, `${m.provider} · ${m.model}: ${money(m.usd)} (${m.jobs} job${m.jobs === 1 ? '' : 's'})`))) : null,
+    h('div.key-row', {},
+      h('span.muted', {}, models?.fetchedAt ? `OpenRouter model list from ${new Date(models.fetchedAt).toLocaleString()}` : 'Using the built-in OpenRouter model list'),
+      h('button.text-button', { onclick: refresh }, 'Refresh models and prices'))));
+}
+
 export function initSettings() {
   on('tab', (tab) => {
-    if (tab === 'settings') Promise.all([render(), renderRemote()]).catch((error) => toast(error.message, 'error'));
+    if (tab === 'settings') Promise.all([render(), renderBudget(), renderRemote()]).catch((error) => toast(error.message, 'error'));
     else clearTimeout(remoteTimer);
   });
 }

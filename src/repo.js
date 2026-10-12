@@ -370,6 +370,8 @@ export function createRepo(db) {
   };
   const approvals = {
     get: (id) => toApproval(db.prepare('SELECT * FROM spend_approvals WHERE id = ?').get(id)),
+    // An approval the person gave for exactly this request and that no job has used yet.
+    approvedFor: (signature) => toApproval(db.prepare("SELECT * FROM spend_approvals WHERE signature = ? AND status = 'approved' ORDER BY decided_at DESC LIMIT 1").get(signature)),
     pendingFor: (signature) => toApproval(db.prepare("SELECT * FROM spend_approvals WHERE signature = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1").get(signature)),
     list: (status = null) => (status
       ? db.prepare('SELECT * FROM spend_approvals WHERE status = ? ORDER BY created_at DESC LIMIT 100').all(status)

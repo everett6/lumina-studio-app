@@ -107,7 +107,8 @@ export function createBudget({ repo }) {
     }
     const needsApproval = unpriced || (s.approvalAboveUsd != null && reserveUsd > s.approvalAboveUsd);
     if (!needsApproval) return { reserveUsd, approval: null };
-    const approval = approvalId ? repo.approvals.get(approvalId) : null;
+    // Without an id, an approval already given in the app for this exact request is used (e.g. by film production).
+    const approval = approvalId ? repo.approvals.get(approvalId) : repo.approvals.approvedFor(signature);
     if (approval?.status === 'approved' && approval.signature === signature) return { reserveUsd, approval };
     if (approval && approval.signature !== signature) throw new BudgetError('That approval was given for a different request.', { approvalMismatch: true });
     const pending = repo.approvals.pendingFor(signature) ?? repo.approvals.create({ signature, summary, estimatedUsd: estimateUsd, requestedBy: source });

@@ -1,8 +1,10 @@
-import { $, api, emit, h, on, pickAsset, state, toast, askText } from './lib.js';
+import { $, api, emit, h, modelsFor, on, pickAsset, state, toast, askText } from './lib.js';
 
-// Characters: defined once (name, look, up to 4 reference photos), attached to generations by id.
+// Characters, products and locations: defined once (name, look, up to 6 reference photos, a voice), attached to
+// generations and storyboard shots by id. Locking one freezes its look so a film can't drift by accident.
 const local = { selected: new Set(), context: { mode: 'image', model: null } };
-const kinds = { character: 'Person or creature', product: 'Product or object' };
+const kinds = { character: 'Person or creature', product: 'Product or object', location: 'Location or set' };
+const maxPhotos = 6;
 
 const guard = (fn) => async (...args) => {
   try { await fn(...args); } catch (error) { toast(error.message, 'error'); }
@@ -32,7 +34,7 @@ export function renderCharacterRow(context = local.context) {
       'aria-pressed': String(local.selected.has(c.id)), title: c.description || 'No description yet',
       onclick: () => {
         if (local.selected.has(c.id)) local.selected.delete(c.id);
-        else if (local.selected.size >= 4) return toast('Use at most 4 characters at once.');
+        else if (local.selected.size >= 8) return toast('Use at most 8 characters and locations at once.');
         else local.selected.add(c.id);
         emit('characters-selected');
         return undefined;
@@ -48,31 +50,45 @@ function card(character) {
     await api(`/api/characters/${character.id}`, { method: 'PATCH', body: fields });
     await loadCharacters();
   });
-  const name = h('input', { type: 'text', value: character.name, maxLength: 80, 'aria-label': 'Name', onchange: () => name.value.trim() && save({ name: name.value }) });
-  const kind = h('select', { 'aria-label': 'Kind', onchange: () => save({ kind: kind.value }) }, ...Object.entries(kinds).map(([value, label]) => h('option', { value }, label)));
+  const locked = Boolean(character.locked);
+  const name = h('input', { type: 'text', value: character.name, maxLength: 80, disabled: locked, 'aria-label': 'Name', onchange: () => name.value.trim() && save({ name: name.value }) });
+  const kind = h('select', { 'aria-label': 'Kind', disabled: locked, onchange: () => save({ kind: kind.value }) }, ...Object.entries(kinds).map(([value, label]) => h('option', { value }, label)));
   kind.value = character.kind;
+  const placeholders = {
+    product: 'What must stay the same: shape, materials, colours, label, proportions…',
+    location: 'What must stay the same: layout, architecture, landmarks, props, time of day, light…',
+    character: 'What must stay the same: face, hair, build, age, clothing, colours…',
+  };
   const description = h('textarea', {
-    rows: 4, maxLength: 1500, value: character.description, 'aria-label': 'Look',
-    placeholder: character.kind === 'product' ? 'What must stay the same: shape, materials, colours, label, proportions…' : 'What must stay the same: face, hair, build, age, clothing, colours…',
+    rows: 4, maxLength: 2500, value: character.description, disabled: locked, 'aria-label': 'Look', placeholder: placeholders[character.kind] ?? placeholders.character,
     onchange: () => save({ description: description.value }),
   });
+  // A voice for this character's dialogue in storyboards.
+  const voices = modelsFor('speech').flatMap(({ provider, model }) => (model.voices?.length ? model.voices : [null])
+    .map((voice) => ({ value: JSON.stringify({ provider: provider.id, model: model.id, voice }), label: `${provider.label} · ${model.label}${voice ? ` · ${voice}` : ''}`, ready: provider.ready })));
+  const voice = h('select', { 'aria-label': 'Voice', onchange: () => save({ voice: voice.value ? JSON.parse(voice.value) : null }) },
+    h('option', { value: '' }, 'No voice'), ...voices.map((o) => h('option', { value: o.value, disabled: !o.ready }, o.label + (o.ready ? '' : ' (add key)'))));
+  voice.value = character.voice ? JSON.stringify({ provider: character.voice.provider, model: character.voice.model, voice: character.voice.voice ?? null }) : '';
   const ids = character.references.map((r) => r.id);
-  return h('section.panel.character-card', {},
+  return h(`section.panel.character-card${locked ? '.locked' : ''}`, {},
     h('div.character-refs', {},
       ...character.references.map((ref) => h('div.tray-item', {}, h('img', { src: ref.path, alt: `${character.name} reference` }),
-        h('button', { title: 'Remove photo', 'aria-label': 'Remove photo', onclick: () => save({ referenceAssetIds: ids.filter((id) => id !== ref.id) }) }, '✕'))),
-      character.references.length < 4 ? h('button.character-add-photo', { onclick: guard(async () => {
+        locked ? null : h('button', { title: 'Remove photo', 'aria-label': 'Remove photo', onclick: () => save({ referenceAssetIds: ids.filter((id) => id !== ref.id) }) }, '✕'))),
+      !locked && character.references.length < maxPhotos ? h('button.character-add-photo', { onclick: guard(async () => {
         const asset = await pickAsset({ title: `Reference photo for ${character.name}` });
         if (asset) await save({ referenceAssetIds: [...ids, asset.id] });
       }) }, '+ Photo') : null),
     h('div.character-fields', {},
       h('div.character-head', {}, name, kind),
       h('label', {}, h('span.field-label', {}, 'LOOK (SENT WITH EVERY PROMPT)'), description),
+      character.kind === 'location' ? null : h('label', {}, h('span.field-label', {}, 'VOICE (FOR DIALOGUE)'), voice),
       h('div.key-row', {},
         h('button.button.secondary.small', { onclick: () => { local.selected.add(character.id); emit('characters-selected'); emit('open-tab', 'create'); } }, 'Use in Create'),
-        h('span.muted', {}, `${character.references.length}/4 reference photos`),
+        h('button.button.secondary.small', { title: locked ? 'Unlock to change the look on purpose' : 'Freeze the look (name, description, photos) so it cannot change by accident',
+          onclick: () => save({ locked: !locked }) }, locked ? '🔒 Locked — unlock' : 'Lock look'),
+        h('span.muted', {}, `${character.references.length}/${maxPhotos} reference photos`),
         h('button.text-button.danger', { onclick: guard(async () => {
-          if (!confirm(`Delete the character "${character.name}"? Its photos stay in the library.`)) return;
+          if (!confirm(`Delete "${character.name}"? Its photos stay in the library.`)) return;
           await api(`/api/characters/${character.id}`, { method: 'DELETE' });
           await loadCharacters();
         }) }, 'Delete'))));
@@ -81,18 +97,19 @@ function card(character) {
 function renderView() {
   const list = state.characters ?? [];
   $('#character-grid').replaceChildren(...(list.length ? list.map(card) : [h('div.history-empty.muted', {},
-    'No characters yet. Create one, describe the look, and add up to four clear photos. Models that edit images (GPT Image, Gemini, FLUX Kontext) use the photos; others use the description.')]));
+    'Nothing here yet. Create a character, product or location, describe what must stay the same, and add up to six clear photos (front, side, three-quarter, back, close-up, full body). Models that take reference images use the photos; others use the description.')]));
 }
 
 export function initCharacters() {
   $('#character-new').addEventListener('click', guard(async () => {
-    const name = await askText('New character or product', { label: 'Name', placeholder: 'e.g. Mira, or “Blue sneaker”', okLabel: 'Create' });
+    const name = await askText('New character, product or location', { label: 'Name', placeholder: 'e.g. Mira, “Blue sneaker”, or “Harbour at night”', okLabel: 'Create' });
     if (!name?.trim()) return;
     await api('/api/characters', { method: 'POST', body: { name } });
     await loadCharacters();
   }));
   on('characters', () => { renderView(); renderCharacterRow(); });
   on('characters-selected', () => renderCharacterRow());
+  on('catalog', () => renderView());
   on('tab', (tab) => { if (tab === 'characters') loadCharacters().catch((error) => toast(error.message, 'error')); });
   // Deleting a photo or a project can remove a character's references.
   on('assets-changed', () => loadCharacters().catch(() => {}));

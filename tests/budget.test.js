@@ -64,6 +64,11 @@ test('budget: requests above the approval threshold wait for the person; MCP app
     // With MCP approval switched on, the MCP client may approve.
     await t.call('PUT', '/api/budget', { mcpCanApprove: true });
     assert.equal((await t.call('POST', `/api/budget/approvals/${again.body.approvalId}`, { approve: true }, mcp)).status, 200);
+    // An approval given for this exact request is picked up without its id (how film production resumes), once.
+    const resumed = await t.call('POST', '/api/generate', video(project.id));
+    assert.equal(resumed.status, 202, JSON.stringify(resumed.body));
+    await settle(t, resumed.body.generation.id);
+    assert.equal((await t.call('POST', '/api/generate', video(project.id))).status, 402);
   } finally {
     await t.close();
   }
@@ -79,6 +84,7 @@ test('budget: unpriced requests need approval and reserve the per-request ceilin
     approvals: {
       get: (id) => approvals.get(id), list: () => [],
       pendingFor: (sig) => [...approvals.values()].find((a) => a.signature === sig && a.status === 'pending'),
+      approvedFor: (sig) => [...approvals.values()].find((a) => a.signature === sig && a.status === 'approved'),
       create: ({ signature }) => { const a = { id: `a${approvals.size}`, signature, status: 'pending' }; approvals.set(a.id, a); return a; },
     },
   };

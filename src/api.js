@@ -15,7 +15,7 @@ import { userMessage } from './providers/http.js';
 import { cleanSequenceSettings, maxShots, maxTargetSeconds } from './sequences.js';
 import { createSearch } from './search.js';
 import { currentRequest, requestContext } from './context.js';
-import { hasFfmpeg } from './video.js';
+import { hasFfmpeg, stillMotions } from './video.js';
 
 const staticTypes = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -365,7 +365,7 @@ export function createApiServer(ctx) {
   });
 
   // ---------- Storyboards ----------
-  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings(), maxShots, maxTargetSeconds }));
+  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings(), maxShots, maxTargetSeconds, stillMotions }));
   route('GET', `/api/projects/${uuid}/storyboards`, (req, [projectId]) => {
     needProject(projectId);
     return { storyboards: repo.sequences.listByProject(projectId) };

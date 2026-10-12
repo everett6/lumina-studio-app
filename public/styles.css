@@ -505,3 +505,27 @@ details.remote-card > summary { cursor: pointer; }
 .ask-modal { width: min(460px, 100%); display: grid; gap: 10px; }
 .ask-modal input, .ask-modal textarea, .ask-modal select { width: 100%; box-sizing: border-box; }
 .ask-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Film continuity, review and sound */
+.check-row { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.check-row input { width: auto; }
+.panel-details { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-top: 10px; }
+.panel-details > summary { cursor: pointer; color: #dcdcd2; font-size: 13px; }
+.panel-details[open] > summary { margin-bottom: 10px; }
+.panel-details > * + * { margin-top: 8px; }
+.sb-film-panels { margin-top: 6px; }
+.sb-details { margin-top: 8px; }
+.sb-dialogue { display: grid; gap: 6px; }
+.sb-details { min-width: 0; }
+.sb-details .sb-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.sb-line { display: grid; grid-template-columns: 110px minmax(0, 1fr) 64px 24px; align-items: center; gap: 6px; }
+.sb-line audio, .sb-line > span.muted { grid-column: 1 / 4; grid-row: 2; }
+.sb-line > * { min-width: 0; }
+.sb-line audio { height: 28px; width: 100%; }
+.sb-review { display: grid; gap: 4px; margin-top: 6px; }
+.sb-problems { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.sb-problems li[data-severity=error] { color: var(--danger); }
+input[type=range] { width: 100%; accent-color: #d6c27a; }
+@media (max-width: 720px) { .sb-line { grid-template-columns: 1fr; } }
+.badge[data-tone=ok] { color: var(--ok); background: #18301f; }
+.character-card.locked { border-color: #4a4430; }
