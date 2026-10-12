@@ -32,14 +32,20 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `generate_cover` | Cover art from the brief and bible. **Spends money.** |
 | `narrate` / `generate_speech` | Narrate a page or chapter with the book's voice, or turn any text into audio. **Spends money.** |
 | `generate_video` | Text-to-video or animate an image. **Spends money; slow.** |
-| `list_characters` / `create_character` | Reusable characters and products. Pass their ids as `characterIds` to `generate_image`, `generate_video` or `create_storyboard`. |
+| `list_characters` / `create_character` / `update_character` | Reusable characters, products and locations (up to 6 reference images, a voice, a lock). Pass their ids as `characterIds` to `generate_image`, `generate_video` or `create_storyboard`. A locked look refuses changes unless `locked: false` is sent. |
 | `enhance_image` | Upscale (2× or 4×) or remove the background of one image. **Spends money.** Inpainting needs a painted mask, so it is app-only. |
 | `import_manuscript` | Create a novel or nonfiction book from existing text, split into chapters at its headings. |
-| `create_storyboard` / `get_storyboard` / `update_shot` | Plan shots from an idea with a writer model, read the storyboard, edit a shot. |
+| `create_storyboard` / `get_storyboard` / `update_shot` | Plan shots from an idea or a screenplay with a writer model (look, look bible, seed, continuity incl. start-and-end frames, output size, upscaler, approval, paid-video limit), read the storyboard with each shot's review state and check results, edit a shot and its continuity details (scene, cast, location, action, dialogue, start/end state, what must not change, video or free still, lock). |
+| `review_shot` | Accept, flag or reject a shot's clip, or approve its frame before video is paid for. |
+| `render_still_shot` | Render a free still shot (the frame with a slow camera move) locally. |
+| `voice_dialogue` | Record a shot's dialogue in each character's voice. **Spends a little.** |
+| `estimate_film_cost` | Price everything a storyboard still needs and whether it fits the budget. Free. |
+| `budget_status` / `decide_approval` | Read limits, spending and pending approvals; approve only if the user allowed MCP approvals in the app. |
+| `refresh_models` | Re-read OpenRouter's public model list and prices. Free. |
 | `generate_shot` | Make one shot's still frame or video clip. **Spends money; clips are slow.** |
 | `generate_storyboard_shots` | Queue frames or clips for every shot at once (they run in the background); follow with `get_storyboard`. |
-| `produce_film` | Make every missing frame and clip and join the film in the background (continuous mode chains clips). |
-| `enhance_video` | 2x upscale of any video: fast GPU scaling or Real-ESRGAN AI on the NVIDIA GPU. |
+| `produce_film` | Make every missing frame, clip, still shot and voice line and finish the film in the background. With approval on it stops twice for review. **Spends money; call `estimate_film_cost` first.** |
+| `enhance_video` | Upscale any video to 2× or to 1080p/1440p/4K: fast GPU scaling, Real-ESRGAN anime-video or x4plus. |
 | `join_storyboard` | Join the clips into one MP4 in the background and wait up to 8 minutes for it (needs ffmpeg on the computer running Lumina). |
 | `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. `fixedLayout: true` makes a fixed-layout EPUB for a picture book. |
 

@@ -51,13 +51,26 @@
 - One-click hosting: Cloudflare quick tunnel, the Lumina website behind an account sign-in (username and password), and the claude.ai/ChatGPT
   connector on the same address.
 
+## Done (v0.8): movie quality and cost control
+
+- Continuity engine: per-shot cast and location references, look (live action / anime), look bible and one seed in
+  every prompt, start-and-end-frame clips, screenplay-faithful planning, locked shots and locked characters.
+- Free checks after every clip: drift from the approved start and end frames, colour stability, length, black or
+  frozen picture, sound, dialogue fit. Review states and an approval mode (frames before video money, clips before the film).
+- Free still shots (Ken Burns moves) for establishing shots and narration, with a paid-video seconds limit for the writer.
+- Quality-first post: near-lossless working files, one upscale per clip from its original straight to the delivery
+  size (Real-ESRGAN anime-video or x4plus), RIFE smoothing, exact timeline, one final encode.
+- Soundtrack: dialogue in character voices, music bed with ducking, ambience, levelling, limiter; music upload.
+- Budget ledger with hard limits, approvals and no double billing; live OpenRouter model list and prices; resumable
+  provider jobs after a restart.
+
 ## Next
 
 1. **Verify with real accounts.** Adapters are tested against faked HTTP only. Run one low-cost call per provider
    (image, voice, video, writer) with real keys, connect claude.ai and ChatGPT through a real tunnel, and fix any drift.
 2. **Books, continued.** Two-page spreads, EPUB media overlays (read-along narration), multi-voice dialogue
    narration, and a built-in tunnel option.
-3. **More video tools.** Start and end frames, clip extension, lip sync, video upscaling, narration or music on a joined storyboard.
+3. **More video tools.** Clip extension, lip sync, repair of one part of a clip, a timeline preview of dialogue and music.
 4. **More models.** Seedance, Wan, Runway and others, plus a field for typing any model ID.
 5. **Your own presets.** Save style, prompt and model combinations; canvas templates saved from your own graphs;
    presets on canvas nodes.
@@ -74,8 +87,11 @@
   brief. Right-to-left text is shaped and ordered correctly within a line, but mixed-direction punctuation can land on
   the wrong side. WebP images are skipped in PDF and Word exports.
 - The mock provider's video is a one-second flat-colour clip when ffmpeg is installed, and a placeholder file otherwise.
-- Characters are only as consistent as the chosen model's handling of reference images; there is no trained identity model. Video
-  gets a character's description, not its photos. Deleting the project that holds a character's photos removes those photos.
+- Characters are only as consistent as the chosen model's handling of reference images; there is no trained identity model.
+  Video clips get the approved frame (and in start-and-end-frame mode the next one) plus the description; models differ in
+  how closely they follow them. The drift checks compare pictures, not identities: they catch a clip that wandered off its
+  frame, not a subtly different face, so a person still reviews each shot. Deleting the project that holds a character's
+  photos removes those photos.
 - Inpainting sends a mask that is white where the image should change. fal's FLUX.1 Fill page does not state its mask convention;
   white-means-repaint is assumed and untested against the live API.
 - Joining storyboard clips needs ffmpeg and ffprobe on the computer. The joined video has no added narration or music.

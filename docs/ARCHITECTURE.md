@@ -43,6 +43,36 @@ lineage), `generations` (also the job queue), `canvases` (versioned JSON graph),
 `sequences` and `shots` (storyboards), `canvas_templates`, `oauth_clients`, `oauth_tokens`. Assets of kind `mask` are
 working files for inpainting and are hidden from the library.
 
+## Films: continuity, checks and post-production
+
+`src/sequences.js` drives storyboards. Each shot stores `details` (scene, cast and location ids, action, dialogue,
+start/end state, what must not change, video or still, per-shot model, lock, cached post files) and `review`
+(status, check results, frame approval). Every frame and clip prompt is built in one fixed order: shot text, action,
+scene and location, start or end state, the film's look line, its look bible, the "keep everyone identical" line and
+the forbidden list; the film's seed and the shot's character and location references go with it. In keyframe mode
+a clip gets the next shot's approved frame as its last frame when both shots share a scene and the model supports it.
+
+After a clip arrives, `src/qc.js` runs free ffmpeg checks: length, black and frozen picture, sound, and drift — the
+clip's first and last frames are shrunk to 32×18 thumbnails and compared with the approved frames (mean absolute
+difference; matching frames score 3–20, unrelated pictures 110+, threshold 30) plus a colour-shift check. Checks
+suggest a status; only a person (or an orchestrator via MCP) accepts a shot.
+
+Joining (`stitch`): per shot, optional RIFE interpolation, then one upscale from the original straight to the
+delivery size (Real-ESRGAN anime-video or x4plus, cached per source and size) → `stitchClips` builds an exact-length
+near-lossless picture (crossfades borrow from the outgoing shot, so the film runs the sum of its shot lengths) →
+`src/soundtrack.js` mixes clip sound, dialogue (placed and loudness-normalised), music (ducked under speech) and
+ambience with a limiter, copying the picture → `deliverFilm` makes the single final encode with the optional
+cinematic finish.
+
+## Budget
+
+`src/budget.js` prices each paid request (`src/pricing.js`, from OpenRouter's live SKUs where available), checks the
+limits and reserves the amount in `spend_ledger` inside the same synchronous step that creates the job, so concurrent
+requests cannot jointly overspend. Completion settles with the provider's reported cost; a failure after submission is
+marked unknown and its retry needs explicit confirmation. Requests above the approval threshold create a single-use
+approval bound to the exact request; limits and approvals from MCP clients are refused unless the person allowed them.
+Provider job ids are saved as soon as a job is accepted, so a restart resumes polling instead of paying again.
+
 ## Jobs
 
 `POST /api/generate` inserts a `queued` row and returns `202`. Jobs have an `operation`: `generate`/`edit`/`variation` (images), `speech`, `video`, or an image tool

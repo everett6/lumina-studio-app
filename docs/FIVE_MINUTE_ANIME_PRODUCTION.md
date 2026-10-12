@@ -34,10 +34,10 @@ Use one narration/dialogue stem per actor, ambience bed and licensed music. Do n
 ## Local finish
 Render to 720p or 1080p proxy/master with ffmpeg. Test NVIDIA Real-ESRGAN on a 10-second excerpt before upscaling the full output; compare moving hair, outlines, and text for flicker. NVENC is encoding, not motion generation.
 
-## Repository integration checklist (not implemented yet)
-- GUI choice for still vs video per shot, including durations.
-- Separate text/audio tracks plus timing offsets and preview.
-- Per-shot interpolation toggle with optional external runner.
-- Paid-job preflight from live model pricing + an account-level hard spending ledger.
-- Final duration auto-adjustment to 300.0 sec after crossfades.
-- Automated tests for mock video, mixed audio, timing, error handling, and free-tier unavailable fallback.
+## Repository integration checklist (v0.8)
+- Done: still vs video per shot, with durations; free still shots rendered locally.
+- Done: dialogue lines with timing offsets per shot, music and ambience beds, ducking and levelling. (No waveform preview yet.)
+- Done: per-shot and film-wide RIFE interpolation (rife-ncnn-vulkan, fetched on first use).
+- Done: paid-job preflight from live OpenRouter pricing and a hard spending ledger with approvals.
+- Done: exact timeline — the film runs the sum of its shot lengths; crossfades borrow from the outgoing shot.
+- Done: automated tests with mock video for still shots, mixed audio, timing, approvals, budget errors and restarts.
