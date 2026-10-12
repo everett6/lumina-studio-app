@@ -3,7 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { parseDataUrl } from './assets.js';
+import { parseDataUrl, sniffMedia } from './assets.js';
 import { bookKinds, briefFor, cleanBible, cleanBrief, trimSizes } from './books.js';
 import { emptyGraph, nodeTypes, templates, validateGraph } from './canvas.js';
 import { defaultResolution, nearestDuration, RequestError } from './generation.js';
@@ -20,7 +20,7 @@ import { hasFfmpeg } from './video.js';
 const staticTypes = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.svg': 'image/svg+xml',
-  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.mp4': 'video/mp4',
 };
 const csp = [
   "default-src 'self'", "img-src 'self' data: blob:", "media-src 'self' blob:", "style-src 'self' https://fonts.googleapis.com",
@@ -32,6 +32,17 @@ function send(res, status, body) {
   const payload = Buffer.from(JSON.stringify(body));
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': payload.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(payload);
+}
+
+async function readRaw(req, cap) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > cap) throw new RequestError(413, 'The file is too large.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function readBody(req, cap) {
@@ -137,6 +148,15 @@ export function createApiServer(ctx) {
     // Masks are working files for inpainting; they stay out of the library.
     return { status: 201, body: { asset: await assetStore.save({ bytes: image.bytes, projectId: body.projectId, kind: body.kind === 'mask' ? 'mask' : 'reference', label }) } };
   });
+  // Music, ambience or recorded dialogue for films: the raw file as the body (MP3, WAV, OGG or FLAC, up to 80 MB).
+  route('POST', `/api/projects/${uuid}/audio`, async (req, [projectId]) => {
+    needProject(projectId);
+    const bytes = await readRaw(req, 80 * 1024 * 1024);
+    const mime = sniffMedia(bytes);
+    if (!mime?.startsWith('audio/')) throw new RequestError(400, 'Upload an MP3, WAV, OGG or FLAC audio file.');
+    const label = String(req.headers['x-lumina-label'] ?? 'audio').slice(0, 120);
+    return { status: 201, body: { asset: await assetStore.save({ bytes, projectId, kind: 'audio', label }) } };
+  });
   route('DELETE', `/api/assets/${uuid}`, async (req, [id]) => {
     const asset = repo.assets.get(id);
     if (!asset) throw new RequestError(404, 'Asset not found.');
@@ -189,15 +209,14 @@ export function createApiServer(ctx) {
     return { spend: row };
   });
   // Estimates for planning (no job is created): a list of { provider, model, operation, duration, resolution, size, image }.
-  route('POST', '/api/budget/estimate', async (req) => {
-    const body = await readBody(req, 256 * 1024);
-    const items = Array.isArray(body.items) ? body.items.slice(0, 500) : [];
+  function estimate(items) {
     const lines = items.map((item) => {
       const model = providers.model(item.provider, item.model);
       if (!model) return { ...item, usd: null, note: 'Unknown model' };
       const resolution = item.operation === 'video' && model.resolutions?.length ? (model.resolutions.includes(item.resolution) ? item.resolution : defaultResolution(model)) : null;
       const duration = item.operation === 'video' ? nearestDuration(model.durations, item.duration) : undefined;
-      const usd = estimateUsd(priceFor(item.provider, model.id, model), { size: item.size, duration, resolution, image: Boolean(item.image) });
+      let usd = estimateUsd(priceFor(item.provider, model.id, model), { size: item.size, duration, resolution, image: Boolean(item.image) });
+      if (usd == null && item.operation === 'speech') usd = budget.settings().speechAssumedUsd ?? 0.05;
       return { ...item, duration, resolution, usd: usd == null ? null : Math.round(usd * 10000) / 10000, note: usd == null ? 'No published price' : null };
     });
     const known = lines.filter((l) => l.usd != null);
@@ -207,6 +226,32 @@ export function createApiServer(ctx) {
       lines, totalUsd, unpriced: lines.length - known.length, remainingUsd: status.settings.enabled ? status.remainingUsd : null,
       fits: status.settings.enabled ? totalUsd <= status.remainingUsd - (status.settings.retryReserveUsd ?? 0) && lines.length === known.length : null,
     };
+  }
+  route('POST', '/api/budget/estimate', async (req) => {
+    const body = await readBody(req, 256 * 1024);
+    return estimate(Array.isArray(body.items) ? body.items.slice(0, 500) : []);
+  });
+  // What finishing a storyboard would still cost: missing frames, missing clips (still shots are free) and
+  // unrecorded dialogue lines.
+  route('GET', `/api/storyboards/${uuid}/estimate`, (req, [id]) => {
+    const { sequence, shots } = sequences.detail(id);
+    const s = sequence.settings;
+    const items = [];
+    for (const shot of shots) {
+      if (!shot.imageAssetId) items.push({ shot: shot.position, operation: 'generate', provider: s.imageProvider, model: s.imageModel, size: '1536x1024' });
+      if (!shot.videoAssetId && shot.details.method !== 'still') {
+        const [provider, model] = shot.details.model ? shot.details.model.split('|') : [s.videoProvider, s.videoModel];
+        items.push({ shot: shot.position, operation: 'video', provider, model, duration: shot.duration, image: true });
+      }
+      for (const line of shot.details.dialogue) {
+        const speaker = line.speaker === 'narrator' ? null : repo.characters.get(line.speaker);
+        const voice = speaker?.voice ?? s.narratorVoice;
+        if (!line.assetId && voice) items.push({ shot: shot.position, operation: 'speech', provider: voice.provider, model: voice.model });
+      }
+    }
+    const result = estimate(items);
+    const videoSeconds = shots.filter((sh) => sh.details.method !== 'still').reduce((sum, sh) => sum + (sh.duration ?? 0), 0);
+    return { ...result, videoSeconds, stillSeconds: shots.reduce((sum, sh) => sum + (sh.duration ?? 0), 0) - videoSeconds };
   });
   route('GET', '/api/models/status', () => modelCatalog.status());
   route('POST', '/api/models/refresh', async () => {

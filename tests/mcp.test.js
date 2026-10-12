@@ -22,7 +22,8 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     for (const name of ['list_projects', 'create_project', 'list_models', 'generate_image', 'get_generation', 'list_assets', 'add_to_canvas', 'run_canvas',
       'create_book', 'list_books', 'get_book', 'update_book', 'draft_bible', 'plan_pages', 'edit_page', 'revise_page', 'generate_illustration',
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
-      'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard']) {
+      'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
+      'update_character', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'budget_status', 'decide_approval', 'refresh_models']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -73,9 +74,27 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     assert.equal(parse(await client.callTool({ name: 'generate_shot', arguments: { shotId: board.shots[0].id, kind: 'clip' } })).operation, 'video');
     const fetched = parse(await client.callTool({ name: 'get_storyboard', arguments: { storyboardId: board.id } }));
     assert.ok(fetched.shots[0].frameAssetId && fetched.shots[0].clipAssetId && !fetched.shots[1].clipAssetId);
+    const lake = parse(await client.callTool({ name: 'create_character', arguments: { name: 'Lake', kind: 'location', description: 'misty lake, jetty on the left' } }));
+    assert.equal(lake.kind, 'location');
+    const lockedPip = parse(await client.callTool({ name: 'update_character', arguments: { characterId: hero.id, locked: true } }));
+    assert.equal(lockedPip.locked, true);
+    const refused = await client.callTool({ name: 'update_character', arguments: { characterId: hero.id, description: 'a blue fox' } });
+    assert.ok(refused.isError && /locked/.test(refused.content[0].text));
+    const detailed = parse(await client.callTool({ name: 'update_shot', arguments: { shotId: board.shots[1].id, details: { locationId: lake.id, method: 'still', forbidden: 'the scarf', dialogue: [{ speaker: 'narrator', text: 'Dawn.' }] } } }));
+    assert.equal(detailed.shots[1].method, 'still');
+    assert.equal(detailed.shots[1].dialogue[0].recorded, false);
+    const cost = parse(await client.callTool({ name: 'estimate_film_cost', arguments: { storyboardId: board.id } }));
+    assert.equal(typeof cost.totalUsd, 'number');
+    assert.ok(cost.freeStillSeconds > 0);
+    assert.equal(parse(await client.callTool({ name: 'budget_status', arguments: {} })).settings.enabled, false);
+    const review = await client.callTool({ name: 'review_shot', arguments: { shotId: board.shots[0].id, status: 'accepted', notes: 'on model' } });
+    assert.equal(parse(review).shots[0].review, 'accepted');
     if (spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0) {
+      await client.callTool({ name: 'generate_shot', arguments: { shotId: board.shots[1].id, kind: 'frame' } });
+      const still = parse(await client.callTool({ name: 'render_still_shot', arguments: { shotId: board.shots[1].id } }));
+      assert.ok(still.shots[1].clipAssetId, 'still shot rendered');
       const joined = parse(await client.callTool({ name: 'join_storyboard', arguments: { storyboardId: board.id } }));
-      assert.equal(joined.joined, 1);
+      assert.equal(joined.joined, 2);
       assert.ok(existsSync(joined.file));
     }
     const manuscript = parse(await client.callTool({ name: 'import_manuscript', arguments: { projectId: project.id, title: 'Lake Road', text: '## One\n\nIt began.\n\n## Two\n\nIt ended.' } }));

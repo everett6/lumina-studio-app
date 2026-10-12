@@ -199,3 +199,31 @@ test('soundtrack: dialogue lines are placed one after another and overruns are r
   assert.deepEqual(times, [0.4, 2.15, 5]);
   assert.equal(overrun, 1);
 });
+
+test('soundtrack: an uploaded music bed plays under the film', { skip: !media && 'needs ffmpeg' }, async () => {
+  const t = await startTestApp();
+  try {
+    const { project, id } = await filmSetup(t, { shotCount: 1, outputHeight: 720 });
+    const wav = execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=2', '-f', 'wav', '-']);
+    const upload = async (bytes) => fetch(`${t.app.origin}/api/projects/${project.id}/audio`, { method: 'POST', body: bytes, headers: { authorization: `Bearer ${t.app.token}`, 'x-lumina-label': 'theme.wav' } });
+    assert.equal((await upload(Buffer.from('not audio at all'))).status, 400);
+    const response = await upload(wav);
+    assert.equal(response.status, 201);
+    const music = (await response.json()).asset;
+    assert.equal(music.kind, 'audio');
+    await t.call('PATCH', `/api/storyboards/${id}`, { settings: { music: { assetId: music.id, volume: 0.8 }, clipVolume: 0 } });
+    const [shot] = (await t.call('POST', `/api/storyboards/${id}/plan`, {})).body.shots;
+    await wait(t, await t.call('POST', `/api/shots/${shot.id}/frame`, {}));
+    await wait(t, await t.call('POST', `/api/shots/${shot.id}/animate`, {}));
+    const film = await t.call('POST', `/api/storyboards/${id}/stitch`, { wait: true });
+    assert.equal(film.status, 200, JSON.stringify(film.body));
+    const file = path.join(t.dataRoot, 'film.mp4');
+    writeFileSync(file, await bytesOf(t, film.body.sequence.outputPath));
+    // The 2 s bed loops for the whole shot: still audible near the end.
+    const level = spawnSync('ffmpeg', ['-v', 'info', '-sseof', '-1.2', '-t', '0.5', '-i', file, '-af', 'volumedetect', '-vn', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
+    const mean = Number(/mean_volume: (-?[\d.]+) dB/.exec(level)?.[1]);
+    assert.ok(mean > -40, `music level ${mean} dB`);
+  } finally {
+    await t.close();
+  }
+});

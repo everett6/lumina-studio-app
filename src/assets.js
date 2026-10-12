@@ -4,7 +4,7 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export const imageTypes = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/webp', 'webp']]);
-const mediaTypes = new Map([...imageTypes, ['audio/mpeg', 'mp3'], ['audio/wav', 'wav'], ['video/mp4', 'mp4']]);
+const mediaTypes = new Map([...imageTypes, ['audio/mpeg', 'mp3'], ['audio/wav', 'wav'], ['audio/ogg', 'ogg'], ['audio/flac', 'flac'], ['video/mp4', 'mp4']]);
 export const maxUploadBytes = 8 * 1024 * 1024;
 const maxOutputBytes = 400 * 1024 * 1024;
 
@@ -21,6 +21,8 @@ export function sniffMedia(bytes) {
   if (image) return image;
   if (bytes.length > 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WAVE') return 'audio/wav';
   if (bytes.length > 3 && (bytes.toString('latin1', 0, 3) === 'ID3' || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0))) return 'audio/mpeg';
+  if (bytes.length > 4 && bytes.toString('latin1', 0, 4) === 'OggS') return 'audio/ogg';
+  if (bytes.length > 4 && bytes.toString('latin1', 0, 4) === 'fLaC') return 'audio/flac';
   if (bytes.length > 12 && bytes.toString('latin1', 4, 8) === 'ftyp') return 'video/mp4';
   return null;
 }

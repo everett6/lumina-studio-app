@@ -123,25 +123,33 @@ export function registerLuminaTools(server, client) {
 
   const presetsArg = z.array(z.string()).max(3).optional().describe('Preset ids from list_presets, e.g. ["dolly-in", "cinematic"]; one per group');
 
-  const charactersArg = z.array(z.string()).max(4).optional().describe('Character ids from list_characters. Their look is added to the prompt; their reference photos are attached when the model accepts input images (not for video).');
+  const charactersArg = z.array(z.string()).max(8).optional().describe('Character and location ids from list_characters. Their look is added to the prompt; their reference photos are attached when the model accepts input images.');
 
   server.registerTool('list_characters', {
     title: 'List characters',
     description: 'List saved characters and products (name, look description, reference photo asset ids). Pass their ids as characterIds to generate_image, generate_video or create_storyboard to keep them consistent.',
     inputSchema: {},
-  }, safe(async () => ok(text((await client.call('GET', '/api/characters')).characters.map(({ id, name, kind, description, referenceAssetIds }) => ({ id, name, kind, description, referenceAssetIds }))))));
+  }, safe(async () => ok(text((await client.call('GET', '/api/characters')).characters.map(({ id, name, kind, description, referenceAssetIds, voice, locked }) => ({ id, name, kind, description, referenceAssetIds, voice, locked }))))));
 
+  const characterSchema = {
+    description: z.string().max(2500).optional().describe('What must never change: face, hair, build, clothing, colours (for a location: layout, architecture, props, light)'),
+    kind: z.enum(['character', 'product', 'location']).optional(),
+    referenceAssetIds: z.array(z.string()).max(6).optional().describe('Up to 6 reference images (front, side, three-quarter, back, close-up, full body)'),
+    voice: z.object({ provider: z.string(), model: z.string(), voice: z.string().optional() }).nullable().optional().describe('Speech model for this character\'s dialogue'),
+    locked: z.boolean().optional().describe('Locked (approved) looks cannot change until unlocked with locked: false'),
+  };
+  const characterView = ({ id, name, kind, description, referenceAssetIds, voice, locked }) => ({ id, name, kind, description, referenceAssetIds, voice, locked });
   server.registerTool('create_character', {
-    title: 'Create character',
-    description: 'Save a reusable character or product: a name, a description of what must stay the same (face, hair, build, clothing, colours), and up to 4 reference image asset ids from list_assets.',
-    inputSchema: {
-      name: z.string().min(1).max(80), description: z.string().max(1500).optional(), kind: z.enum(['character', 'product']).optional(),
-      referenceAssetIds: z.array(z.string()).max(4).optional(),
-    },
-  }, safe(async (args) => {
-    const { id, name, kind, description, referenceAssetIds } = (await client.call('POST', '/api/characters', args)).character;
-    return ok(text({ id, name, kind, description, referenceAssetIds }));
-  }));
+    title: 'Create character or location',
+    description: 'Save a reusable character, product or location: a name, a description of what must stay the same, and reference image asset ids from list_assets. Used in every shot it appears in, so people and sets look identical across a film.',
+    inputSchema: { name: z.string().min(1).max(80), ...characterSchema },
+  }, safe(async (args) => ok(text(characterView((await client.call('POST', '/api/characters', args)).character)))));
+
+  server.registerTool('update_character', {
+    title: 'Update character or location',
+    description: 'Change a saved character, product or location (look, references, voice, lock). A locked look is refused unless locked: false is sent in the same call.',
+    inputSchema: { characterId: z.string(), name: z.string().min(1).max(80).optional(), ...characterSchema },
+  }, safe(async ({ characterId, ...changes }) => ok(text(characterView((await client.call('PATCH', `/api/characters/${characterId}`, changes)).character)))));
 
   server.registerTool('enhance_image', {
     title: 'Upscale or remove background',
@@ -447,9 +455,15 @@ export function registerLuminaTools(server, client) {
     id: sequence.id, projectId: sequence.projectId, title: sequence.title, idea: sequence.idea, writer: sequence.writer, settings: sequence.settings,
     hasJoinedVideo: Boolean(sequence.outputAssetId), joinedVideoAssetId: sequence.outputAssetId ?? undefined, join: sequence.join ?? undefined,
     runningSeconds: shots.reduce((sum, s) => sum + (s.duration ?? 0), 0),
+    production: sequence.production ?? undefined, screenplay: sequence.screenplay ? `${sequence.screenplay.length} characters` : undefined,
     shots: shots.map((s) => ({
       id: s.id, position: s.position, description: s.description, camera: s.camera, duration: s.duration, frameAssetId: s.imageAssetId, clipAssetId: s.videoAssetId,
       frameStatus: s.frameJob?.status, clipStatus: s.clipJob?.status,
+      scene: s.details?.scene || undefined, method: s.details?.method, characterIds: s.details?.characterIds, locationId: s.details?.locationId ?? undefined,
+      action: s.details?.action || undefined, startState: s.details?.startState || undefined, endState: s.details?.endState || undefined,
+      dialogue: s.details?.dialogue?.length ? s.details.dialogue.map((l) => ({ speaker: l.speaker, text: l.text, recorded: Boolean(l.assetId) })) : undefined,
+      locked: s.details?.locked || undefined, review: s.review?.status, frameApproved: s.review?.frameApproved ? true : undefined,
+      problems: s.review?.checks?.filter((c) => !c.ok).map((c) => c.detail),
     })),
   });
 
@@ -460,22 +474,29 @@ export function registerLuminaTools(server, client) {
       projectId: z.string(), title: z.string().min(1).max(80), idea: z.string().min(1).max(6000), shotCount: z.number().int().min(1).max(60).optional(),
       targetMinutes: z.number().min(0).max(15).optional().describe('Total running time the writer aims for'),
       clipLength: z.number().int().min(0).max(30).optional().describe('Seconds per clip for every shot (0 = writer decides); long takes like 10-15 s need a model that supports them'),
-      continuity: z.enum(['frames', 'chain']).optional().describe('"chain": each clip starts from the previous clip\'s last frame (unbroken action); "frames": each shot from its own still'),
-      realistic: z.boolean().optional().describe('Direct everything as photoreal live action (default true)'),
+      continuity: z.enum(['frames', 'keyframes', 'chain']).optional().describe('"frames": each clip starts from its own approved still; "keyframes": also ends on the next shot\'s still within a scene (strongest against drift; needs a model with last-frame support); "chain": each clip starts from the previous clip\'s last frame'),
+      look: z.enum(['live-action', 'anime', 'as-written']).optional().describe('How every frame and clip is directed (default live-action)'),
+      lookBible: z.string().max(1500).optional().describe('Palette, lenses, lighting, era, grain: added to every prompt so the film looks like one film'),
+      screenplay: z.string().max(60000).optional().describe('A screenplay to follow scene by scene, dialogue word for word (instead of inventing from the idea)'),
+      seed: z.number().int().min(0).optional().describe('One seed for every frame and clip (random by default)'),
+      outputHeight: z.union([z.literal(720), z.literal(1080), z.literal(1440), z.literal(2160)]).optional().describe('Delivery height (default 1080)'),
+      upscale: z.enum(['none', 'fast', 'anime', 'ai']).optional().describe('How clips smaller than the delivery size are enlarged (once each, from the original): "anime" Real-ESRGAN anime model, "ai" Real-ESRGAN live action, "fast" Lanczos'),
+      requireApproval: z.boolean().optional().describe('Frames and clips must be accepted (review_shot) before video is paid for and before the film is joined'),
+      videoSecondsBudget: z.number().int().min(0).max(900).optional().describe('Seconds of paid video the writer may plan; the rest become free still shots'),
       transition: z.enum(['cut', 'crossfade']).optional(), finish: z.enum(['none', 'cinematic']).optional().describe('"cinematic": 2.39:1 bars, film grain, fades'),
       aspect: z.enum(['16:9', '9:16', '1:1']).optional(), style: z.string().optional().describe('A style preset id from list_presets'), characterIds: charactersArg,
       writer: z.string().optional().describe('Writer model as "provider:model" (see list_models directors); defaults to the first ready one'),
       plan: z.boolean().optional().describe('Plan the shots now (default true)'),
     },
-  }, safe(async ({ projectId, title, idea, shotCount, targetMinutes, clipLength, continuity, realistic, transition, finish, aspect, style, characterIds, writer, plan = true }) => {
+  }, safe(async ({ projectId, title, idea, screenplay, shotCount, targetMinutes, clipLength, transition, finish, aspect, style, characterIds, writer, plan = true, ...rest }) => {
     const { providers, directors } = await client.call('GET', '/api/catalog');
     const first = (operation) => providers.filter((p) => p.ready).flatMap((p) => p.models.filter((m) => m.operations.includes(operation)).map((m) => [p.id, m.id]))[0] ?? [];
     const readyWriter = directors.find((d) => d.ready);
     const [imageProvider, imageModel] = first('generate');
     const [videoProvider, videoModel] = first('video');
     const created = await client.call('POST', `/api/projects/${projectId}/storyboards`, {
-      title, idea, writer: writer ?? (readyWriter ? `${readyWriter.id}:${readyWriter.models[0]}` : null),
-      settings: { shotCount, targetSeconds: targetMinutes ? Math.round(targetMinutes * 60) : undefined, clipLength, continuity, realistic, transition, finish, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel },
+      title, idea, screenplay, writer: writer ?? (readyWriter ? `${readyWriter.id}:${readyWriter.models[0]}` : null),
+      settings: { shotCount, targetSeconds: targetMinutes ? Math.round(targetMinutes * 60) : undefined, clipLength, transition, finish, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel, ...rest },
     });
     return ok(text(storyboardSummary(plan ? await client.call('POST', `/api/storyboards/${created.sequence.id}/plan`, {}) : created)));
   }));
@@ -488,16 +509,93 @@ export function registerLuminaTools(server, client) {
 
   server.registerTool('update_shot', {
     title: 'Edit a storyboard shot',
-    description: 'Change a shot\'s description, camera move (a camera preset id from list_presets, or "" for none) or length in seconds.',
-    inputSchema: { shotId: z.string(), description: z.string().max(2000).optional(), camera: z.string().optional(), duration: z.number().int().min(1).max(15).optional() },
+    description: 'Change a shot: description, camera move (a camera preset id from list_presets, or "" for none), length, and its continuity details (scene, cast and location ids, action, dialogue, start and end state, what must not change, video or free still shot, per-shot video model, lock). Locked shots refuse story changes unless locked: false is sent.',
+    inputSchema: {
+      shotId: z.string(), description: z.string().max(2000).optional(), camera: z.string().optional(), duration: z.number().int().min(1).max(30).optional(),
+      details: z.object({
+        scene: z.string().max(80).optional(), locationId: z.string().nullable().optional(), characterIds: z.array(z.string()).max(6).optional(),
+        action: z.string().max(1000).optional(), startState: z.string().max(500).optional(), endState: z.string().max(500).optional(), forbidden: z.string().max(500).optional(),
+        dialogue: z.array(z.object({ speaker: z.string().describe('A character id or "narrator"'), text: z.string().max(1000), start: z.number().min(0).nullable().optional() })).max(12).optional(),
+        method: z.enum(['video', 'still']).optional(), motion: z.string().optional().describe('Still-shot move: push-in, pull-out, pan-left, pan-right, rise, hold'),
+        model: z.string().optional().describe('Per-shot video model as "provider|model" ("" = storyboard default)'),
+        interpolate: z.boolean().optional(), trimStart: z.number().min(0).max(10).optional(), muteClipSound: z.boolean().optional(), locked: z.boolean().optional(),
+      }).optional(),
+    },
   }, safe(async ({ shotId, ...changes }) => ok(text(storyboardSummary(await client.call('PATCH', `/api/shots/${shotId}`, changes))))));
+
+  server.registerTool('review_shot', {
+    title: 'Review a shot',
+    description: 'Record a decision on a shot. status "accepted" uses its clip in the film; needs_repair / needs_regeneration / rejected keep it out; approveFrame: true approves its still before any video is paid for (with requireApproval). Look at the frame and clip first (and at problems from the free checks).',
+    inputSchema: {
+      shotId: z.string(), status: z.enum(['accepted', 'needs_review', 'needs_repair', 'needs_regeneration', 'rejected']).optional(), notes: z.string().max(1000).optional(),
+      approveFrame: z.boolean().optional(),
+    },
+  }, safe(async ({ shotId, status, notes, approveFrame }) => {
+    let result;
+    if (approveFrame !== undefined) result = await client.call('POST', `/api/shots/${shotId}/approve-frame`, { approved: approveFrame });
+    if (status) result = await client.call('POST', `/api/shots/${shotId}/review`, { status, notes });
+    if (!result) throw new Error('Give a status or approveFrame.');
+    return ok(text(storyboardSummary(result)));
+  }));
+
+  server.registerTool('render_still_shot', {
+    title: 'Render a still shot (free)',
+    description: 'Render a still shot locally: the shot\'s frame with a slow camera move, at the film\'s size. Costs nothing. The shot\'s method should be "still".',
+    inputSchema: { shotId: z.string() },
+  }, safe(async ({ shotId }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/still`, {}))))));
+
+  server.registerTool('voice_dialogue', {
+    title: 'Record a shot\'s dialogue',
+    description: 'Queue speech for every unrecorded dialogue line of a shot, in each character\'s saved voice (or the storyboard\'s narrator voice). Costs a little per line on the voice provider. Reports characters with no voice set.',
+    inputSchema: { shotId: z.string() },
+  }, safe(async ({ shotId }) => {
+    const result = await client.call('POST', `/api/shots/${shotId}/dialogue`, {});
+    return ok(text({ queued: result.queued.length, missingVoices: result.missingVoices }));
+  }));
+
+  server.registerTool('estimate_film_cost', {
+    title: 'Estimate what a film will cost',
+    description: 'Price everything a storyboard still needs (frames, clips, dialogue) from the providers\' published prices, and whether it fits the budget. Free to call. Show this to the user before produce_film.',
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => {
+    const result = await client.call('GET', `/api/storyboards/${storyboardId}/estimate`);
+    const byKind = {};
+    for (const line of result.lines) byKind[line.operation] = Math.round(((byKind[line.operation] ?? 0) + (line.usd ?? 0)) * 100) / 100;
+    return ok(text({ totalUsd: result.totalUsd, byOperation: byKind, jobs: result.lines.length, unpriced: result.unpriced, remainingUsd: result.remainingUsd, fits: result.fits,
+      videoSeconds: result.videoSeconds, freeStillSeconds: result.stillSeconds }));
+  }));
+
+  server.registerTool('budget_status', {
+    title: 'Budget status',
+    description: 'Spending limits, what has been spent or reserved, and approvals waiting for a decision. Limits can only be changed in the app.',
+    inputSchema: {},
+  }, safe(async () => ok(text(await client.call('GET', '/api/budget')))));
+
+  server.registerTool('decide_approval', {
+    title: 'Approve or deny a spend',
+    description: 'Approve or deny a pending spending approval. Only works when the user allowed MCP approvals in the app; otherwise ask the user to approve it in Lumina. After approving, repeat the original request with approvalId.',
+    inputSchema: { approvalId: z.string(), approve: z.boolean() },
+  }, safe(async ({ approvalId, approve }) => ok(text(await client.call('POST', `/api/budget/approvals/${approvalId}`, { approve })))));
+
+  server.registerTool('refresh_models', {
+    title: 'Refresh the model list',
+    description: 'Re-read OpenRouter\'s public model list and prices (free; no key used).',
+    inputSchema: {},
+  }, safe(async () => {
+    const { catalog, ...status } = await client.call('POST', '/api/models/refresh', {});
+    return ok(text(status));
+  }));
 
   server.registerTool('generate_shot', {
     title: 'Generate a shot frame or clip',
     description: 'Make the still frame ("frame") or the video clip ("clip") for one storyboard shot. A clip starts from the shot\'s frame when the video model accepts a start image. Clips are slow and cost more than images — confirm with the user first.',
-    inputSchema: { shotId: z.string(), kind: z.enum(['frame', 'clip']), provider: z.string().optional(), model: z.string().optional() },
-  }, safe(async ({ shotId, kind, provider, model }) => {
-    const { generation } = await client.call('POST', `/api/shots/${shotId}/${kind === 'frame' ? 'frame' : 'animate'}`, { provider, model });
+    inputSchema: {
+      shotId: z.string(), kind: z.enum(['frame', 'clip']), provider: z.string().optional(), model: z.string().optional(),
+      resolution: z.string().optional().describe('Clip resolution such as 480p or 720p (default: 720p where offered); higher costs more'),
+      idempotencyKey: z.string().min(8).max(128).optional().describe('Repeat a request safely: the same key returns the same job instead of paying twice'),
+    },
+  }, safe(async ({ shotId, kind, provider, model, resolution, idempotencyKey }) => {
+    const { generation } = await client.call('POST', `/api/shots/${shotId}/${kind === 'frame' ? 'frame' : 'animate'}`, { provider, model, resolution, idempotencyKey });
     return waitAndShow(generation, { shotId });
   }));
 
@@ -518,7 +616,7 @@ export function registerLuminaTools(server, client) {
 
   server.registerTool('produce_film', {
     title: 'Produce the whole film',
-    description: 'Make every missing frame and clip of a storyboard and join them into the finished film, in the background. With continuity "chain" (set via create_storyboard or the app) each clip starts from the last frame of the one before for unbroken action. Costs real money for every clip — confirm the price with the user first. Follow progress with get_storyboard (sequence.production).',
+    description: 'Make every missing frame and clip of a storyboard and join them into the finished film, in the background. With continuity "chain" (set via create_storyboard or the app) each clip starts from the last frame of the one before for unbroken action. Still shots are rendered free. With requireApproval, production stops at "review" twice: once for the frames (approve each with review_shot approveFrame), once for the clips (accept each) — then call produce_film again. Costs real money for every clip — call estimate_film_cost and confirm the price with the user first. Follow progress with get_storyboard (production).',
     inputSchema: { storyboardId: z.string() },
   }, safe(async ({ storyboardId }) => {
     const result = await client.call('POST', `/api/storyboards/${storyboardId}/produce`, {});
@@ -527,11 +625,11 @@ export function registerLuminaTools(server, client) {
 
   server.registerTool('enhance_video', {
     title: 'Enhance (upscale) a video',
-    description: 'Make a 2x larger, sharper copy of a video (up to 4K) on the computer running Lumina: mode "fast" uses GPU scaling (seconds to minutes); mode "ai" uses Real-ESRGAN on the NVIDIA GPU (much slower, adds detail; must be installed from the app first). Runs in the background; returns the job status. Call again with the same assetId to check.',
-    inputSchema: { assetId: z.string(), mode: z.enum(['fast', 'ai']).optional(), checkOnly: z.boolean().optional() },
-  }, safe(async ({ assetId, mode = 'fast', checkOnly = false }) => {
+    description: 'Make a 2x larger, sharper copy of a video (up to 4K) on the computer running Lumina: mode "fast" uses GPU scaling (seconds to minutes); mode "ai" uses Real-ESRGAN on the GPU (much slower, adds detail; must be installed from the app first); mode "anime" uses Real-ESRGAN\'s anime-video model (clean lines, no smearing). height picks an exact target (1080, 1440 or 2160). Runs in the background; returns the job status. Call again with the same assetId to check.',
+    inputSchema: { assetId: z.string(), mode: z.enum(['fast', 'ai', 'anime']).optional(), height: z.union([z.literal(1080), z.literal(1440), z.literal(2160)]).optional(), checkOnly: z.boolean().optional() },
+  }, safe(async ({ assetId, mode = 'fast', height, checkOnly = false }) => {
     if (checkOnly) return ok(text(await client.call('GET', `/api/assets/${assetId}/enhance`)));
-    return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode })));
+    return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode, height })));
   }));
 
   server.registerTool('join_storyboard', {
