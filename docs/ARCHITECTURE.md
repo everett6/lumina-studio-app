@@ -14,7 +14,7 @@ the MCP server. Everything runs on your computer.
        ├─ src/generation.js   validate against model capabilities, enqueue
        ├─ src/jobs.js         durable queue (generation rows), concurrency 2
        │     ├─ src/directors/  prompt refinement: OpenAI, Anthropic, Nemotron
-       │     └─ src/providers/  image adapters: OpenAI, fal.ai, Gemini, Replicate, mock
+       │     └─ src/providers/  media adapters: OpenRouter, OpenAI, fal.ai, Gemini, Replicate, mock
        ├─ src/canvas.js       graph validation, templates, parallel execution via jobs
        ├─ src/books.js        picture books, novels, nonfiction; covers, narration, video; PDF/EPUB/DOCX/MD/audio export
        │     ├─ src/fonts.js    per-script system fonts (fontconfig) for PDF

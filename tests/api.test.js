@@ -28,6 +28,20 @@ test('rejects requests without the token and from foreign hosts or origins', asy
   }
 });
 
+test('xAI and HeyGen video models are available through the OpenRouter key', async () => {
+  const t = await startTestApp();
+  try {
+    const catalog = (await t.call('GET', '/api/catalog')).body;
+    const openrouter = catalog.providers.find((provider) => provider.id === 'openrouter');
+    assert.ok(openrouter?.models.some((model) => model.id === 'x-ai/grok-imagine-video-1.5' && model.operations.includes('video')));
+    assert.ok(openrouter.models.some((model) => model.id === 'x-ai/grok-imagine-video-1.5-lite'));
+    assert.ok(openrouter.models.some((model) => model.id === 'heygen/heygen-video-1' && model.operations.includes('video')));
+    assert.ok(!catalog.providers.some((provider) => ['xai', 'heygen'].includes(provider.id)));
+  } finally {
+    await t.close();
+  }
+});
+
 test('reference upload is stored and served from its saved URL; traversal is blocked', async () => {
   const t = await startTestApp();
   try {

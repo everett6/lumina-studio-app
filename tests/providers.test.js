@@ -165,9 +165,10 @@ test('openrouter: one key for images (with references), video (start frame, poll
     assert.equal(sent.aspect_ratio, '3:2');
     assert.match(sent.input_references[0].image_url.url, /^data:image\/png;base64,/);
 
-    const video = await openrouter.video({ key: 'or-key', model: 'kwaivgi/kling-v3.0-pro', prompt: 'waves', image, duration: 12, aspect: '16:9' });
+    const video = await openrouter.video({ key: 'or-key', model: 'heygen/heygen-video-1', prompt: 'waves', image, duration: 12, aspect: '16:9' });
     assert.deepEqual(video.bytes, clip);
     const job = JSON.parse(fake.calls[1].options.body);
+    assert.equal(job.model, 'heygen/heygen-video-1');
     assert.equal(job.duration, 12);
     assert.equal(job.aspect_ratio, '16:9');
     assert.equal(job.frame_images[0].frame_type, 'first_frame');
