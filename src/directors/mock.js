@@ -34,10 +34,19 @@ export function mockCompletion({ task, prompt }) {
   }
   if (task === 'shots') {
     const count = Number(/SHOT_COUNT=(\d+)/.exec(prompt)?.[1] ?? 3);
+    const person = /Characters \(use these exact names[^\n]*\n- ([^:\n]+):/.exec(prompt)?.[1];
+    const place = /Locations \(use these exact names[^\n]*\n- ([^:\n]+):/.exec(prompt)?.[1];
+    const budget = prompt.includes('Budget: at most');
     const cameras = ['dolly-in', 'orbit-left', 'crane-up', 'not-a-camera'];
     return JSON.stringify({
+      // With a cast and sets in the prompt, shots name them and the first one has a line of dialogue; with a
+      // video budget, the last shot is a free still shot.
       shots: Array.from({ length: count }, (_, i) => ({
         description: `Shot ${i + 1}: Pip the fox walks toward the lake at dawn.`, camera: cameras[i % cameras.length], duration: 4 + (i % 3) * 3,
+        ...(person ? { characters: [person], dialogue: i === 0 ? [{ speaker: person, line: 'The water is so still today.' }] : [] } : {}),
+        ...(place ? { location: place } : {}),
+        scene: i < 2 ? '1 – The lake' : '2 – The den', action: 'walks to the water', startState: 'at the reeds', endState: 'at the water',
+        method: budget && i === count - 1 ? 'still' : 'video', motion: 'push-in',
       })),
     });
   }

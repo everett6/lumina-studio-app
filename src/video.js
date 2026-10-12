@@ -62,6 +62,12 @@ export async function probe(file) {
   };
 }
 
+// Length in seconds of any media file, audio-only included.
+export async function mediaSeconds(file) {
+  const info = JSON.parse(await run('ffprobe', ['-v', 'error', '-show_format', '-of', 'json', file], 30_000));
+  return Number(info.format?.duration ?? 0);
+}
+
 // H.264 encoder settings, in two quality profiles so a film loses as little as possible on its way through
 // several processing steps:
 //  - 'mezzanine': working files between steps, near-lossless (x264 CRF 10 / NVENC CQ 12). Large but transparent.

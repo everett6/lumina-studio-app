@@ -56,18 +56,27 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
     return asset?.mimeType.startsWith('image/') ? asset : null;
   };
 
-  // Characters add their description to the prompt, and their reference photos when the model has room for them.
+  // Characters, products and locations add their description to the prompt, and their reference photos when the
+  // model has room for them (people first, then the location, so the cast is never crowded out by the set).
   function applyCharacters(input, { model, inputAssetIds, canTakeImages }) {
     const ids = [...new Set(Array.isArray(input.characterIds) ? input.characterIds.filter((id) => typeof id === 'string') : [])];
     if (!ids.length) return {};
-    if (ids.length > 4) throw new RequestError(400, 'Use at most 4 characters in one generation.');
+    if (ids.length > 8) throw new RequestError(400, 'Use at most 8 characters and locations in one generation.');
     const chosen = ids.map((id) => repo.characters.get(id) ?? (() => { throw new RequestError(404, 'A character no longer exists.'); })());
+    chosen.sort((a, b) => (a.kind === 'location') - (b.kind === 'location'));
     const references = [...new Set(chosen.flatMap((c) => c.referenceAssetIds))].filter((id) => imageAsset(id));
     const room = canTakeImages ? Math.max(0, model.maxReferences - inputAssetIds.length) : 0;
     inputAssetIds.push(...references.filter((id) => !inputAssetIds.includes(id)).slice(0, room));
     const attached = references.filter((id) => inputAssetIds.includes(id)).length;
-    const note = `Characters (keep each one exactly as described${attached ? ' and as shown in the reference image(s)' : ''}): ${
-      chosen.map((c) => `${c.name} — ${c.description || 'as shown in the reference image'}`).join('; ')}.`.slice(0, 2500);
+    const shown = attached ? ' and as shown in the reference image(s)' : '';
+    const people = chosen.filter((c) => c.kind !== 'location');
+    const places = chosen.filter((c) => c.kind === 'location');
+    const note = [
+      people.length ? `Characters (keep each one exactly as described${shown}: same face, hair, body, clothes and colours): ${
+        people.map((c) => `${c.name} — ${c.description || 'as shown in the reference image'}`).join('; ')}.` : '',
+      places.length ? `Location (keep the layout, architecture, props and lighting exactly as described${shown}): ${
+        places.map((c) => `${c.name} — ${c.description || 'as shown in the reference image'}`).join('; ')}.` : '',
+    ].filter(Boolean).join('\n').slice(0, 3500);
     return { characterIds: ids, characterNote: note, ...(references.length > attached ? { droppedCharacterRefs: references.length - attached } : {}) };
   }
 

@@ -47,3 +47,59 @@ export function suggestedStatus(checks) {
   if (checks.some((c) => !c.ok && c.severity === 'error')) return 'needs_regeneration';
   return 'needs_review';
 }
+
+// Drift checks, also free: does the clip really start on its approved frame (and end on the next shot's frame in
+// keyframe mode)? Both pictures are shrunk to a 32×18 colour thumbnail and compared pixel by pixel (mean absolute
+// difference, 0–255). A clip that honours its start frame is nearly identical to it there; a model that ignored
+// or wandered off its reference differs a lot. A large colour shift between a clip's first and last frame is
+// flagged too. These warn rather than fail: the person looking at the shot decides.
+const thumbnail = async (file, { atEnd = false } = {}) => {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolve, reject) => {
+    execFile('ffmpeg', ['-v', 'error', ...(atEnd ? ['-sseof', '-0.2'] : []), '-i', file, '-frames:v', '1', '-vf', 'scale=32:18:flags=area,format=rgb24', '-f', 'rawvideo', '-'],
+      { encoding: 'buffer', maxBuffer: 1 << 20, timeout: 120_000 }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
+  });
+};
+async function similarity(clip, image, { atEnd = false } = {}) {
+  const [a, b] = [await thumbnail(clip, { atEnd }), await thumbnail(image)];
+  if (!a.length || a.length !== b.length) return null;
+  let total = 0;
+  for (let i = 0; i < a.length; i += 1) total += Math.abs(a[i] - b[i]);
+  return total / a.length;
+}
+
+async function averageColour(clip, { atEnd = false } = {}) {
+  const pick = atEnd ? ['-sseof', '-0.2'] : [];
+  const { stderr } = await runCapture('ffmpeg', ['-hide_banner', '-nostats', ...pick, '-i', clip, '-vf', 'scale=128:72,signalstats,metadata=print', '-frames:v', '1', '-f', 'null', '-'], 120_000);
+  const read = (key) => Number(new RegExp(`signalstats\\.${key}=([\\d.]+)`).exec(stderr)?.[1]);
+  return { y: read('YAVG'), u: read('UAVG'), v: read('VAVG') };
+}
+
+export async function driftChecks(clip, { startFrame = null, endFrame = null } = {}) {
+  const checks = [];
+  try {
+    if (startFrame) {
+      const score = await similarity(clip, startFrame);
+      if (score != null) {
+        checks.push({ id: 'start-frame', ok: score <= 30, severity: 'warning', score,
+          detail: score <= 30 ? `Starts on the approved frame (difference ${score.toFixed(0)}/255)` : `Does not start on the approved frame (difference ${score.toFixed(0)}/255): the model may have drifted from the reference` });
+      }
+    }
+    if (endFrame) {
+      const score = await similarity(clip, endFrame, { atEnd: true });
+      if (score != null) {
+        checks.push({ id: 'end-frame', ok: score <= 30, severity: 'warning', score,
+          detail: score <= 30 ? `Ends on the next shot's frame (difference ${score.toFixed(0)}/255)` : `Does not end on the next shot's frame (difference ${score.toFixed(0)}/255)` });
+      }
+    }
+    const [first, last] = [await averageColour(clip), await averageColour(clip, { atEnd: true })];
+    if ([first.u, first.v, last.u, last.v].every(Number.isFinite)) {
+      const shift = Math.hypot(first.u - last.u, first.v - last.v);
+      checks.push({ id: 'colour', ok: shift < 12, severity: 'warning', score: shift,
+        detail: shift < 12 ? 'Colours stay steady through the clip' : `Colours shift noticeably during the clip (by ${shift.toFixed(0)}): lighting or wardrobe may have drifted` });
+    }
+  } catch (error) {
+    checks.push({ id: 'drift', ok: true, severity: 'warning', detail: `Drift checks could not run: ${error.message}` });
+  }
+  return checks;
+}

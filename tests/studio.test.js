@@ -111,7 +111,7 @@ test('storyboard: idea → shot list → frames → clips → one joined video',
 
     const frame = await done(t, await t.call('POST', `/api/shots/${first.id}/frame`, {}));
     assert.equal(frame.status, 'completed');
-    assert.match(frame.finalPrompt, /Film still\.[\s\S]*cinematic[\s\S]*Pip — small red fox/);
+    assert.match(frame.finalPrompt, /Film still, the opening frame[\s\S]*cinematic[\s\S]*Pip — small red fox/);
     assert.equal(frame.params.size, '1536x1024');
     const clipOne = await done(t, await t.call('POST', `/api/shots/${first.id}/animate`, {}));
     assert.deepEqual(clipOne.inputAssetIds, [frame.assetId]);
@@ -134,7 +134,9 @@ test('storyboard: idea → shot list → frames → clips → one joined video',
       writeFileSync(file, await bytesOf(t, stitched.body.sequence.outputPath));
       const info = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file]).toString());
       assert.deepEqual(info.streams.map((s) => s.codec_type).sort(), ['audio', 'video']);
-      assert.ok(Math.abs(Number(info.format.duration) - 2) < 0.4, `duration ${info.format.duration}`);
+      // The film follows the storyboard's timing: each shot runs its planned length (short clips are held).
+      const planned = detail.shots[0].duration + detail.shots[1].duration;
+      assert.ok(Math.abs(Number(info.format.duration) - planned) < 0.1, `duration ${info.format.duration} for ${planned}`);
     }
 
     const moved = await t.call('POST', `/api/shots/${second.id}/move`, { direction: 'up' });
@@ -328,11 +330,12 @@ test('Produce film: chained shots start from the previous clip\'s last frame, th
     const clip2 = (await t.call('GET', `/api/projects/${project.id}`)).body.generations.find((g) => g.bookTarget === `shot-video:${done.shots[1].id}`);
     assert.deepEqual(clip2.inputAssetIds, [assets.find((a) => a.path === frames[1]).id]);
     assert.match(clip2.finalPrompt, /Photorealistic live-action/);
-    // 3 x 4 s with two 0.5 s dissolves = 11 s; the cinematic pass letterboxes the frame.
+    // Each shot keeps its planned 4 s (the dissolve borrows from the outgoing shot) = 12 s; the cinematic pass
+    // letterboxes the frame.
     const film = path.join(t.dataRoot, 'film.mp4');
     writeFileSync(film, await bytesOf(t, done.sequence.outputPath));
     const seconds = Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', film]).toString());
-    assert.ok(Math.abs(seconds - 11) < 0.4, `film runs ${seconds} s`);
+    assert.ok(Math.abs(seconds - 12) < 0.1, `film runs ${seconds} s`);
     const row = execFileSync('ffmpeg', ['-v', 'error', '-ss', '5', '-i', film, '-frames:v', '1', '-vf', 'crop=iw:4:0:0,format=gray', '-f', 'rawvideo', '-']);
     assert.ok(Math.max(...row) < 30, 'top rows are black letterbox');
 
@@ -347,8 +350,9 @@ test('Produce film: chained shots start from the previous clip\'s last frame, th
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
     assert.equal(status.state, 'completed', status.error);
-    assert.equal(status.width, 640);
-    assert.equal(status.height, 360);
+    // Films are delivered at the storyboard's output size (1080p by default); fast enhance doubles it.
+    assert.equal(status.width, 3840);
+    assert.equal(status.height, 2160);
   } finally {
     delete process.env.LUMINA_MOCK_FULL_CLIPS;
     await t.close();

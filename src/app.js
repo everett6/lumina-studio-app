@@ -84,6 +84,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
       await remote.shutdown();
       await new Promise((resolve) => server.close(resolve));
       server.closeAllConnections?.();
+      await sequences.idle();
       db.close();
     },
   };

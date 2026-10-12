@@ -275,16 +275,32 @@ export function createApiServer(ctx) {
     ...character,
     references: character.referenceAssetIds.map((id) => repo.assets.get(id)).filter((a) => a?.mimeType.startsWith('image/')).map((a) => ({ id: a.id, path: a.path })),
   });
-  function characterFields(body) {
+  // Characters, products and locations (sets). Locked ones are approved model sheets: their look and reference
+  // images cannot be changed until they are unlocked on purpose, so a shot can't silently get a different face.
+  function characterFields(body, existing = null) {
     const fields = {};
     if (body.name !== undefined) fields.name = body.name;
-    if (body.kind !== undefined) fields.kind = body.kind === 'product' ? 'product' : 'character';
-    if (body.description !== undefined) fields.description = String(body.description ?? '').slice(0, 1500);
+    if (body.kind !== undefined) fields.kind = ['product', 'location'].includes(body.kind) ? body.kind : 'character';
+    if (body.description !== undefined) fields.description = String(body.description ?? '').slice(0, 2500);
     if (body.referenceAssetIds !== undefined) {
       const ids = [...new Set(Array.isArray(body.referenceAssetIds) ? body.referenceAssetIds : [])];
-      if (ids.length > 4) throw new RequestError(400, 'A character can have at most 4 reference images.');
+      if (ids.length > 6) throw new RequestError(400, 'Use at most 6 reference images (for example front, side, three-quarter, back, close-up, full body).');
       if (ids.some((id) => !repo.assets.get(id)?.mimeType.startsWith('image/'))) throw new RequestError(404, 'A reference image was not found.');
       fields.referenceAssetIds = ids;
+    }
+    if (body.voice !== undefined) {
+      if (body.voice === null) fields.voice = null;
+      else {
+        const { provider, model, voice } = body.voice ?? {};
+        const found = providers.model(provider, model);
+        if (!found?.operations.includes('speech')) throw new RequestError(400, 'Choose a voice model that can speak.');
+        fields.voice = { provider, model, voice: found.voices?.includes(voice) ? voice : found.voices?.[0] ?? null };
+      }
+    }
+    if (body.locked !== undefined) fields.locked = body.locked === true;
+    const changesLook = ['name', 'kind', 'description', 'referenceAssetIds'].some((key) => key in fields);
+    if (existing?.locked && fields.locked !== false && changesLook) {
+      throw new RequestError(409, `${existing.name} is locked (approved). Unlock it first if you really mean to change the look.`);
     }
     return fields;
   }
@@ -296,7 +312,7 @@ export function createApiServer(ctx) {
   });
   route('PATCH', `/api/characters/${uuid}`, async (req, [id]) => {
     needCharacter(id);
-    return { character: withReferences(repo.characters.update(id, characterFields(await readBody(req, 16_384)))) };
+    return { character: withReferences(repo.characters.update(id, characterFields(await readBody(req, 16_384), needCharacter(id)))) };
   });
   route('DELETE', `/api/characters/${uuid}`, (req, [id]) => {
     needCharacter(id);
@@ -358,16 +374,16 @@ export function createApiServer(ctx) {
     repo.shots.insert(id, { position: count + 1, description: String(body.description ?? '').slice(0, 2000) });
     return { status: 201, body: sequences.detail(id) };
   });
-  route('PATCH', `/api/shots/${uuid}`, async (req, [id]) => {
-    const shot = sequences.needShot(id);
-    const body = await readBody(req, 16_384);
-    repo.shots.update(id, {
-      description: typeof body.description === 'string' ? body.description.slice(0, 2000) : undefined,
-      camera: body.camera === undefined ? undefined : presets.some((p) => p.group === 'camera' && p.id === body.camera) ? body.camera : null,
-      duration: body.duration === undefined ? undefined : Math.min(15, Math.max(1, Math.round(Number(body.duration)) || 5)),
-    });
-    return sequences.detail(shot.sequenceId);
+  route('PATCH', `/api/shots/${uuid}`, async (req, [id]) => sequences.updateShot(id, await readBody(req, 64 * 1024)));
+  route('POST', `/api/shots/${uuid}/review`, async (req, [id]) => sequences.review(id, await readBody(req, 4096)));
+  route('POST', `/api/shots/${uuid}/approve-frame`, async (req, [id]) => sequences.approveFrame(id, (await readBody(req, 1024)).approved !== false));
+  route('POST', `/api/shots/${uuid}/still`, (req, [id]) => sequences.renderStillShot(id));
+  route('POST', `/api/shots/${uuid}/checks`, async (req, [id]) => {
+    const checks = await sequences.runChecks(id);
+    if (!checks) throw new RequestError(400, 'This shot has no clip to check yet.');
+    return sequences.detail(sequences.needShot(id).sequenceId);
   });
+  route('POST', `/api/shots/${uuid}/dialogue`, (req, [id]) => ({ status: 202, body: sequences.makeDialogue(id) }));
   route('DELETE', `/api/shots/${uuid}`, (req, [id]) => {
     const shot = sequences.needShot(id);
     repo.shots.remove(id);
