@@ -18,18 +18,27 @@ export async function runVideo(args, timeout) {
   } catch (error) {
     if (!args.includes('h264_nvenc')) throw error;
     // Later encodes in this process use the CPU encoder too, so pieces of one film stay alike.
-    encoderChoice = Promise.resolve(cpuEncoder);
+    nvenc = Promise.resolve(false);
+    const cq = Number(args[args.indexOf('-cq') + 1]) || 17;
     const fallback = [];
     for (let index = 0; index < args.length; index += 1) {
       if (args[index] === '-c:v' && args[index + 1] === 'h264_nvenc') {
-        fallback.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
+        fallback.push(...(cq <= 12 ? cpuProfiles.mezzanine : cpuProfiles.final).slice(0, -2));
         index += 1;
-      } else if (['-preset', '-tune', '-rc', '-cq', '-b:v'].includes(args[index])) index += 1;
+      } else if (['-preset', '-tune', '-rc', '-cq', '-b:v', '-spatial-aq', '-temporal-aq', '-aq-strength', '-bf', '-b_ref_mode'].includes(args[index])) index += 1;
       else fallback.push(args[index]);
     }
     return run('ffmpeg', fallback, timeout);
   }
 }
+
+// Like run(), but resolves with stderr too (ffmpeg's analysis filters report there).
+export const runCapture = (command, args, timeout) => new Promise((resolve, reject) => {
+  execFile(command, args, { timeout, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+    if (error) reject(new Error(error.code === 'ENOENT' ? `${command} is not installed` : String(stderr || error.message).trim().split('\n').slice(-3).join(' ')));
+    else resolve({ stdout: String(stdout), stderr: String(stderr) });
+  });
+});
 
 export async function hasFfmpeg() {
   try {
@@ -53,21 +62,32 @@ export async function probe(file) {
   };
 }
 
-// H.264 encoder settings: NVIDIA NVENC when this computer's ffmpeg and GPU can use it (much faster), otherwise
-// libx264. Checked once with a tiny test encode. LUMINA_NO_NVENC=1 forces the CPU encoder.
-let encoderChoice = null;
-const cpuEncoder = { name: 'x264', args: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p'] };
-export function videoEncoder() {
-  encoderChoice ??= (async () => {
-    if (process.env.LUMINA_NO_NVENC !== '1') {
-      try {
-        await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=256x256:d=0.2', '-c:v', 'h264_nvenc', '-f', 'null', '-'], 20_000);
-        return { name: 'nvenc', args: ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '19', '-b:v', '0', '-pix_fmt', 'yuv420p'] };
-      } catch { /* no usable NVIDIA encoder */ }
+// H.264 encoder settings, in two quality profiles so a film loses as little as possible on its way through
+// several processing steps:
+//  - 'mezzanine': working files between steps, near-lossless (x264 CRF 10 / NVENC CQ 12). Large but transparent.
+//  - 'final':     the one delivery encode at the end (x264 CRF 16 slow / NVENC P7 CQ 17 with adaptive quantization).
+// NVIDIA NVENC is used when this computer's ffmpeg and GPU can (much faster), otherwise libx264. Checked once
+// with a tiny test encode. LUMINA_NO_NVENC=1 forces the CPU encoder.
+const cpuProfiles = {
+  mezzanine: ['-c:v', 'libx264', '-preset', 'faster', '-crf', '10', '-pix_fmt', 'yuv420p'],
+  final: ['-c:v', 'libx264', '-preset', 'slow', '-crf', '16', '-pix_fmt', 'yuv420p'],
+};
+const gpuProfiles = {
+  mezzanine: ['-c:v', 'h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '12', '-b:v', '0', '-spatial-aq', '1', '-pix_fmt', 'yuv420p'],
+  final: ['-c:v', 'h264_nvenc', '-preset', 'p7', '-tune', 'hq', '-rc', 'vbr', '-cq', '17', '-b:v', '0', '-spatial-aq', '1', '-temporal-aq', '1', '-bf', '3', '-b_ref_mode', 'middle', '-pix_fmt', 'yuv420p'],
+};
+let nvenc = null;
+export function videoEncoder(profile = 'final') {
+  nvenc ??= (async () => {
+    if (process.env.LUMINA_NO_NVENC === '1') return false;
+    try {
+      await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=256x256:d=0.2', '-c:v', 'h264_nvenc', '-f', 'null', '-'], 20_000);
+      return true;
+    } catch {
+      return false; // no usable NVIDIA encoder
     }
-    return cpuEncoder;
   })();
-  return encoderChoice;
+  return nvenc.then((gpu) => ({ name: gpu ? 'nvenc' : 'x264', args: (gpu ? gpuProfiles : cpuProfiles)[profile] ?? cpuProfiles.final }));
 }
 
 const audioArgs = ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'];
@@ -85,22 +105,54 @@ export async function lastFrame(file) {
   }
 }
 
-// Joins clips end to end into one H.264/AAC MP4 at the first clip's frame size, 30 fps.
+// A still frame made into a shot on this computer, for free: a slow camera move over the image (Ken Burns style),
+// 30 fps, with a silent stereo track so it joins like any generated clip. The image is enlarged first so the
+// move stays smooth. motion: push-in, pull-out, pan-left, pan-right, rise, static.
+export const stillMotions = ['push-in', 'pull-out', 'pan-left', 'pan-right', 'rise', 'static'];
+export async function renderStill(imageFile, { duration, motion = 'push-in', width = 1920, height = 1080 }) {
+  const frames = Math.max(1, Math.round(duration * 30));
+  const t = `(on/${Math.max(1, frames - 1)})`; // 0 → 1 over the shot
+  const zoom = { 'push-in': `1+0.12*${t}`, 'pull-out': `1.12-0.12*${t}`, 'pan-left': '1.12', 'pan-right': '1.12', rise: '1.12', static: '1' }[motion] ?? '1';
+  const x = { 'pan-left': `(iw-iw/zoom)*(1-${t})`, 'pan-right': `(iw-iw/zoom)*${t}` }[motion] ?? '(iw-iw/zoom)/2';
+  const y = { rise: `(ih-ih/zoom)*(1-${t})` }[motion] ?? '(ih-ih/zoom)/2';
+  const { args: encode } = await videoEncoder('mezzanine');
+  const dir = await mkdtemp(path.join(tmpdir(), 'lumina-still-'));
+  const out = path.join(dir, 'still.mp4');
+  try {
+    await runVideo(['-v', 'error', '-loop', '1', '-framerate', '30', '-i', imageFile, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+      '-filter_complex', `[0:v]scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width * 2}:${height * 2},`
+        + `zoompan=z='${zoom}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=30,setsar=1,format=yuv420p[v]`,
+      '-map', '[v]', '-map', '1:a', '-t', duration.toFixed(3), ...encode, '-video_track_timescale', '15360', ...audioArgs, '-movflags', '+faststart', '-y', out], 600_000);
+    return await readFile(out);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// Joins clips end to end into one H.264/AAC MP4, 30 fps, at `size` (default: the first clip's frame size).
 // Each clip is first re-encoded on its own (scaled and padded, silence added when it has no sound); with
 // transition 'crossfade' every boundary becomes a short dissolve rendered from just the two neighbouring
 // clips; the uniform pieces are then concatenated without re-encoding. Working piece by piece keeps memory
 // flat, so many minutes of footage from dozens of shots joins as reliably as two.
 // finish 'cinematic' adds a final pass: 2.39:1 letterbox (landscape only), a light film grain and grade, and
 // fades in from and out to black. `onProgress(done, total)` reports progress in steps.
-export async function stitchClips(files, { onProgress, transition = 'cut', finish = 'none', fadeSeconds = 0.5 } = {}) {
-  if (!files.length) throw new Error('There are no clips to join.');
+// A clip may be { file, duration, trimStart }: it is then cut to exactly `duration` seconds from `trimStart`,
+// holding its last frame when it is too short, and crossfades borrow from the outgoing clip so the film's
+// length is exactly the sum of the durations.
+// Working pieces are near-lossless (the 'mezzanine' profile) and the film gets exactly one delivery encode at
+// the end; `deliver: false` skips it and returns the near-lossless join (for a later soundtrack mix + delivery).
+export async function stitchClips(clips, { onProgress, transition = 'cut', finish = 'none', fadeSeconds = 0.5, size = null, deliver = true } = {}) {
+  if (!clips.length) throw new Error('There are no clips to join.');
+  const items = clips.map((clip) => (typeof clip === 'string' ? { file: clip } : clip));
+  const files = items.map((item) => item.file);
   const infos = [];
   for (const file of files) infos.push(await probe(file));
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
-  const [width, height] = [even(infos[0].width), even(infos[0].height)];
-  const { args: encode } = await videoEncoder();
-  const dissolve = transition === 'crossfade' && files.length > 1 && infos.every((info) => info.duration > fadeSeconds * 2 + 0.3);
-  const total = files.length + (dissolve ? files.length * 2 - 1 : 0) + (finish === 'cinematic' ? 1 : 0) + 1;
+  const [width, height] = size ? [even(size.width), even(size.height)] : [even(infos[0].width), even(infos[0].height)];
+  const { args: encode } = await videoEncoder('mezzanine');
+  const length = (index) => items[index].duration ?? Math.max(0.1, infos[index].duration - (items[index].trimStart ?? 0));
+  const dissolve = transition === 'crossfade' && files.length > 1 && items.every((_, index) => length(index) > fadeSeconds * 2 + 0.3);
+  const total = files.length + (dissolve ? files.length * 2 - 1 : 0) + (deliver ? 1 : 0) + 1;
   let done = 0;
   const step = () => onProgress?.(++done, total);
   const dir = await mkdtemp(path.join(tmpdir(), 'lumina-stitch-'));
@@ -109,11 +161,16 @@ export async function stitchClips(files, { onProgress, transition = 'cut', finis
     for (const [index, file] of files.entries()) {
       const info = infos[index];
       const part = path.join(dir, `part-${String(index).padStart(4, '0')}.mp4`);
-      const audioInput = info.hasAudio ? [] : ['-f', 'lavfi', '-t', String(Math.max(0.1, info.duration)), '-i', 'anullsrc=r=48000:cl=stereo'];
-      await runVideo(['-v', 'error', '-i', file, ...audioInput,
+      const item = items[index];
+      // With a set duration, the piece is that long (plus the crossfade overlap it lends to the next shot).
+      const target = item.duration != null ? item.duration + (dissolve && index < files.length - 1 ? fadeSeconds : 0) : null;
+      const audioInput = info.hasAudio ? [] : ['-f', 'lavfi', '-t', String(Math.max(0.1, target ?? info.duration)), '-i', 'anullsrc=r=48000:cl=stereo'];
+      const hold = target != null ? `,tpad=stop_mode=clone:stop_duration=${Math.ceil(target + 1)}` : '';
+      await runVideo(['-v', 'error', ...(item.trimStart ? ['-ss', Number(item.trimStart).toFixed(3)] : []), '-i', file, ...audioInput,
         '-map', '0:v:0', '-map', info.hasAudio ? '0:a:0' : '1:a:0',
-        '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p`,
-        '-af', audioFormat, ...encode, '-video_track_timescale', '15360', ...audioArgs, '-shortest', '-y', part], 600_000);
+        '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${hold},format=yuv420p`,
+        '-af', target != null ? `${audioFormat},apad` : audioFormat, ...encode, '-video_track_timescale', '15360', ...audioArgs,
+        ...(target != null ? ['-t', target.toFixed(3)] : ['-shortest']), '-y', part], 600_000);
       parts.push({ file: part, duration: (await probe(part)).duration });
       step();
     }
@@ -146,19 +203,14 @@ export async function stitchClips(files, { onProgress, transition = 'cut', finis
     const list = path.join(dir, 'list.txt');
     await writeFile(list, pieces.map((piece) => `file '${piece.replace(/'/g, "'\\''")}'`).join('\n'));
     let out = path.join(dir, 'joined.mp4');
-    await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', out], 600_000);
+    // With set durations the film is exactly their sum (the audio's last AAC frame would add ~21 ms).
+    const exact = items.every((item) => item.duration != null) ? items.reduce((sum, item) => sum + item.duration, 0) : null;
+    await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', ...(exact ? ['-t', exact.toFixed(3)] : []), '-movflags', '+faststart', '-y', out], 600_000);
     step();
 
-    if (finish === 'cinematic') {
-      const duration = (await probe(out)).duration;
-      const fadeOut = Math.max(0, duration - 1.5).toFixed(3);
-      const filters = ['eq=contrast=1.05:saturation=0.94:gamma=0.98'];
-      const bar = even((height - width / 2.39) / 2);
-      if (width > height && bar >= 4) filters.push(`drawbox=x=0:y=0:w=iw:h=${bar}:color=black:t=fill`, `drawbox=x=0:y=ih-${bar}:w=iw:h=${bar}:color=black:t=fill`);
-      filters.push('noise=alls=5:allf=t', `fade=t=in:st=0:d=1`, `fade=t=out:st=${fadeOut}:d=1.5`, 'format=yuv420p');
+    if (deliver) {
       const finished = path.join(dir, 'finished.mp4');
-      await runVideo(['-v', 'error', '-i', out, '-vf', filters.join(','), '-af', `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOut}:d=1.5`,
-        ...encode, ...audioArgs, '-movflags', '+faststart', '-y', finished], 1_800_000);
+      await deliverFilm(out, finished, { finish });
       out = finished;
       step();
     }
@@ -167,4 +219,26 @@ export async function stitchClips(files, { onProgress, transition = 'cut', finis
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+// The one delivery encode of a film (the 'final' quality profile). finish 'cinematic' also applies a gentle
+// grade, 2.39:1 letterbox bars (landscape only), fine film grain and fades from and to black; grain is added only
+// here, after any upscaling, so it is never enlarged or smeared. Without a finish the sound is copied untouched.
+export async function deliverFilm(input, output, { finish = 'none' } = {}) {
+  const info = await probe(input);
+  const { args: encode } = await videoEncoder('final');
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const filters = [];
+  let audio = ['-c:a', 'copy'];
+  if (finish === 'cinematic') {
+    const fadeOut = Math.max(0, info.duration - 1.5).toFixed(3);
+    filters.push('eq=contrast=1.05:saturation=0.94:gamma=0.98');
+    const bar = even((info.height - info.width / 2.39) / 2);
+    if (info.width > info.height && bar >= 4) filters.push(`drawbox=x=0:y=0:w=iw:h=${bar}:color=black:t=fill`, `drawbox=x=0:y=ih-${bar}:w=iw:h=${bar}:color=black:t=fill`);
+    filters.push('noise=alls=4:allf=t', 'fade=t=in:st=0:d=1', `fade=t=out:st=${fadeOut}:d=1.5`);
+    audio = ['-af', `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOut}:d=1.5`, ...audioArgs];
+  }
+  filters.push('format=yuv420p');
+  await runVideo(['-v', 'error', '-i', input, '-map', '0:v:0', ...(info.hasAudio ? ['-map', '0:a:0'] : []), '-vf', filters.join(','),
+    ...encode, ...(info.hasAudio ? audio : []), '-movflags', '+faststart', '-y', output], 3_600_000);
 }

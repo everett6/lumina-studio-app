@@ -47,9 +47,10 @@ export default {
     const left = body?.data?.limit_remaining;
     return { ok: true, verified: true, message: left == null ? 'Key works.' : `Key works. Credit left on this key: $${Number(left).toFixed(2)}.` };
   },
-  async run({ key, model, prompt, size, quality, images }) {
+  async run({ key, model, prompt, size, quality, images, seed }) {
     const body = { model, prompt, aspect_ratio: ratio[size] ?? '1:1', n: 1 };
     if (quality) body.quality = quality;
+    if (Number.isInteger(seed)) body.seed = seed;
     if (images.length) body.input_references = images.map((img) => ({ type: 'image_url', image_url: { url: toDataUrl(img) } }));
     const result = await requestJson(`${api}/images`, { method: 'POST', headers: headers(key), body: JSON.stringify(body), timeoutMs: 300_000 });
     const first = result?.data?.[0];
@@ -59,7 +60,7 @@ export default {
   // Video jobs are asynchronous. `onSubmitted` receives the job id the moment OpenRouter accepts it (Lumina saves
   // it), and `resumeJob` continues polling a saved job after a restart instead of submitting (and paying) again.
   resumable: true,
-  async video({ key, model, prompt, image: start, duration, aspect, resolution, resumeJob = null, onSubmitted }) {
+  async video({ key, model, prompt, image: start, endImage = null, duration, aspect, resolution, seed, resumeJob = null, onSubmitted }) {
     let job = resumeJob;
     if (!job?.id) {
       const body = { model, prompt, generate_audio: true };
@@ -67,7 +68,13 @@ export default {
       if (aspect) body.aspect_ratio = aspect;
       // Always explicit: per-second prices differ several-fold between resolutions.
       if (resolution) body.resolution = resolution;
-      if (start) body.frame_images = [{ type: 'image_url', image_url: { url: toDataUrl(start) }, frame_type: 'first_frame' }];
+      // First and last frame: the clip starts on an approved still and (when the model supports it) ends exactly on
+      // the next shot's approved still, which keeps characters and sets from drifting.
+      const frames = [];
+      if (start) frames.push({ type: 'image_url', image_url: { url: toDataUrl(start) }, frame_type: 'first_frame' });
+      if (endImage) frames.push({ type: 'image_url', image_url: { url: toDataUrl(endImage) }, frame_type: 'last_frame' });
+      if (frames.length) body.frame_images = frames;
+      if (Number.isInteger(seed)) body.seed = seed;
       const submitted = await requestJson(`${api}/videos`, { method: 'POST', headers: headers(key), body: JSON.stringify(body), timeoutMs: 120_000 });
       if (!submitted?.id) throw new ProviderError('provider', 'OpenRouter did not start the video job');
       job = { id: String(submitted.id), pollUrl: submitted.polling_url };

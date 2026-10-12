@@ -175,6 +175,7 @@ test('live model list: real capabilities replace hand-typed ones, models missing
         { id: 'heygen/heygen-video-1', name: 'HeyGen Video', supported_durations: [5, 15], supported_aspect_ratios: ['16:9'], supported_resolutions: ['480p'], supported_frame_images: [], pricing_skus: { duration_seconds_480p: '0.02' } },
       ] });
     }
+    if (url.endsWith('/images/models')) return Response.json({ data: [{ id: 'img/one', supported_parameters: { input_references: { type: 'range', min: 0, max: 14 }, seed: { type: 'boolean' } } }] });
     return Response.json({ data: { endpoints: [{ pricing: [{ billable: 'output_image', unit: 'image', cost_usd: 0.03 }, { billable: 'output_image', unit: 'image', cost_usd: 0.04 }] }] } });
   };
   const catalog = createModelCatalog({ repo, provider, fetchImpl, log: {} });
@@ -187,5 +188,7 @@ test('live model list: real capabilities replace hand-typed ones, models missing
   assert.equal(grok.maxReferences, 1);
   assert.equal(provider.models[2].maxReferences, 0, 'no first-frame support: no start image');
   assert.deepEqual(provider.models[0].livePrice, { usd: 0.04, per: 'image' }, 'the dearest endpoint');
+  assert.equal(provider.models[0].maxReferences, 14, 'all character and location references fit');
+  assert.equal(provider.models[0].seed, true);
   assert.equal(catalog.status().videoModels, 2);
 });

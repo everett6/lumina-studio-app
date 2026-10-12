@@ -336,12 +336,14 @@ export function createApiServer(ctx) {
     if (!asset) throw new RequestError(404, 'Video not found.');
     const body = await readBody(req, 1024);
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new RequestError(400, 'Invalid request body.');
-    if (body.mode !== undefined && !['fast', 'ai'].includes(body.mode)) throw new RequestError(400, 'Choose fast or AI enhancement.');
+    if (body.mode !== undefined && !['fast', 'ai', 'anime'].includes(body.mode)) throw new RequestError(400, 'Choose fast, ai (live action) or anime enhancement.');
+    const heights = { 1080: { width: 1920, height: 1080 }, 1440: { width: 2560, height: 1440 }, 2160: { width: 3840, height: 2160 } };
+    if (body.height !== undefined && !heights[body.height]) throw new RequestError(400, 'Choose a height of 1080, 1440 or 2160, or leave it out for twice the size.');
     if (body.download !== undefined && typeof body.download !== 'boolean') throw new RequestError(400, 'Download must be true or false.');
     if (!asset.mimeType?.startsWith('video/')) throw new RequestError(400, 'Only videos can be enhanced here (use Upscale for images).');
     if (!(await hasFfmpeg())) throw new RequestError(501, 'Enhancing video needs ffmpeg (on Debian/Ubuntu: sudo apt install ffmpeg).');
     try {
-      const job = await enhancer.start({ asset, assetStore, mode: body.mode === 'ai' ? 'ai' : 'fast', allowDownload: body.download === true });
+      const job = await enhancer.start({ asset, assetStore, mode: body.mode ?? 'fast', allowDownload: body.download === true, target: heights[body.height] ?? null });
       return { status: 202, body: { enhance: job } };
     } catch (error) {
       if (error.needsDownload) return { status: 428, body: { error: error.message, needsDownload: true } };

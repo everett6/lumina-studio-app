@@ -20,7 +20,13 @@ export function createModelCatalog({ repo, provider, log = console, fetchImpl = 
     for (const model of statics.values()) {
       if (!model.operations.includes('video')) {
         const image = catalog.image?.find((m) => m.id === model.id);
-        models.push(image?.pricing ? { ...model, livePrice: image.pricing } : { ...model });
+        models.push({
+          ...model,
+          ...(image?.pricing ? { livePrice: image.pricing } : {}),
+          // More reference images means characters and locations can all be shown to the model at once.
+          ...(image?.maxReferences ? { maxReferences: image.maxReferences } : {}),
+          ...(image?.seed ? { seed: true } : {}),
+        });
         continue;
       }
       const entry = live.get(model.id);
@@ -61,7 +67,11 @@ export function createModelCatalog({ repo, provider, log = console, fetchImpl = 
           resolutions: m.supported_resolutions ?? [], frameImages: m.supported_frame_images ?? [], audio: m.generate_audio ?? null,
           skus: m.pricing_skus ?? null,
         }));
-        // Image prices live on each model's endpoint records; only the image models Lumina offers are looked up.
+        // Image capabilities come from the image model list; prices from each model's endpoint records (only the
+        // image models Lumina offers are looked up).
+        const imageList = await get(`${api}/images/models`).catch(() => ({ data: [] }));
+        const imageRows = Array.isArray(imageList.data) ? imageList.data : Array.isArray(imageList) ? imageList : [];
+        const imageParams = new Map(imageRows.map((m) => [m.id, m.supported_parameters ?? {}]));
         const image = [];
         for (const model of statics.values()) {
           if (!model.operations.includes('generate')) continue;
@@ -72,7 +82,8 @@ export function createModelCatalog({ repo, provider, log = console, fetchImpl = 
             const pick = (unit) => Math.max(...lines.filter((p) => p.unit === unit).map((p) => Number(p.cost_usd)));
             const pricing = lines.some((p) => p.unit === 'image') ? { usd: pick('image'), per: 'image' }
               : lines.some((p) => p.unit === 'megapixel') ? { usd: pick('megapixel'), per: 'megapixel' } : null;
-            image.push({ id: model.id, pricing });
+            const params = imageParams.get(model.id) ?? {};
+            image.push({ id: model.id, pricing, maxReferences: Number(params.input_references?.max) || null, seed: Boolean(params.seed) });
           } catch (error) {
             log.info?.('Image price lookup failed', { model: model.id, detail: error.message });
           }

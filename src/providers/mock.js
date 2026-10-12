@@ -53,9 +53,9 @@ export default {
   label: 'Mock (offline test)',
   keyless: true,
   models: [
-    { id: 'mock-image', label: 'Mock image', operations: ['generate', 'edit'], sizes, qualities: ['low', 'medium', 'high'], maxReferences: 4, note: 'Local test renderer, no network' },
+    { id: 'mock-image', label: 'Mock image', operations: ['generate', 'edit'], sizes, qualities: ['low', 'medium', 'high'], maxReferences: 8, seed: true, note: 'Local test renderer, no network' },
     { id: 'mock-voice', label: 'Mock voice', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0, voices: ['tone-low', 'tone-high'], note: 'Sine tone, length follows the text' },
-    { id: 'mock-video', label: 'Mock video', operations: ['video'], sizes: [], qualities: [], maxReferences: 1, durations: [4, 8, 10], aspects: ['16:9', '9:16'], note: 'One-second colour clip (needs ffmpeg; otherwise a placeholder file)' },
+    { id: 'mock-video', label: 'Mock video', operations: ['video'], sizes: [], qualities: [], maxReferences: 1, durations: [4, 8, 10], aspects: ['16:9', '9:16'], resolutions: ['480p', '720p'], lastFrame: true, note: 'One-second colour clip (needs ffmpeg; otherwise a placeholder file)' },
     { id: 'mock-tools', label: 'Mock image tools', operations: ['upscale', 'remove-background', 'inpaint'], sizes: [], qualities: [], maxReferences: 1, scales: [2, 4], note: 'Local test renderer, no network' },
   ],
   async validateKey() {

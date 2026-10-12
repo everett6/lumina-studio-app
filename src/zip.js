@@ -83,3 +83,42 @@ export function readZip(bytes, { maxBytes = 64 * 1024 * 1024 } = {}) {
   }
   return entries;
 }
+
+// Reads chosen files out of a ZIP on a web server with HTTP range requests, so a large release archive does not
+// have to be downloaded whole (RIFE's is 431 MB; Lumina needs about 20 MB of it). `want(name)` picks entries.
+export async function fetchZipEntries(url, want, { fetchImpl = (...a) => fetch(...a), timeoutMs = 300_000 } = {}) {
+  const get = async (range) => {
+    const response = await fetchImpl(url, { headers: { range }, redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+    if (response.status !== 206) throw new Error(`The download server did not allow a partial download (HTTP ${response.status}).`);
+    return { bytes: Buffer.from(await response.arrayBuffer()), total: Number(/\/(\d+)$/.exec(response.headers.get('content-range') ?? '')?.[1]) };
+  };
+  const head = await fetchImpl(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(60_000) });
+  const length = Number(head.headers.get('content-length'));
+  if (!head.ok || !length) throw new Error(`Could not read the archive size (HTTP ${head.status}).`);
+  const tail = await get(`bytes=${Math.max(0, length - 262144)}-${length - 1}`);
+  const end = tail.bytes.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (end < 0 || !tail.total) throw new Error('Not a ZIP archive.');
+  const size = tail.bytes.readUInt32LE(end + 12);
+  const offset = tail.bytes.readUInt32LE(end + 16);
+  const base = tail.total - tail.bytes.length;
+  if (offset < base) throw new Error('The archive index is larger than expected.');
+  const directory = tail.bytes.subarray(offset - base, offset - base + size);
+  const entries = new Map();
+  for (let p = 0; p + 46 <= directory.length;) {
+    if (directory.readUInt32LE(p) !== 0x02014b50) throw new Error('Damaged ZIP index.');
+    const method = directory.readUInt16LE(p + 10);
+    const compressed = directory.readUInt32LE(p + 20);
+    const nameLength = directory.readUInt16LE(p + 28);
+    const local = directory.readUInt32LE(p + 42);
+    const name = directory.toString('utf8', p + 46, p + 46 + nameLength);
+    p += 46 + nameLength + directory.readUInt16LE(p + 30) + directory.readUInt16LE(p + 32);
+    if (!want(name) || name.endsWith('/')) continue;
+    // Local header is 30 bytes plus a name and extra field whose lengths can differ from the index; 1 KB covers them.
+    const { bytes } = await get(`bytes=${local}-${local + 30 + 1024 + compressed}`);
+    if (bytes.readUInt32LE(0) !== 0x04034b50) throw new Error('Damaged ZIP entry.');
+    const start = 30 + bytes.readUInt16LE(26) + bytes.readUInt16LE(28);
+    const body = bytes.subarray(start, start + compressed);
+    entries.set(name, method === 8 ? inflateRawSync(body) : Buffer.from(body));
+  }
+  return entries;
+}

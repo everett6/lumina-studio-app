@@ -131,6 +131,12 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
           duration: nearestDuration(model.durations, input.duration), aspect: model.aspects?.includes(input.aspect) ? input.aspect : model.aspects?.[0] ?? null,
           resolution: model.resolutions?.length ? (model.resolutions.includes(input.resolution) ? input.resolution : defaultResolution(model)) : null,
         };
+      if (media === 'video' && input.endFrameAssetId) {
+        if (!model.lastFrame) throw new RequestError(400, `${model.label ?? model.id} cannot end on a chosen frame.`);
+        if (!imageAsset(input.endFrameAssetId)) throw new RequestError(400, 'The end frame must be an image.');
+        if (!inputAssetIds.length) throw new RequestError(400, 'An end frame needs a start frame too.');
+        params.endFrameAssetId = input.endFrameAssetId;
+      }
       // A video's input image is its start frame, so characters contribute their description only.
       if (media === 'video') Object.assign(params, applyCharacters(input, { model, inputAssetIds, canTakeImages: false }));
     } else {
@@ -145,6 +151,8 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
       const quality = model.qualities.length ? (model.qualities.includes(input.quality) ? input.quality : model.qualities[Math.min(1, model.qualities.length - 1)]) : null;
       params = { size, quality, ...characters };
     }
+    // One seed across a film keeps the model's random choices (faces, palette, grain) from wandering between shots.
+    if (!tool && operation !== 'speech' && Number.isInteger(Number(input.seed)) && input.seed !== null && input.seed !== '') params.seed = Math.abs(Math.trunc(Number(input.seed))) % 2147483647;
     if (operation !== 'speech' && !tool) {
       try {
         const chosen = checkPresets(input.presets, operation);

@@ -63,13 +63,16 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       } else if (job.operation === 'speech') {
         output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style });
       } else if (job.operation === 'video') {
+        const endAsset = params.endFrameAssetId ? repo.assets.get(params.endFrameAssetId) : null;
+        if (params.endFrameAssetId && !endAsset) throw Object.assign(new Error('The end frame was deleted.'), { category: 'invalid_request' });
         output = await provider.video({
-          key, model: job.model, prompt, image: images[0] ?? null, duration: params.duration, aspect: params.aspect, resolution: params.resolution,
+          key, model: job.model, prompt, image: images[0] ?? null, endImage: endAsset ? await assetStore.read(endAsset) : null, seed: params.seed,
+          duration: params.duration, aspect: params.aspect, resolution: params.resolution,
           resumeJob: job.providerJob ?? null,
           onSubmitted: (info) => repo.generations.update(id, { providerJob: { ...info, submittedAt: new Date().toISOString() } }),
         });
       } else {
-        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images });
+        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed });
       }
       const asset = await assetStore.save({
         bytes: output.bytes, projectId: job.projectId, kind: 'generation', generationId: id, parentAssetId: job.inputAssetIds[0] ?? null,
