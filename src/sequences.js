@@ -255,7 +255,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   // Shot edits. Locked shots keep their story (description, dialogue, start/end state) until unlocked on purpose.
   function updateShot(shotId, body) {
     const shot = needShot(shotId);
-    const story = ['description', 'dialogue', 'startState', 'endState', 'action'];
+    const story = ['description', 'scene', 'locationId', 'characterIds', 'action', 'dialogue', 'startState', 'endState', 'forbidden', 'method'];
     const touchesStory = 'description' in body || story.some((key) => body.details && key in body.details);
     if (shot.details.locked && touchesStory && body.details?.locked !== false) {
       throw new RequestError(409, `Shot ${shot.position} is locked (approved screenplay). Unlock it first to revise it.`);
@@ -626,6 +626,10 @@ export function createSequenceService({ repo, directors, keys, generations, asse
             production.step = `Shot ${index + 1} of ${total}: rendering the still shot`;
             await renderStillShot(shot.id);
             rerun.add(id);
+            return;
+          }
+          if (sequence.settings.requireApproval && shot.review.frameApproved !== shot.imageAssetId) {
+            Object.assign(production, { state: 'review', step: `Approve the frame of shot ${shot.position}, then press Produce film again` });
             return;
           }
           production.step = `Shot ${index + 1} of ${total}: making the clip`;

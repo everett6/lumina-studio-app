@@ -94,12 +94,33 @@ test('continuity: locked shots keep their story; re-planning is refused while an
     assert.equal(locked.body.shots[0].details.forbidden, 'the green scarf');
     assert.equal((await t.call('PATCH', `/api/shots/${one.id}`, { description: 'Something else.' })).status, 409);
     assert.equal((await t.call('PATCH', `/api/shots/${one.id}`, { details: { dialogue: [{ speaker: 'narrator', text: 'New words.' }] } })).status, 409);
+    assert.equal((await t.call('PATCH', `/api/shots/${one.id}`, { details: { characterIds: [] } })).status, 409, 'a lock also protects cast continuity');
     assert.equal((await t.call('PATCH', `/api/shots/${one.id}`, { camera: 'orbit-left' })).status, 200, 'camera is not story');
     assert.equal((await t.call('POST', `/api/storyboards/${id}/plan`, { replace: true })).status, 409);
     const unlocked = await t.call('PATCH', `/api/shots/${one.id}`, { description: 'Revised.', details: { locked: false } });
     assert.equal(unlocked.status, 200);
     assert.equal(unlocked.body.shots[0].description, 'Revised.');
     assert.equal((await t.call('PATCH', `/api/shots/${one.id}`, { details: { characterIds: ['00000000-0000-4000-8000-000000000000'] } })).status, 404);
+  } finally {
+    await t.close();
+  }
+});
+
+test('continuity: chained production waits for frame approval before starting a paid clip', { skip: !media && 'needs ffmpeg', timeout: 120_000 }, async () => {
+  const t = await startTestApp();
+  try {
+    const { project, id } = await filmSetup(t, { shotCount: 1, continuity: 'chain', requireApproval: true });
+    const [shot] = (await t.call('POST', `/api/storyboards/${id}/plan`, {})).body.shots;
+    assert.equal((await t.call('POST', `/api/storyboards/${id}/produce`, {})).status, 202);
+    const waiting = await waitFor(t, id, (d) => d.sequence.production?.state === 'review' && d.shots[0].imageAssetId);
+    assert.equal(waiting.shots[0].videoAssetId, null);
+    assert.equal((await t.call('GET', `/api/projects/${project.id}`)).body.generations.some((g) => g.bookTarget === `shot-video:${shot.id}`), false);
+
+    assert.equal((await t.call('POST', `/api/shots/${shot.id}/approve-frame`, { approved: true })).status, 200);
+    assert.equal((await t.call('POST', `/api/storyboards/${id}/produce`, {})).status, 202);
+    await waitFor(t, id, (d) => d.shots[0].videoAssetId || d.sequence.production?.state === 'paused');
+    assert.equal((await t.call('GET', `/api/projects/${project.id}`)).body.generations.some((g) => g.bookTarget === `shot-video:${shot.id}`), true);
+    await t.call('POST', `/api/storyboards/${id}/stop`, {});
   } finally {
     await t.close();
   }

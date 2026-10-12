@@ -241,12 +241,12 @@ function shotDetails(shot) {
     const node = h('input', { type: 'text', value: d[key] ?? '', maxLength: max, placeholder, disabled: locked && story, 'aria-label': label, onchange: () => save({ [key]: node.value }) });
     return h('label', {}, h('span.field-label', {}, label.toUpperCase()), node);
   };
-  const location = h('select', { 'aria-label': 'Location', onchange: () => save({ locationId: location.value || null }) },
+  const location = h('select', { 'aria-label': 'Location', disabled: locked, onchange: () => save({ locationId: location.value || null }) },
     h('option', { value: '' }, places().length ? 'No saved location' : 'Add a location on the Characters tab'), ...places().map((c) => h('option', { value: c.id }, c.name)));
   location.value = d.locationId ?? '';
   const cast = new Set(d.characterIds);
   const castChips = h('div.applied-presets', {}, h('span.field-label', {}, 'IN THIS SHOT'),
-    ...people().map((c) => h(`button.character-chip${cast.has(c.id) ? '.selected' : ''}`, { 'aria-pressed': String(cast.has(c.id)), onclick: () => {
+    ...people().map((c) => h(`button.character-chip${cast.has(c.id) ? '.selected' : ''}`, { 'aria-pressed': String(cast.has(c.id)), disabled: locked, onclick: () => {
       if (cast.has(c.id)) cast.delete(c.id); else cast.add(c.id);
       save({ characterIds: [...cast] });
     } }, c.references[0] ? h('img', { src: c.references[0].path, alt: '' }) : null, c.name)),
@@ -270,7 +270,7 @@ function shotDetails(shot) {
   const model = h('select', { 'aria-label': 'Video model for this shot', onchange: () => save({ model: model.value }) },
     h('option', { value: '' }, 'Storyboard\'s video model'), ...videoModels.map(({ provider, model: m, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${m.label}`)));
   model.value = d.model ?? '';
-  const method = h('select', { 'aria-label': 'Shot type', onchange: () => save({ method: method.value }) },
+  const method = h('select', { 'aria-label': 'Shot type', disabled: locked, onchange: () => save({ method: method.value }) },
     h('option', { value: 'video' }, 'Video clip (paid)'), h('option', { value: 'still' }, 'Still shot with camera move (free)'));
   method.value = d.method;
   const motion = h('select', { 'aria-label': 'Still-shot move', onchange: () => save({ motion: motion.value }) },
@@ -283,14 +283,14 @@ function shotDetails(shot) {
   return h('details.panel-details.sb-details', {},
     h('summary', {}, [d.scene || 'Continuity details', locked ? '🔒 locked' : '', d.dialogue.length ? `${d.dialogue.length} line(s)` : ''].filter(Boolean).join(' · ')),
     h('div.sb-grid', {},
-      text('Scene', 'scene', 80, 'e.g. 3 – Rooftop at night', false),
+      text('Scene', 'scene', 80, 'e.g. 3 – Rooftop at night'),
       h('label', {}, h('span.field-label', {}, 'LOCATION'), location),
       h('label', {}, h('span.field-label', {}, 'SHOT TYPE'), method),
       d.method === 'still' ? h('label', {}, h('span.field-label', {}, 'STILL-SHOT MOVE'), motion) : h('label', {}, h('span.field-label', {}, 'VIDEO MODEL'), model),
       text('Action', 'action', 1000, 'The one thing that must happen'),
       text('Starts with', 'startState', 500, 'Situation at the first frame'),
       text('Ends with', 'endState', 500, 'Situation at the last frame'),
-      text('Must not change', 'forbidden', 500, 'e.g. the red scarf, the scar on her left cheek', false)),
+      text('Must not change', 'forbidden', 500, 'e.g. the red scarf, the scar on her left cheek')),
     castChips,
     h('div.sb-dialogue', {}, h('span.field-label', {}, 'DIALOGUE'), ...rows.map(lineRow),
       locked ? null : h('button.text-button', { onclick: () => { rows.push({ speaker: speakers[1]?.[0] ?? 'narrator', text: '', start: null }); render(); } }, '+ Add a line')),
