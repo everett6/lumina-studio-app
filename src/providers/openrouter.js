@@ -31,6 +31,7 @@ export default {
     video('google/veo-3.1', 'Veo 3.1', [4, 6, 8], ['16:9', '9:16'], 'Top-quality video with sound'),
     video('kwaivgi/kling-v3.0-pro', 'Kling 3.0 Pro', range(3, 15), ['16:9', '9:16', '1:1'], 'Up to 15 s per clip, with sound'),
     video('bytedance/seedance-2.0', 'Seedance 2.0', range(4, 15), ['16:9', '9:16', '1:1'], 'Up to 15 s per clip, with sound'),
+    video('alibaba/wan-2.7:free', 'Wan 2.7 Free (rate limited)', range(2, 10), ['16:9', '9:16', '1:1'], 'Free tier, limited availability; test with a single clip before batch production'),
     video('alibaba/wan-2.7', 'Wan 2.7', range(2, 10), ['16:9', '9:16', '1:1'], 'Lower cost, with sound'),
     video('minimax/hailuo-3', 'Hailuo 3', range(5, 15), ['16:9', '9:16', '1:1'], 'Up to 15 s per clip, with sound'),
   ],
