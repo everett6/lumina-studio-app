@@ -5,6 +5,7 @@ import { startLumina } from '../src/app.js';
 import { encodePng } from '../src/png.js';
 
 process.env.LUMINA_MOCK_DELAY_MS = '20';
+process.env.LUMINA_OFFLINE = '1'; // tests never reach the network (no model-list refresh)
 
 export const tinyPng = () => encodePng(4, 4, () => [200, 40, 40]);
 export const tinyPngDataUrl = () => `data:image/png;base64,${tinyPng().toString('base64')}`;

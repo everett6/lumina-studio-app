@@ -7,6 +7,26 @@ import { z } from 'zod';
 
 const maxInlineImageBytes = 3 * 1024 * 1024;
 
+// One HTTP call from an MCP server to Lumina's API. Calls are marked as coming from MCP (budget approvals look
+// at this) and may carry an approval id. Budget refusals keep their details (approvalId, estimate) for the client.
+export async function callLumina({ origin, token, method, route, body, approvalId, timeoutMs = 660_000 }) {
+  const response = await fetch(`${origin}${route}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`, 'x-lumina-client': 'mcp',
+      ...(approvalId ? { 'x-lumina-approval-id': approvalId } : {}), ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeoutMs),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const { error, ...details } = data;
+    const extra = Object.keys(details).length ? ` ${JSON.stringify(details)}` : '';
+    throw Object.assign(new Error(`${error || `Lumina returned HTTP ${response.status}`}${extra}`), { status: response.status, data });
+  }
+  return data;
+}
+
 export function registerLuminaTools(server, client) {
   const text = (value) => ({ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) });
   const ok = (...content) => ({ content });

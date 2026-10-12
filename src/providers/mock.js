@@ -82,7 +82,10 @@ export default {
     await sleep(Number(process.env.LUMINA_MOCK_DELAY_MS ?? 300));
     return { bytes: toneWav(Math.min(30, 0.05 * text.length + 0.2), voice === 'tone-high' ? 660 : 330), usage: { mock: true } };
   },
-  async video({ prompt, image, aspect, duration }) {
+  // Resumable like the real video providers: it reports a job id, and a saved id is "polled" again.
+  resumable: true,
+  async video({ prompt, image, aspect, duration, resumeJob, onSubmitted }) {
+    if (!resumeJob) onSubmitted?.({ id: `mock-${createHash('sha256').update(prompt).digest('hex').slice(0, 12)}` });
     if (prompt.includes('[fail]')) throw new ProviderError('policy', 'Mock failure requested');
     await sleep(Number(process.env.LUMINA_MOCK_DELAY_MS ?? 300));
     return { bytes: await colourClip(createHash('sha256').update(`${prompt}|${image ? 1 : 0}`).digest(), aspect, process.env.LUMINA_MOCK_FULL_CLIPS === '1' ? duration : 1), usage: { mock: true } };

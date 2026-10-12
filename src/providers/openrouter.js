@@ -56,25 +56,38 @@ export default {
     if (!first?.b64_json) throw new ProviderError('provider', 'OpenRouter returned no image');
     return { bytes: Buffer.from(first.b64_json, 'base64'), usage: result.usage ?? null };
   },
-  async video({ key, model, prompt, image: start, duration, aspect }) {
-    const body = { model, prompt, generate_audio: true };
-    if (duration) body.duration = duration;
-    if (aspect) body.aspect_ratio = aspect;
-    if (start) body.frame_images = [{ type: 'image_url', image_url: { url: toDataUrl(start) }, frame_type: 'first_frame' }];
-    const job = await requestJson(`${api}/videos`, { method: 'POST', headers: headers(key), body: JSON.stringify(body), timeoutMs: 120_000 });
-    if (!job?.id) throw new ProviderError('provider', 'OpenRouter did not start the video job');
-    const poll = job.polling_url && /^https:\/\/openrouter\.ai\//.test(job.polling_url) ? job.polling_url : `${api}/videos/${encodeURIComponent(job.id)}`;
+  // Video jobs are asynchronous. `onSubmitted` receives the job id the moment OpenRouter accepts it (Lumina saves
+  // it), and `resumeJob` continues polling a saved job after a restart instead of submitting (and paying) again.
+  resumable: true,
+  async video({ key, model, prompt, image: start, duration, aspect, resolution, resumeJob = null, onSubmitted }) {
+    let job = resumeJob;
+    if (!job?.id) {
+      const body = { model, prompt, generate_audio: true };
+      if (duration) body.duration = duration;
+      if (aspect) body.aspect_ratio = aspect;
+      // Always explicit: per-second prices differ several-fold between resolutions.
+      if (resolution) body.resolution = resolution;
+      if (start) body.frame_images = [{ type: 'image_url', image_url: { url: toDataUrl(start) }, frame_type: 'first_frame' }];
+      const submitted = await requestJson(`${api}/videos`, { method: 'POST', headers: headers(key), body: JSON.stringify(body), timeoutMs: 120_000 });
+      if (!submitted?.id) throw new ProviderError('provider', 'OpenRouter did not start the video job');
+      job = { id: String(submitted.id), pollUrl: submitted.polling_url };
+      onSubmitted?.(job);
+    }
+    const onOpenRouter = (url) => /^https:\/\/openrouter\.ai\//.test(String(url ?? ''));
+    const poll = onOpenRouter(job.pollUrl) ? job.pollUrl : `${api}/videos/${encodeURIComponent(job.id)}`;
     const deadline = Date.now() + 20 * 60_000;
     for (;;) {
       await sleep(Number(process.env.LUMINA_OPENROUTER_POLL_MS ?? 5000));
       const status = await requestJson(poll, { headers: headers(key), timeoutMs: 60_000 });
       if (status.status === 'completed') {
-        const url = status.unsigned_urls?.[0] ?? `${api}/videos/${encodeURIComponent(job.id)}/content?index=0`;
+        const listed = status.unsigned_urls?.[0];
+        // The key only goes to OpenRouter's own content endpoint.
+        const url = onOpenRouter(listed) ? listed : `${api}/videos/${encodeURIComponent(job.id)}/content?index=0`;
         return { bytes: await downloadBytes(url, { timeoutMs: 300_000, headers: { authorization: `Bearer ${key}` } }), usage: status.usage ?? null };
       }
       if (['failed', 'cancelled', 'expired'].includes(status.status)) {
         const reason = String(status.error ?? status.status);
-        throw new ProviderError(/policy|safety|moderat/i.test(reason) ? 'policy' : 'provider', `OpenRouter video ${status.status}`, { detail: reason });
+        throw Object.assign(new ProviderError(/policy|safety|moderat/i.test(reason) ? 'policy' : 'provider', `OpenRouter video ${status.status}`, { detail: reason }), { usage: status.usage ?? null });
       }
       if (Date.now() > deadline) throw new ProviderError('timeout', 'OpenRouter video timed out');
     }

@@ -175,6 +175,42 @@ const migrations = [
    );
    CREATE INDEX shots_sequence ON shots(sequence_id, position);
    CREATE TABLE canvas_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, graph TEXT NOT NULL, created_at TEXT NOT NULL);`,
+  // 5: spending ledger (kept when projects are deleted), provider job ids for resuming, idempotency keys,
+  // approvals for costly or unpriced requests, film details on shots, screenplays, character voices.
+  `ALTER TABLE generations ADD COLUMN provider_job TEXT;
+   ALTER TABLE generations ADD COLUMN idempotency_key TEXT;
+   ALTER TABLE generations ADD COLUMN billing TEXT;
+   CREATE UNIQUE INDEX generations_idempotency ON generations(idempotency_key) WHERE idempotency_key IS NOT NULL;
+   CREATE TABLE spend_ledger (
+     generation_id TEXT PRIMARY KEY,
+     project_id TEXT NOT NULL,
+     provider TEXT NOT NULL,
+     model TEXT NOT NULL,
+     operation TEXT NOT NULL,
+     estimated_usd REAL,
+     actual_usd REAL,
+     status TEXT NOT NULL,
+     note TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE INDEX spend_created ON spend_ledger(created_at);
+   CREATE TABLE spend_approvals (
+     id TEXT PRIMARY KEY,
+     signature TEXT NOT NULL,
+     summary TEXT NOT NULL,
+     estimated_usd REAL,
+     status TEXT NOT NULL,
+     requested_by TEXT,
+     created_at TEXT NOT NULL,
+     decided_at TEXT,
+     used_by TEXT
+   );
+   ALTER TABLE shots ADD COLUMN details TEXT NOT NULL DEFAULT '{}';
+   ALTER TABLE shots ADD COLUMN review TEXT NOT NULL DEFAULT '{}';
+   ALTER TABLE sequences ADD COLUMN screenplay TEXT NOT NULL DEFAULT '';
+   ALTER TABLE characters ADD COLUMN voice TEXT;
+   ALTER TABLE characters ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 function migrate(db) {

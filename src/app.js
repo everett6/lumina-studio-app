@@ -6,7 +6,9 @@ import { createApiServer } from './api.js';
 import { createAssetStore } from './assets.js';
 import { createBookService } from './books.js';
 import { createCanvasRunner } from './canvas.js';
-import { openDatabase } from './db.js';
+import { openDatabase, transaction } from './db.js';
+import { createBudget } from './budget.js';
+import { createModelCatalog } from './catalog.js';
 import { createDirectors } from './directors/index.js';
 import { createGenerationService } from './generation.js';
 import { createJobRunner } from './jobs.js';
@@ -37,8 +39,10 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const providers = createProviders({ enableMock });
   const directors = createDirectors({ enableMock });
   const keys = createKeyStore({ file: path.join(dataDir, 'keys.json'), cipher });
-  const jobs = createJobRunner({ repo, assetStore, providers, directors, keys, log });
-  const generations = createGenerationService({ repo, providers, directors, keys, jobs });
+  const budget = createBudget({ repo });
+  const modelCatalog = createModelCatalog({ repo, provider: providers.get('openrouter'), log });
+  const jobs = createJobRunner({ repo, assetStore, providers, directors, keys, budget, log });
+  const generations = createGenerationService({ repo, providers, directors, keys, jobs, budget, db, transaction });
   const canvasRunner = createCanvasRunner({ repo, generations, jobs, directors, keys });
   const books = createBookService({ repo, directors, keys, generations, providers, assetStore });
   const enhancer = createEnhancer({ binDir: path.join(dataRoot, 'bin'), workDir: path.join(dataRoot, 'tmp'), log });
@@ -57,7 +61,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), binDir: path.join(dataRoot, 'bin'), tunnelCommand: process.env.LUMINA_TUNNEL_COMMAND || null, log,
   });
   const server = createApiServer({
-    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, jobs, token, remote,
+    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, jobs, token, remote, budget, modelCatalog,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
   });
   await new Promise((resolve, reject) => {
@@ -69,6 +73,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const remoteStatus = await remote.start();
   if (remoteStatus.error) log.error?.('Remote access not started', { detail: remoteStatus.error });
   remote.resume(); // reconnects the one-click public address in the background
+  if (process.env.LUMINA_OFFLINE !== '1') modelCatalog.refreshIfStale();
   // Tools like the MCP server find the running app through this file.
   writeFileSync(path.join(dataDir, 'endpoint.json'), JSON.stringify({ url: origin, pid: process.pid, mode }), { mode: 0o600 });
 

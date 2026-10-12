@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { registerLuminaTools } from '../mcp/tools.js';
+import { callLumina, registerLuminaTools } from '../mcp/tools.js';
 import { createTunnel } from './tunnel.js';
 
 const luminaVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -143,15 +143,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
 
   // The tools run inside this process and reach Lumina through its own loopback API.
   const toolClient = {
-    async call(method, route, body) {
-      const response = await fetch(`${localOrigin()}${route}`, {
-        method, headers: { authorization: `Bearer ${localToken}`, ...(body ? { 'content-type': 'application/json' } : {}) },
-        body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(660_000),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || `Lumina returned HTTP ${response.status}`);
-      return data;
-    },
+    call: (method, route, body, { approvalId } = {}) => callLumina({ origin: localOrigin(), token: localToken, method, route, body, approvalId }),
     fetchRaw: (route) => fetch(`${localOrigin()}${route}`, { headers: { authorization: `Bearer ${localToken}` }, signal: AbortSignal.timeout(660_000) }),
     exportDir: () => exportDir,
     allowOutputPath: false,

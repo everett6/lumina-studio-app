@@ -53,13 +53,21 @@ export default {
     }
     return { bytes: joinAudio(clips, 'audio/wav'), usage: { characters: text.length } };
   },
-  async video({ key, model, prompt, image, duration, aspect }) {
+  // Veo runs as a long-running operation; its name is saved so a restart polls it instead of starting again.
+  resumable: true,
+  async video({ key, model, prompt, image, duration, aspect, resumeJob, onSubmitted }) {
     const headers = { 'x-goog-api-key': requireKey(key), 'content-type': 'application/json' };
-    const instance = { prompt, ...(image ? { image: { inlineData: { mimeType: image.mime, data: image.bytes.toString('base64') } } } : {}) };
-    let operation = await requestJson(`${base}/models/${model}:predictLongRunning`, {
-      method: 'POST', headers, timeoutMs: 120_000,
-      body: JSON.stringify({ instances: [instance], parameters: { aspectRatio: aspect, durationSeconds: duration, numberOfVideos: 1 } }),
-    });
+    let operation;
+    if (resumeJob?.name && /^[A-Za-z0-9/_.-]+$/.test(resumeJob.name)) {
+      operation = { name: resumeJob.name, done: false };
+    } else {
+      const instance = { prompt, ...(image ? { image: { inlineData: { mimeType: image.mime, data: image.bytes.toString('base64') } } } : {}) };
+      operation = await requestJson(`${base}/models/${model}:predictLongRunning`, {
+        method: 'POST', headers, timeoutMs: 120_000,
+        body: JSON.stringify({ instances: [instance], parameters: { aspectRatio: aspect, durationSeconds: duration, numberOfVideos: 1 } }),
+      });
+      if (operation?.name) onSubmitted?.({ id: operation.name, name: operation.name });
+    }
     const deadline = Date.now() + 900_000;
     while (!operation.done) {
       if (Date.now() > deadline) throw new ProviderError('timeout', 'Veo generation timed out');

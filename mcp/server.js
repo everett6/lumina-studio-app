@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { registerLuminaTools } from './tools.js';
+import { callLumina, registerLuminaTools } from './tools.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const configHome = process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config');
@@ -63,24 +63,18 @@ async function ensureRunning() {
   throw new Error(`Started Lumina Studio (${command}) but it did not respond within 30 seconds.`);
 }
 
-async function call(method, route, body) {
+async function call(method, route, body, { approvalId } = {}) {
   await ensureRunning();
   const { url, token } = connection();
-  let response;
   try {
-    response = await fetch(`${url}${route}`, {
-      method, headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(660_000),
-    });
-  } catch {
+    return await callLumina({ origin: url, token, method, route, body, approvalId });
+  } catch (error) {
+    if (error.status) throw error;
     throw new Error('Lumina Studio is not running. Open the app, then try again.');
   }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Lumina returned HTTP ${response.status}`);
-  return data;
 }
 
-const server = new McpServer({ name: 'lumina-studio', version: '0.4.0' });
+const server = new McpServer({ name: 'lumina-studio', version: JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version });
 registerLuminaTools(server, {
   call,
   async fetchRaw(route) {

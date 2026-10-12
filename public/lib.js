@@ -147,11 +147,15 @@ export function modelsFor(operation) {
 }
 
 // Cost of one job at the provider's list price: { usd } when it can be worked out, otherwise { text }.
-export function estimateCost(model, { size, duration } = {}) {
+export function estimateCost(model, { size, duration, resolution } = {}) {
   const price = model?.price;
   if (!price) return { usd: null, text: 'Price not listed' };
   if (price.usd == null) return { usd: null, text: price.text };
-  if (price.per === 'second') return { usd: price.usd * (Number(duration) || 0), from: price.from };
+  if (price.per === 'second') {
+    // Live OpenRouter prices vary by resolution; without one, the dearest rate is shown.
+    const rate = price.byResolution?.[resolution ?? model.defaultResolution] ?? price.usd;
+    return { usd: rate * (Number(duration) || 0), from: price.from };
+  }
   if (price.per === 'megapixel') {
     const [w, h] = String(size ?? '').split('x').map(Number);
     return w && h ? { usd: price.usd * w * h / 1e6 } : { usd: null, text: `$${price.usd} per megapixel` };

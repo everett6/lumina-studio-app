@@ -16,9 +16,18 @@ const inputs = {
 };
 
 // Submit to fal's queue, poll until done, then fetch the result document.
-async function queued({ key, model, input, timeoutMs }) {
+// A saved job (statusUrl/responseUrl, both on fal's queue host) is polled instead of submitting again.
+async function queued({ key, model, input, timeoutMs, resumeJob = null, onSubmitted }) {
   const headers = { authorization: `Key ${requireKey(key)}`, 'content-type': 'application/json' };
-  const submitted = await requestJson(`${queue}/${model}`, { method: 'POST', headers, body: JSON.stringify(input) });
+  const onQueue = (url) => typeof url === 'string' && url.startsWith(`${queue}/`);
+  let job = resumeJob && onQueue(resumeJob.statusUrl) && onQueue(resumeJob.responseUrl) ? resumeJob : null;
+  if (!job) {
+    const submitted = await requestJson(`${queue}/${model}`, { method: 'POST', headers, body: JSON.stringify(input) });
+    if (!onQueue(submitted.status_url) || !onQueue(submitted.response_url)) throw new ProviderError('provider', 'fal returned an unexpected queue address');
+    job = { id: submitted.request_id ?? null, statusUrl: submitted.status_url, responseUrl: submitted.response_url };
+    onSubmitted?.(job);
+  }
+  const submitted = { status_url: job.statusUrl, response_url: job.responseUrl };
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const status = await requestJson(submitted.status_url, { headers });
@@ -53,7 +62,8 @@ export default {
     if (!url) throw new ProviderError(result?.has_nsfw_concepts?.[0] ? 'policy' : 'provider', 'fal returned no image');
     return { bytes: await downloadBytes(url), usage: null };
   },
-  async video({ key, model, prompt, image, duration, aspect }) {
+  resumable: true,
+  async video({ key, model, prompt, image, duration, aspect, resumeJob, onSubmitted }) {
     const input = { prompt, duration, generate_audio: true };
     if (model.endsWith('image-to-video')) {
       if (!image) throw new ProviderError('invalid_request', 'This model needs a start image', { detail: 'Add an input image' });
@@ -61,7 +71,7 @@ export default {
     } else if (aspect) {
       input.aspect_ratio = aspect;
     }
-    const result = await queued({ key, model, input, timeoutMs: 900_000 });
+    const result = await queued({ key, model, input, timeoutMs: 900_000, resumeJob, onSubmitted });
     const url = result?.video?.url;
     if (!url) throw new ProviderError('provider', 'fal returned no video');
     return { bytes: await downloadBytes(url, { timeoutMs: 300_000 }), usage: null };

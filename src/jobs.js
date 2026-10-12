@@ -2,9 +2,14 @@ import { EventEmitter } from 'node:events';
 import { providerPrompt, toolOperations } from './generation.js';
 import { userMessage } from './providers/http.js';
 
-// Durable image job runner. Generation rows are the queue: 'queued' rows survive restarts and resume;
-// rows left 'running' by a crash are marked 'interrupted' on startup.
-export function createJobRunner({ repo, assetStore, providers, directors, keys, concurrency = 2, log = console }) {
+// Errors that mean the provider turned the request away before doing any paid work.
+const refusedCategories = new Set(['missing_key', 'auth', 'invalid_request', 'rate_limit', 'policy']);
+
+// Durable job runner. Generation rows are the queue: 'queued' rows survive restarts and resume. Long provider
+// jobs (video) save the provider's job id as soon as it is accepted, so after a restart Lumina keeps polling the
+// same job instead of starting (and paying for) a new one. Rows left 'running' without such an id are marked
+// 'interrupted', with billing 'unknown' when the request may already have reached a paid provider.
+export function createJobRunner({ repo, assetStore, providers, directors, keys, budget, concurrency = 2, log = console }) {
   const queue = [];
   const events = new EventEmitter();
   events.setMaxListeners(0);
@@ -58,7 +63,11 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       } else if (job.operation === 'speech') {
         output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style });
       } else if (job.operation === 'video') {
-        output = await provider.video({ key, model: job.model, prompt, image: images[0] ?? null, duration: params.duration, aspect: params.aspect });
+        output = await provider.video({
+          key, model: job.model, prompt, image: images[0] ?? null, duration: params.duration, aspect: params.aspect, resolution: params.resolution,
+          resumeJob: job.providerJob ?? null,
+          onSubmitted: (info) => repo.generations.update(id, { providerJob: { ...info, submittedAt: new Date().toISOString() } }),
+        });
       } else {
         output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images });
       }
@@ -69,14 +78,22 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         status: 'completed', finalPrompt: prompt, outputAssetId: asset.id, usage: output.usage,
         completedAt: new Date().toISOString(), durationMs: Date.now() - started,
       });
+      const ledger = budget?.settle(job, { outcome: 'completed', usage: output.usage });
+      if (ledger) repo.generations.update(id, { billing: 'charged' });
     } catch (error) {
       const category = error.category || 'provider';
       log.error?.('Generation failed', { id, provider: job.provider, category, detail: error.detail ?? error.message });
       // A project deleted mid-job cascades the row away; nothing left to update.
       if (repo.generations.get(id)) {
+        // Was this billed? A refusal before any provider job existed was not; anything after the provider
+        // accepted the job, or a lost connection, may have been.
+        const submitted = Boolean(repo.generations.get(id).providerJob);
+        const outcome = !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
+        const ledger = budget?.settle(job, { outcome, usage: error.usage });
         repo.generations.update(id, {
           status: 'failed', errorCategory: category, userError: error.category ? userMessage(error) : error.message,
           completedAt: new Date().toISOString(), durationMs: Date.now() - started,
+          billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : null,
         });
       }
     }
@@ -91,11 +108,20 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       pump();
     },
     recover() {
-      const interrupted = repo.generations.markInterrupted();
+      const running = repo.generations.idsWithStatus('running').map((id) => repo.generations.get(id));
+      // Provider jobs that were accepted before Lumina stopped: poll them again.
+      const resumable = running.filter((g) => g.providerJob && providers.get(g.provider)?.resumable);
+      for (const g of resumable) repo.generations.update(g.id, { status: 'queued' });
+      const lost = running.filter((g) => !resumable.includes(g));
+      const interrupted = repo.generations.markInterrupted(lost.map((g) => g.id));
+      for (const g of lost) {
+        const ledger = budget?.settle(g, { outcome: 'unknown' });
+        if (ledger) repo.generations.update(g.id, { billing: ledger.status });
+      }
       const queued = repo.generations.idsWithStatus('queued');
       queued.forEach((id) => queue.push(id));
       pump();
-      return { interrupted, resumed: queued.length };
+      return { interrupted, resumed: queued.length, reattached: resumable.length };
     },
     // Resolve when a job reaches a terminal state (used by canvas runs, MCP and tests).
     waitFor(id, timeoutMs = 600_000) {

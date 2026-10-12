@@ -6,13 +6,15 @@ import path from 'node:path';
 import { parseDataUrl } from './assets.js';
 import { bookKinds, briefFor, cleanBible, cleanBrief, trimSizes } from './books.js';
 import { emptyGraph, nodeTypes, templates, validateGraph } from './canvas.js';
-import { RequestError } from './generation.js';
+import { defaultResolution, nearestDuration, RequestError } from './generation.js';
 import { envNames } from './keys.js';
 import { presetGroups, presets } from './presets.js';
-import { priceFor, pricesAsOf } from './pricing.js';
+import { estimateUsd, priceFor, pricesAsOf } from './pricing.js';
+import { videoRate } from './catalog.js';
 import { userMessage } from './providers/http.js';
 import { cleanSequenceSettings, maxShots, maxTargetSeconds } from './sequences.js';
 import { createSearch } from './search.js';
+import { currentRequest, requestContext } from './context.js';
 import { hasFfmpeg } from './video.js';
 
 const staticTypes = {
@@ -58,7 +60,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, jobs, token, remote, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, jobs, token, remote, budget, modelCatalog, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -70,7 +72,7 @@ export function createApiServer(ctx) {
     return {
       providers: providers.list.map((p) => ({
         id: p.id, label: p.label, keyUrl: p.keyUrl ?? null, keyless: Boolean(p.keyless),
-        ready: Boolean(p.keyless || keyStatus[p.id]?.configured), models: p.models.map((m) => ({ ...m, price: priceFor(p.id, m.id) })),
+        ready: Boolean(p.keyless || keyStatus[p.id]?.configured), models: p.models.map(({ liveSkus, livePrice, ...m }) => ({ ...m, defaultResolution: defaultResolution(m), price: catalogPrice(p.id, { ...m, liveSkus, livePrice }) })),
       })),
       directors: directors.list.map((d) => ({
         id: d.id, label: d.label, models: d.models, ready: Boolean(d.keyless || keyStatus[d.keyProvider]?.configured),
@@ -82,6 +84,16 @@ export function createApiServer(ctx) {
   const finder = createSearch(repo);
   route('GET', '/api/search', (req, match, url) => ({ results: finder.search(url.searchParams.get('q') ?? '', Math.min(50, Number(url.searchParams.get('limit')) || 20)) }));
   route('GET', '/api/search/document', (req, match, url) => finder.fetch(url.searchParams.get('id') ?? '') ?? (() => { throw new RequestError(404, 'No document with that id.'); })());
+  // The price shown in pickers. Live per-second video prices are listed per resolution; `usd` is the dearest.
+  function catalogPrice(providerId, model) {
+    const price = priceFor(providerId, model.id, model);
+    if (!price?.skus) return price;
+    const byResolution = Object.fromEntries((model.resolutions?.length ? model.resolutions : ['any'])
+      .map((r) => [r, videoRate(price.skus, { resolution: r === 'any' ? null : r })?.perSecond ?? null]));
+    const rates = Object.values(byResolution).filter((v) => v != null);
+    return rates.length ? { per: 'second', live: true, usd: Math.max(...rates), byResolution } : { live: true, usd: null, text: 'Billed per video token; no estimate' };
+  }
+
   route('GET', '/api/health', () => ({ ok: true, version: info.version, mode: info.mode, jobs: jobs.stats() }));
   route('GET', '/api/catalog', catalog);
   route('GET', '/api/presets', () => ({ groups: presetGroups, presets }));
@@ -143,7 +155,68 @@ export function createApiServer(ctx) {
     if (!done) throw new RequestError(404, 'Generation not found.');
     return { generation: done };
   });
-  route('POST', `/api/generations/${uuid}/retry`, (req, [id]) => ({ status: 202, body: { generation: generations.retry(id) } }));
+  route('POST', `/api/generations/${uuid}/retry`, async (req, [id]) => {
+    const body = await readBody(req, 1024);
+    return { status: 202, body: { generation: generations.retry(id, { confirmUncertain: body.confirmUncertain === true, approvalId: typeof body.approvalId === 'string' ? body.approvalId : undefined }) } };
+  });
+
+  // Budget. Limits can only be changed from the app itself, never by an MCP client.
+  const appOnly = (what) => {
+    if (currentRequest().source === 'mcp') throw new RequestError(403, `${what} can only be changed in the Lumina app.`);
+  };
+  const budgetCall = (fn) => {
+    try {
+      return fn();
+    } catch (error) {
+      throw error.status && !(error instanceof RequestError) ? new RequestError(error.status, error.message) : error;
+    }
+  };
+  route('GET', '/api/budget', () => budget.status());
+  route('PUT', '/api/budget', async (req) => {
+    appOnly('Budget limits');
+    const body = await readBody(req, 4096);
+    return budgetCall(() => budget.update(body));
+  });
+  route('POST', `/api/budget/approvals/${uuid}`, async (req, [id]) => {
+    const body = await readBody(req, 1024);
+    return { approval: budgetCall(() => budget.decide(id, body.approve === true, currentRequest().source)) };
+  });
+  route('POST', `/api/budget/spend/${uuid}`, async (req, [id]) => {
+    appOnly('Recorded charges');
+    const body = await readBody(req, 1024);
+    const row = budgetCall(() => budget.resolve(id, body.actualUsd));
+    if (repo.generations.get(id)) repo.generations.update(id, { billing: row.status === 'released' ? 'none' : row.status });
+    return { spend: row };
+  });
+  // Estimates for planning (no job is created): a list of { provider, model, operation, duration, resolution, size, image }.
+  route('POST', '/api/budget/estimate', async (req) => {
+    const body = await readBody(req, 256 * 1024);
+    const items = Array.isArray(body.items) ? body.items.slice(0, 500) : [];
+    const lines = items.map((item) => {
+      const model = providers.model(item.provider, item.model);
+      if (!model) return { ...item, usd: null, note: 'Unknown model' };
+      const resolution = item.operation === 'video' && model.resolutions?.length ? (model.resolutions.includes(item.resolution) ? item.resolution : defaultResolution(model)) : null;
+      const duration = item.operation === 'video' ? nearestDuration(model.durations, item.duration) : undefined;
+      const usd = estimateUsd(priceFor(item.provider, model.id, model), { size: item.size, duration, resolution, image: Boolean(item.image) });
+      return { ...item, duration, resolution, usd: usd == null ? null : Math.round(usd * 10000) / 10000, note: usd == null ? 'No published price' : null };
+    });
+    const known = lines.filter((l) => l.usd != null);
+    const status = budget.status();
+    const totalUsd = Math.round(known.reduce((sum, l) => sum + l.usd, 0) * 100) / 100;
+    return {
+      lines, totalUsd, unpriced: lines.length - known.length, remainingUsd: status.settings.enabled ? status.remainingUsd : null,
+      fits: status.settings.enabled ? totalUsd <= status.remainingUsd - (status.settings.retryReserveUsd ?? 0) && lines.length === known.length : null,
+    };
+  });
+  route('GET', '/api/models/status', () => modelCatalog.status());
+  route('POST', '/api/models/refresh', async () => {
+    try {
+      await modelCatalog.refresh();
+    } catch (error) {
+      throw new RequestError(502, `Could not read OpenRouter's model list: ${error.message}`);
+    }
+    return { ...modelCatalog.status(), catalog: catalog() };
+  });
 
   route('GET', '/api/settings/keys', () => ({ keys: keys.status(), encrypted: keys.encrypted }));
   route('PUT', '/api/settings/keys/([a-z]+)', async (req, [provider]) => {
@@ -539,7 +612,13 @@ export function createApiServer(ctx) {
         if (r.method !== req.method) continue;
         const match = r.pattern.exec(url.pathname);
         if (!match) continue;
-        const result = await r.handler(req, match.slice(1), url, res);
+        // MCP servers mark their calls; the app's own pages do not. Budget approvals use this to keep the decision
+        // with the person unless they allowed MCP clients to approve.
+        const context = {
+          source: req.headers['x-lumina-client'] === 'mcp' ? 'mcp' : 'app',
+          approvalId: /^[a-f0-9-]{36}$/.test(String(req.headers['x-lumina-approval-id'] ?? '')) ? req.headers['x-lumina-approval-id'] : null,
+        };
+        const result = await requestContext.run(context, () => r.handler(req, match.slice(1), url, res));
         if (res.headersSent) return undefined;
         return result?.status ? send(res, result.status, result.body) : send(res, 200, result);
       }
@@ -547,7 +626,7 @@ export function createApiServer(ctx) {
       if (req.method === 'GET') return serveFile(res, publicDir, url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname.slice(1)));
       return send(res, 405, { error: 'Method not allowed' });
     } catch (error) {
-      if (error instanceof RequestError) return send(res, error.status, { error: error.message });
+      if (error instanceof RequestError) return send(res, error.status, { error: error.message, ...(error.extra ?? {}) });
       console.error('Request failed', { path: url.pathname, detail: error?.message });
       return send(res, error.status || 500, { error: error.status ? error.message : 'The request could not be completed.' });
     }

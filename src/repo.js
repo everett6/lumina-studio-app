@@ -15,6 +15,7 @@ const toGeneration = (r) => r && {
   assetPath: r.output_file ? `/assets/${r.output_file}` : null, errorCategory: r.error_category, userError: r.user_error,
   usage: parse(r.usage, null), canvasRunId: r.canvas_run_id, nodeId: r.node_id, bookPageId: r.book_page_id, bookTarget: r.book_target,
   mimeType: r.output_mime ?? null, createdAt: r.created_at,
+  providerJob: parse(r.provider_job, null), idempotencyKey: r.idempotency_key ?? null, billing: r.billing ?? null,
   startedAt: r.started_at, completedAt: r.completed_at, durationMs: r.duration_ms,
 };
 const toCanvas = (r) => r && {
@@ -32,7 +33,9 @@ const generationSelect = `SELECT g.*, a.file AS output_file, a.mime_type AS outp
 const generationColumns = {
   status: 'status', finalPrompt: 'final_prompt', outputAssetId: 'output_asset_id', errorCategory: 'error_category',
   userError: 'user_error', usage: 'usage', startedAt: 'started_at', completedAt: 'completed_at', durationMs: 'duration_ms',
+  providerJob: 'provider_job', billing: 'billing',
 };
+const jsonColumns = new Set(['usage', 'providerJob']);
 
 export function createRepo(db) {
   const touch = (projectId) => db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now(), projectId);
@@ -79,10 +82,11 @@ export function createRepo(db) {
     create(fields) {
       const id = randomUUID();
       db.prepare(`INSERT INTO generations (id, project_id, status, operation, provider, model, prompt, director, params,
-        input_asset_ids, canvas_run_id, node_id, book_page_id, book_target, created_at) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        input_asset_ids, canvas_run_id, node_id, book_page_id, book_target, idempotency_key, billing, created_at)
+        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, fields.projectId, fields.operation, fields.provider, fields.model, fields.prompt, fields.director ?? null,
           JSON.stringify(fields.params ?? {}), JSON.stringify(fields.inputAssetIds ?? []), fields.canvasRunId ?? null,
-          fields.nodeId ?? null, fields.bookPageId ?? null, fields.bookTarget ?? null, now());
+          fields.nodeId ?? null, fields.bookPageId ?? null, fields.bookTarget ?? null, fields.idempotencyKey ?? null, fields.billing ?? null, now());
       touch(fields.projectId);
       return generations.get(id);
     },
@@ -90,13 +94,17 @@ export function createRepo(db) {
       const entries = Object.entries(fields).filter(([key]) => key in generationColumns);
       if (!entries.length) return generations.get(id);
       const sql = entries.map(([key]) => `${generationColumns[key]} = ?`).join(', ');
-      const values = entries.map(([key, value]) => (key === 'usage' && value != null ? JSON.stringify(value) : value ?? null));
+      const values = entries.map(([key, value]) => (jsonColumns.has(key) && value != null ? JSON.stringify(value) : value ?? null));
       db.prepare(`UPDATE generations SET ${sql} WHERE id = ?`).run(...values, id);
       return generations.get(id);
     },
+    byIdempotencyKey: (key) => toGeneration(db.prepare(`${generationSelect} WHERE g.idempotency_key = ?`).get(key)),
     // Jobs that were mid-flight when the app stopped can't be resumed; mark them so the UI can offer a retry.
-    markInterrupted: () => db.prepare(`UPDATE generations SET status = 'interrupted', user_error = 'Lumina closed before this finished.',
-      completed_at = ? WHERE status = 'running'`).run(now()).changes,
+    markInterrupted: (ids) => {
+      const mark = db.prepare(`UPDATE generations SET status = 'interrupted', user_error = 'Lumina closed before this finished.',
+        completed_at = ? WHERE id = ? AND status = 'running'`);
+      return ids.reduce((count, id) => count + mark.run(now(), id).changes, 0);
+    },
   };
 
   const canvases = {
@@ -324,21 +332,74 @@ export function createRepo(db) {
     }),
   };
 
+  // Every paid request: an estimate reserved before it starts, settled with the provider's charge when known.
+  // Rows outlive their projects so deleting a project never resets what has been spent.
+  const toSpend = (r) => r && {
+    generationId: r.generation_id, projectId: r.project_id, provider: r.provider, model: r.model, operation: r.operation,
+    estimatedUsd: r.estimated_usd, actualUsd: r.actual_usd, status: r.status, note: r.note, createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+  const spend = {
+    get: (generationId) => toSpend(db.prepare('SELECT * FROM spend_ledger WHERE generation_id = ?').get(generationId)),
+    reserve({ generationId, projectId, provider, model, operation, estimatedUsd, note = null }) {
+      db.prepare(`INSERT INTO spend_ledger (generation_id, project_id, provider, model, operation, estimated_usd, status, note, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)`).run(generationId, projectId, provider, model, operation, estimatedUsd ?? null, note, now(), now());
+    },
+    settle(generationId, { status, actualUsd, note }) {
+      db.prepare('UPDATE spend_ledger SET status = ?, actual_usd = COALESCE(?, actual_usd), note = COALESCE(?, note), updated_at = ? WHERE generation_id = ?')
+        .run(status, actualUsd ?? null, note ?? null, now(), generationId);
+      return spend.get(generationId);
+    },
+    // Money counted against limits: charges as billed (or as estimated when the provider gave no figure), plus
+    // reservations still open and outcomes still unknown. Released reservations count nothing.
+    total({ since = null, projectId = null } = {}) {
+      const where = ["status IN ('reserved', 'charged', 'unknown')"];
+      const args = [];
+      if (since) { where.push('created_at >= ?'); args.push(since); }
+      if (projectId) { where.push('project_id = ?'); args.push(projectId); }
+      const row = db.prepare(`SELECT COALESCE(SUM(COALESCE(actual_usd, estimated_usd)), 0) AS usd, COUNT(*) AS n FROM spend_ledger WHERE ${where.join(' AND ')}`).get(...args);
+      return { usd: Math.round(row.usd * 10000) / 10000, count: row.n };
+    },
+    list: (limit = 200) => db.prepare('SELECT * FROM spend_ledger ORDER BY created_at DESC LIMIT ?').all(limit).map(toSpend),
+    byModel: () => db.prepare(`SELECT provider, model, COUNT(*) AS jobs, SUM(COALESCE(actual_usd, estimated_usd)) AS usd FROM spend_ledger
+      WHERE status IN ('reserved', 'charged', 'unknown') GROUP BY provider, model ORDER BY usd DESC`).all(),
+  };
+
+  const toApproval = (r) => r && {
+    id: r.id, signature: r.signature, summary: parse(r.summary, {}), estimatedUsd: r.estimated_usd, status: r.status,
+    requestedBy: r.requested_by, createdAt: r.created_at, decidedAt: r.decided_at, usedBy: r.used_by,
+  };
+  const approvals = {
+    get: (id) => toApproval(db.prepare('SELECT * FROM spend_approvals WHERE id = ?').get(id)),
+    pendingFor: (signature) => toApproval(db.prepare("SELECT * FROM spend_approvals WHERE signature = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1").get(signature)),
+    list: (status = null) => (status
+      ? db.prepare('SELECT * FROM spend_approvals WHERE status = ? ORDER BY created_at DESC LIMIT 100').all(status)
+      : db.prepare('SELECT * FROM spend_approvals ORDER BY created_at DESC LIMIT 100').all()).map(toApproval),
+    create({ signature, summary, estimatedUsd, requestedBy }) {
+      const id = randomUUID();
+      db.prepare(`INSERT INTO spend_approvals (id, signature, summary, estimated_usd, status, requested_by, created_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?)`).run(id, signature, JSON.stringify(summary), estimatedUsd ?? null, requestedBy ?? null, now());
+      return approvals.get(id);
+    },
+    decide: (id, status) => db.prepare("UPDATE spend_approvals SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'").run(status, now(), id).changes > 0,
+    use: (id, generationId) => db.prepare("UPDATE spend_approvals SET status = 'used', used_by = ? WHERE id = ? AND status = 'approved'").run(generationId, id).changes > 0,
+  };
+
   // Characters are global (usable in every project). Their reference photos are ordinary assets.
   const characters = {
     get: (id) => toCharacter(db.prepare('SELECT * FROM characters WHERE id = ?').get(id)),
     list: () => db.prepare('SELECT * FROM characters ORDER BY name COLLATE NOCASE').all().map(toCharacter),
-    create({ name, kind = 'character', description = '', referenceAssetIds = [] }) {
+    create({ name, kind = 'character', description = '', referenceAssetIds = [], voice = null }) {
       const id = randomUUID();
-      db.prepare('INSERT INTO characters (id, name, kind, description, reference_asset_ids, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(id, cleanName(name, 'Unnamed'), kind, description, JSON.stringify(referenceAssetIds), now(), now());
+      db.prepare('INSERT INTO characters (id, name, kind, description, reference_asset_ids, voice, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, cleanName(name, 'Unnamed'), kind, description, JSON.stringify(referenceAssetIds), voice ? JSON.stringify(voice) : null, now(), now());
       return characters.get(id);
     },
-    update(id, { name, kind, description, referenceAssetIds }) {
+    update(id, { name, kind, description, referenceAssetIds, voice, locked }) {
       const c = characters.get(id);
-      db.prepare('UPDATE characters SET name = ?, kind = ?, description = ?, reference_asset_ids = ?, updated_at = ? WHERE id = ?')
+      db.prepare('UPDATE characters SET name = ?, kind = ?, description = ?, reference_asset_ids = ?, voice = ?, locked = ?, updated_at = ? WHERE id = ?')
         .run(name === undefined ? c.name : cleanName(name, c.name), kind ?? c.kind, description ?? c.description,
-          JSON.stringify(referenceAssetIds ?? c.referenceAssetIds), now(), id);
+          JSON.stringify(referenceAssetIds ?? c.referenceAssetIds), JSON.stringify(voice === undefined ? c.voice : voice),
+          locked === undefined ? (c.locked ? 1 : 0) : (locked ? 1 : 0), now(), id);
       return characters.get(id);
     },
     remove: (id) => db.prepare('DELETE FROM characters WHERE id = ?').run(id).changes > 0,
@@ -355,11 +416,11 @@ export function createRepo(db) {
       touch(projectId);
       return sequences.get(id);
     },
-    update(id, { title, idea, writer, settings, outputAssetId }) {
+    update(id, { title, idea, writer, settings, outputAssetId, screenplay }) {
       const s = sequences.get(id);
-      db.prepare('UPDATE sequences SET title = ?, idea = ?, writer = ?, settings = ?, output_asset_id = ?, updated_at = ? WHERE id = ?')
+      db.prepare('UPDATE sequences SET title = ?, idea = ?, writer = ?, settings = ?, output_asset_id = ?, screenplay = ?, updated_at = ? WHERE id = ?')
         .run(title === undefined ? s.title : cleanName(title, s.title), idea ?? s.idea, writer === undefined ? s.writer : writer,
-          JSON.stringify(settings ?? s.settings), outputAssetId === undefined ? s.outputAssetId : outputAssetId, now(), id);
+          JSON.stringify(settings ?? s.settings), outputAssetId === undefined ? s.outputAssetId : outputAssetId, screenplay ?? s.screenplay, now(), id);
       return sequences.get(id);
     },
     remove: (id) => db.prepare('DELETE FROM sequences WHERE id = ?').run(id).changes > 0,
@@ -373,11 +434,11 @@ export function createRepo(db) {
       const set = db.prepare('UPDATE shots SET position = ? WHERE id = ?');
       ids.forEach((shotId, index) => set.run(index + 1, shotId));
     },
-    insert(sequenceId, { position, description = '', camera = null, duration = null }) {
+    insert(sequenceId, { position, description = '', camera = null, duration = null, details = {} }) {
       const id = randomUUID();
       db.prepare('UPDATE shots SET position = position + 1 WHERE sequence_id = ? AND position >= ?').run(sequenceId, position);
-      db.prepare('INSERT INTO shots (id, sequence_id, position, description, camera, duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(id, sequenceId, position, description, camera, duration, now(), now());
+      db.prepare('INSERT INTO shots (id, sequence_id, position, description, camera, duration, details, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, sequenceId, position, description, camera, duration, JSON.stringify(details ?? {}), now(), now());
       return shots.get(id);
     },
     replaceAll(sequenceId, list) {
@@ -388,8 +449,9 @@ export function createRepo(db) {
     update(id, fields) {
       const s = shots.get(id);
       const pick = (key) => (fields[key] === undefined ? s[key] : fields[key]);
-      db.prepare('UPDATE shots SET description = ?, camera = ?, duration = ?, image_asset_id = ?, video_asset_id = ?, updated_at = ? WHERE id = ?')
-        .run(pick('description'), pick('camera'), pick('duration'), pick('imageAssetId'), pick('videoAssetId'), now(), id);
+      db.prepare('UPDATE shots SET description = ?, camera = ?, duration = ?, image_asset_id = ?, video_asset_id = ?, details = ?, review = ?, updated_at = ? WHERE id = ?')
+        .run(pick('description'), pick('camera'), pick('duration'), pick('imageAssetId'), pick('videoAssetId'),
+          JSON.stringify(pick('details') ?? {}), JSON.stringify(pick('review') ?? {}), now(), id);
       return shots.get(id);
     },
     move(id, direction) {
@@ -419,20 +481,22 @@ export function createRepo(db) {
     remove: (id) => db.prepare('DELETE FROM canvas_templates WHERE id = ?').run(id).changes > 0,
   };
 
-  return { projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth, characters, sequences, shots, canvasTemplates };
+  return { projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth, characters, sequences, shots, canvasTemplates, spend, approvals };
 }
 
 const toCharacter = (r) => r && {
   id: r.id, name: r.name, kind: r.kind, description: r.description, referenceAssetIds: parse(r.reference_asset_ids, []),
+  voice: parse(r.voice, null), locked: Boolean(r.locked),
   createdAt: r.created_at, updatedAt: r.updated_at,
 };
 const toSequence = (r) => r && {
-  id: r.id, projectId: r.project_id, title: r.title, idea: r.idea, writer: r.writer, settings: parse(r.settings, {}),
+  id: r.id, projectId: r.project_id, title: r.title, idea: r.idea, writer: r.writer, settings: parse(r.settings, {}), screenplay: r.screenplay ?? '',
   outputAssetId: r.output_asset_id, createdAt: r.created_at, updatedAt: r.updated_at,
 };
 const toShot = (r) => r && {
   id: r.id, sequenceId: r.sequence_id, position: r.position, description: r.description, camera: r.camera, duration: r.duration,
-  imageAssetId: r.image_asset_id, videoAssetId: r.video_asset_id, createdAt: r.created_at, updatedAt: r.updated_at,
+  imageAssetId: r.image_asset_id, videoAssetId: r.video_asset_id, details: parse(r.details, {}), review: parse(r.review, {}),
+  createdAt: r.created_at, updatedAt: r.updated_at,
 };
 const toTemplate = (r) => r && { id: r.id, name: r.name, graph: parse(r.graph, { nodes: [], edges: [] }), createdAt: r.created_at };
 
