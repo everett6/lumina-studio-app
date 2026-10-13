@@ -28,6 +28,9 @@ test('face check maths: alignment transform, YuNet decoding with overlap removal
   put(16, 10, 10, 0.95, 96);
   put(16, 10, 11, 0.9, 96);
   put(32, 2, 15, 0.3, 64);
+  // A face is kept only when the geometric mean of class confidence and objectness (as in OpenCV) reaches the threshold.
+  put(8, 40, 40, 0.8, 24);
+  outputs.obj_8[40 * (640 / 8) + 40] = 0.3;
   const faces = decodeFaces(outputs);
   assert.equal(faces.length, 1);
   assert.deepEqual(faces[0].box.map(Math.round), [120, 120, 96, 96]);

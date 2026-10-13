@@ -42,6 +42,7 @@ export function decodeFaces(outputs, { threshold = 0.6, nms = 0.3 } = {}) {
     const box = outputs[`bbox_${stride}`];
     const kps = outputs[`kps_${stride}`];
     for (let i = 0; i < cls.length; i += 1) {
+      // Same as OpenCV FaceDetectorYN: the square root of class confidence × objectness.
       const score = Math.sqrt(Math.min(1, Math.max(0, cls[i])) * Math.min(1, Math.max(0, obj[i])));
       if (score < threshold) continue;
       const [r, c] = [Math.floor(i / cols), i % cols];
