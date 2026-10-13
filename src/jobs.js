@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { providerPrompt, toolOperations } from './generation.js';
 import { userMessage } from './providers/http.js';
+import { requestContext } from './context.js';
 
 // Errors that mean the provider turned the request away before doing any paid work.
 const refusedCategories = new Set(['missing_key', 'auth', 'invalid_request', 'rate_limit', 'policy', 'credit_limit', 'budget_limit']);
@@ -22,7 +23,9 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     while (active < concurrency && queue.length) {
       const id = queue.shift();
       active += 1;
-      execute(id).finally(() => {
+      // Jobs run outside the request that queued them: background work (production, canvas runs) must not inherit a
+      // click's confirmation, or lack of one.
+      requestContext.run({ source: 'background' }, () => execute(id)).finally(() => {
         active -= 1;
         pump();
         if (active === 0 && queue.length === 0) events.emit('idle');
@@ -35,6 +38,9 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     if (!job || job.status !== 'queued') return;
     const started = Date.now();
     const abort = new AbortController();
+    // Jobs on this computer can be stopped from the start (also during preflight); paid jobs keep running once sent.
+    const stoppable = Boolean(providers.get(job.provider)?.cancellable);
+    if (stoppable) cancellers.set(id, () => abort.abort());
     progress.set(id, { done: 0, total: 0, startedAt: new Date(started).toISOString() });
     repo.generations.update(id, { status: 'running', startedAt: new Date().toISOString() });
     events.emit('update', repo.generations.get(id));
@@ -62,8 +68,6 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         images.push(await assetStore.read(asset));
       }
       const key = provider.keyless ? null : keys.get(provider.id);
-      // Only providers that run on this computer can be stopped mid-job; paid jobs keep running once submitted.
-      if (provider.cancellable) cancellers.set(id, () => abort.abort());
       const onProgress = (done, total) => {
         if (Number.isFinite(done) && Number.isFinite(total) && total > 0) progress.set(id, { ...progress.get(id), done, total });
       };
@@ -98,6 +102,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, onProgress, signal });
       }
       cancelled();
+      cancellers.delete(id); // saving the result: too late to cancel
       const asset = await assetStore.save({
         bytes: output.bytes, projectId: job.projectId, kind: 'generation', generationId: id, parentAssetId: job.inputAssetIds[0] ?? null,
       });
@@ -116,7 +121,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         // Was this billed? A refusal before any provider job existed was not; anything after the provider
         // accepted the job, or a lost connection, may have been.
         const submitted = Boolean(repo.generations.get(id).providerJob);
-        const outcome = category === 'cancelled' && !submitted ? 'refused' : !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
+        const outcome = category === 'cancelled' && (!submitted || stoppable) ? 'refused' : !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
         const ledger = budget?.settle(job, { outcome, usage: error.usage });
         repo.generations.update(id, {
           status: 'failed', errorCategory: category, userError: ['credit_limit', 'budget_limit', 'cancelled'].includes(category) ? error.message : error.category ? userMessage(error) : error.message,

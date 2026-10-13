@@ -2,7 +2,7 @@ import PDFDocument from 'pdfkit';
 import { imageSize } from './assets.js';
 import { joinAudio } from './audio.js';
 import { resolveFonts, scriptRuns } from './fonts.js';
-import { RequestError } from './generation.js';
+import { confirmSpend, RequestError } from './generation.js';
 import { parseManuscript } from './manuscript.js';
 import { createZip } from './zip.js';
 
@@ -161,6 +161,7 @@ export function createBookService({ repo, directors, keys, generations, provider
     if (!writer || !writer.models.includes(model)) throw new RequestError(400, 'Unknown writer model.');
     const key = writer.keyless ? null : keys.get(writer.keyProvider);
     if (!writer.keyless && !key) throw new RequestError(400, `Add a ${writer.label} key in Settings to use this writer.`);
+    if (!writer.keyless) confirmSpend({ estimateUsd: null, what: `the paid writer ${spec}` });
     const system = systems[book.kind] ?? systems.picture_book;
     return (task, prompt, { maxTokens = 16000, json = true, effort } = {}) => writer.complete({
       key, model, system: json ? system + jsonOnly : system, prompt, task, maxTokens, effort,

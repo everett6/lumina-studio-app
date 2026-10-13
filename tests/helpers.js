@@ -22,7 +22,7 @@ export async function startTestApp(options = {}) {
   const app = await startLumina({ dataRoot, enableMock: true, log: quietLog, ...options });
   // General workflow fixtures simulate the earlier unrestricted mock profile. Budget-specific tests
   // explicitly enable limits; pass budgetSettings: {} to exercise safe shipping defaults.
-  if (app.repo.settings.get('budget', null) === null) app.repo.settings.set('budget', options.budgetSettings ?? { enabled: false, strictPrices: false });
+  if (app.repo.settings.get('budget', null) === null) app.repo.settings.set('budget', options.budgetSettings ?? { enabled: false, strictPrices: false, confirmPaid: false });
   const call = async (method, url, body, { auth = true, headers = {} } = {}) => {
     const response = await fetch(`${app.origin}${url}`, {
       method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(auth ? { authorization: `Bearer ${app.token}` } : {}), ...headers },

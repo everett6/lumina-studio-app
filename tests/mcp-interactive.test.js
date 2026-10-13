@@ -83,6 +83,25 @@ test('nextStep walks the stages in order', () => {
   assert.ok(done.choices.some((c) => c.tool === 'enhance_video'));
 });
 
+test('nextStep: stale join, theme-only gaps and the 30 s cap', () => {
+  const accepted = { status: 'accepted', checks: [], frameApproved: 'f1' };
+  const stale = nextStep(board([withClip(1, { review: accepted })], {}, { outputAssetId: 'out', joinStale: true }));
+  assert.equal(stale.stage, 'join');
+  assert.match(stale.summary, /re-join to apply your edits/);
+  assert.equal(stale.choices[0].tool, 'join_storyboard');
+  assert.equal(nextStep(board([withClip(1, { review: accepted })], {}, { outputAssetId: 'out', joinStale: false })).stage, 'done');
+
+  const themes = nextStep(board([withClip(1, { review: accepted })], {}, { themeCoverage: { where: {}, missing: ['Chaos'] } }));
+  assert.deepEqual(themes.choices[0], { label: 'Join anyway', tool: 'join_storyboard', arguments: { storyboardId: 'b1' } });
+
+  const capped = nextStep(board([withClip(1, { duration: 30, review: accepted, details: { method: 'video', dialogue: [line({ assetId: 'a', seconds: 33 })] } })]));
+  assert.equal(capped.stage, 'fix');
+  assert.ok(!capped.choices.some((c) => c.tool === 'update_shot' && c.arguments.duration));
+  const shorten = capped.choices.find((c) => c.tool === 'update_shot');
+  assert.ok(shorten.arguments.details.dialogue.length === 1 && shorten.arguments.details.dialogue[0].text);
+  assert.match(capped.decide, /split/);
+});
+
 // ---------- end to end over MCP ----------
 async function withApp(run) {
   const t = await startTestApp();

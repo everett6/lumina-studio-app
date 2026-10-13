@@ -204,6 +204,7 @@ async function renderBudget() {
   const enabled = h('input', { type: 'checkbox', checked: s.enabled });
   const strict = h('input', { type: 'checkbox', checked: s.strictPrices });
   const mcp = h('input', { type: 'checkbox', checked: s.mcpCanApprove });
+  const confirmPaid = h('input', { type: 'checkbox', checked: s.confirmPaid !== false });
   const [total, totalLabel] = field('Total budget (USD)', 'totalUsd');
   const [daily, dailyLabel] = field('Per day', 'dailyUsd');
   const [project, projectLabel] = field('Per project', 'projectUsd');
@@ -213,7 +214,7 @@ async function renderBudget() {
   const num = (input) => (input.value === '' ? null : Number(input.value));
   const save = (extra = {}) => async () => {
     try {
-      await api('/api/budget', { method: 'PUT', body: { enabled: enabled.checked, strictPrices: strict.checked, mcpCanApprove: mcp.checked, totalUsd: num(total) ?? 0, dailyUsd: num(daily), projectUsd: num(project),
+      await api('/api/budget', { method: 'PUT', body: { enabled: enabled.checked, strictPrices: strict.checked, mcpCanApprove: mcp.checked, confirmPaid: confirmPaid.checked, totalUsd: num(total) ?? 0, dailyUsd: num(daily), projectUsd: num(project),
         perRequestUsd: num(perRequest), approvalAboveUsd: num(approval), retryReserveUsd: num(retry) ?? 0, ...extra } });
       toast('Budget saved.');
       await renderBudget();
@@ -262,6 +263,7 @@ async function renderBudget() {
       toast('$12 budget enabled. Existing spending remains counted.');
     } }, 'Use $12 anime budget'),
     h('div.remote-grid', {}, totalLabel, dailyLabel, projectLabel, perRequestLabel, approvalLabel, retryLabel),
+    h('label.check-row', {}, confirmPaid, h('span', {}, 'Ask me to confirm before anything that uses paid credits (Confirm & spend)')),
     h('label.check-row', {}, mcp, h('span', {}, 'Let Claude or ChatGPT approve spends above the threshold (off = only you, here)')),
     h('div.key-row', {},
       h('button.button.primary.small', { onclick: save() }, 'Save limits'),

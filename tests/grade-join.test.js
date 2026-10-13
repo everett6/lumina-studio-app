@@ -45,8 +45,11 @@ test('a shot grade really darkens the joined film, and clearing it restores the 
     const plain = await joinLuma('plain');
     assert.ok(plain > 40, `mock picture is bright enough to measure a darkening (${plain})`);
 
+    assert.equal((await t.call('GET', `/api/storyboards/${id}`)).body.sequence.joinStale, false, 'just joined: up to date');
+    await new Promise((resolve) => setTimeout(resolve, 5)); // timestamps are millisecond ISO strings
     const dark = await t.call('PATCH', `/api/shots/${shot.id}`, { details: { grade: { brightness: -0.25 } } });
     assert.equal(dark.status, 200, JSON.stringify(dark.body));
+    assert.equal(dark.body.sequence.joinStale, true, 'an edit after the join needs a re-join');
     assert.deepEqual(dark.body.shots.find((s) => s.id === shot.id).details.grade, { brightness: -0.25 });
     const graded = await joinLuma('graded');
     assert.ok(graded < plain - 20, `graded film is clearly darker: ${graded.toFixed(1)} vs ${plain.toFixed(1)}`);

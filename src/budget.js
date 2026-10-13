@@ -20,6 +20,7 @@ export const defaultBudget = {
   perRequestUsd: 2,
   approvalAboveUsd: 1, // single requests above this need an approval
   retryReserveUsd: 1, // the last part of the total is kept for retries of earlier requests
+  confirmPaid: true, // the app asks before any click that would use paid credits
   mcpCanApprove: false, // let MCP clients (Claude, ChatGPT) approve requests themselves
   speechAssumedUsd: 0.05, // reserved per narration request for voices without a per-request price
   since: null,
@@ -63,7 +64,7 @@ export function createBudget({ repo }) {
     usd('totalUsd', { nullable: false });
     ['dailyUsd', 'projectUsd', 'perRequestUsd', 'approvalAboveUsd', 'retryReserveUsd'].forEach((key) => usd(key));
     usd('speechAssumedUsd', { nullable: false });
-    for (const key of ['enabled', 'mcpCanApprove', 'strictPrices']) if (typeof changes[key] === 'boolean') next[key] = changes[key];
+    for (const key of ['enabled', 'mcpCanApprove', 'strictPrices', 'confirmPaid']) if (typeof changes[key] === 'boolean') next[key] = changes[key];
     if (changes.resetSpending === true) next.since = new Date().toISOString();
     repo.settings.set('budget', next);
     return status();

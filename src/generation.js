@@ -3,6 +3,17 @@ import { currentRequest } from './context.js';
 import { checkPresets, composePrompt } from './presets.js';
 import { estimateUsd, priceFor } from './pricing.js';
 
+// "Confirm spend": a click in the app that would use a paid provider is answered with 428 and the estimate until
+// the person confirms (the app then sends the same request with x-lumina-confirm-spend: 1). MCP clients and background
+// work started by an already-confirmed request are not asked again; MCP spending stays under the budget approvals.
+export function confirmSpend({ estimateUsd, unpriced = 0, jobs = 1, what }) {
+  const request = currentRequest();
+  if (request.source !== 'app' || request.confirmSpend || request.confirmPaid === false) return;
+  const cost = estimateUsd ? `about $${Number(estimateUsd).toFixed(2)}` : 'with no fixed price (billed by the provider)';
+  throw Object.assign(new RequestError(428, `This uses paid credits: ${what}. Estimated ${cost}${unpriced && estimateUsd ? ` plus ${unpriced} job(s) without a published price` : ''}.`),
+    { extra: { needsSpendConfirm: true, estimateUsd: estimateUsd ?? null, unpriced, jobs } });
+}
+
 export class RequestError extends Error {
   constructor(status, message) {
     super(message);
@@ -185,6 +196,12 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
     // offline) providers skip it. All of this is synchronous, so concurrent requests are checked one by one.
     const price = priceFor(provider.id, model.id, model);
     const paid = !provider.keyless || Boolean(price?.usd || price?.skus);
+    // Real paid providers only (mock prices exist for budget tests); a paid prompt director counts too.
+    const paidDirector = director && !directors.get(director.split(':')[0])?.keyless;
+    if (!provider.keyless || paidDirector) {
+      const guess = estimateUsd(price, { size: params.size, duration: params.duration, resolution: params.resolution, image: inputAssetIds.length > 0 });
+      confirmSpend({ estimateUsd: guess, unpriced: guess == null ? 1 : 0, jobs: 1, what: `${model.label ?? model.id} (${provider.label}), ${operation}${paidDirector ? `, prompt refined by ${director}` : ''}` });
+    }
     let estimate = null;
     let reservation = null;
     if (paid && budget) {

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -335,13 +335,25 @@ export async function contactSheet(tiles, { columns = 4, width = 384 } = {}) {
   const font = await findLabelFont();
   const dir = await mkdtemp(path.join(tmpdir(), 'lumina-sheet-'));
   try {
-    await Promise.all(tiles.map(async (tile, index) => {
+    const renderTile = async (tile, index) => {
       const label = String(tile.label ?? '').replace(/[^\w .#/-]/g, '').slice(0, 40);
       const text = font && label ? `,drawtext=fontfile=${font}:text='${label}':x=8:y=8:fontsize=${Math.round(height / 8)}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=6` : '';
       const seek = tile.time != null ? ['-ss', String(Math.max(0, tile.time))] : [];
-      await run('ffmpeg', ['-v', 'error', '-y', ...seek, '-i', tile.file, '-frames:v', '1', '-threads', '1',
-        '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=0x111111${text}`,
-        path.join(dir, `tile_${String(index).padStart(3, '0')}.png`)], 30_000);
+      const target = path.join(dir, `tile_${String(index).padStart(3, '0')}.png`);
+      try {
+        await run('ffmpeg', ['-v', 'error', '-y', ...seek, '-i', tile.file, '-frames:v', '1', '-threads', '1',
+          '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=0x111111${text}`, target], 30_000);
+        if (!(await stat(target)).size) throw new Error('empty tile');
+      } catch {
+        // A missing file, a seek past the end or a decode failure only costs this tile: show a dark placeholder with its label.
+        await run('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0x222222:s=${width}x${height}`, '-frames:v', '1',
+          '-vf', text ? text.slice(1) : 'null', target], 30_000);
+      }
+    };
+    // At most four ffmpeg processes at once.
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, tiles.length) }, async () => {
+      while (next < tiles.length) { const index = next++; await renderTile(tiles[index], index); }
     }));
     const cols = Math.min(columns, tiles.length);
     const rows = Math.ceil(tiles.length / cols);

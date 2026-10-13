@@ -92,24 +92,47 @@ let toastTimer;
 export function toast(message, tone = 'info') {
   const node = $('#toast');
   node.textContent = message;
-  node.dataset.tone = tone;
+  node.dataset.tone = /^Cancelled: nothing was spent/.test(message) ? 'info' : tone; // a declined spend is not an error
   node.classList.remove('hidden');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.add('hidden'), 4200);
 }
 
-export async function api(path, { method = 'GET', body, approvalId } = {}) {
+// Paid credits are never spent by one stray click: the app answers 428 and the person confirms in a dialog.
+export function confirmSpendDialog(message) {
+  return new Promise((resolve) => {
+    const finish = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey, true); resolve(result); };
+    const onKey = (event) => { if (event.key === 'Escape') { event.preventDefault(); finish(false); } };
+    const overlay = h('div.modal-backdrop', { onclick: (event) => { if (event.target === overlay) finish(false); } },
+      h('div.modal.ask-modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Spend paid credits?' },
+        h('div.modal-head', {}, h('b', {}, 'Spend paid credits?'), h('button.ghost', { onclick: () => finish(false), 'aria-label': 'Cancel' }, '✕')),
+        h('p', {}, message),
+        h('p.muted', {}, 'Nothing is sent until you confirm. Turn this off in Settings → Budget.'),
+        h('div.ask-actions', {},
+          h('button.button.secondary.small', { onclick: () => finish(false) }, 'Cancel'),
+          h('button.button.primary.small', { onclick: () => finish(true) }, 'Confirm & spend'))));
+    document.addEventListener('keydown', onKey, true);
+    document.body.append(overlay);
+    overlay.querySelector('button.secondary').focus(); // Enter on the default button cancels, never spends
+  });
+}
+
+export async function api(path, { method = 'GET', body, approvalId, confirmed = false } = {}) {
   const response = await fetch(path, {
     method, credentials: 'same-origin',
-    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(approvalId ? { 'x-lumina-approval-id': approvalId } : {}) },
+    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(approvalId ? { 'x-lumina-approval-id': approvalId } : {}), ...(confirmed ? { 'x-lumina-confirm-spend': '1' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await response.json().catch(() => ({}));
+  if (response.status === 428 && data.needsSpendConfirm && !confirmed) {
+    if (await confirmSpendDialog(data.error)) return api(path, { method, body, approvalId, confirmed: true });
+    throw Object.assign(new Error('Cancelled: nothing was spent.'), { status: 428, data, cancelled: true });
+  }
   // Over the budget's approval threshold: ask, approve, and send the same request again.
   if (response.status === 402 && data.needsApproval && data.approvalId && !approvalId) {
     if (window.confirm(`${data.error.replace(/ Approve it in Lumina.*$/, '')}\n\nApprove this spend now?`)) {
       await api(`/api/budget/approvals/${data.approvalId}`, { method: 'POST', body: { approve: true } });
-      return api(path, { method, body, approvalId: data.approvalId });
+      return api(path, { method, body, approvalId: data.approvalId, confirmed });
     }
   }
   if (!response.ok) throw Object.assign(new Error(data.error || 'Something went wrong.'), { status: response.status, data });

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { cleanGrade, gradeFilter } from '../src/sequences.js';
+import { contactSheet } from '../src/video.js';
 import { startTestApp } from './helpers.js';
 
 const image = (projectId, prompt) => ({ projectId, operation: 'generate', prompt, provider: 'mock', model: 'mock-image', size: '1024x1024' });
@@ -91,4 +92,10 @@ test('shot grade: clamped, neutral values dropped, turned into an ffmpeg filter'
   assert.equal(gradeFilter(null), '');
   assert.equal(gradeFilter({ brightness: -0.1 }), 'eq=brightness=-0.1:contrast=1:saturation=1');
   assert.equal(gradeFilter({ warmth: 0.4 }), 'colorbalance=rs=0.060:rm=0.060:bs=-0.060:bm=-0.060');
+});
+
+test('contact sheet still renders when one tile cannot be read', async () => {
+  const tiles = Array.from({ length: 6 }, (_, i) => ({ file: `/nonexistent/missing-${i}.mp4`, time: 1, label: `Shot ${i + 1}` }));
+  const sheet = await contactSheet(tiles, { columns: 3, width: 160 });
+  assert.equal(sheet.subarray(0, 2).toString('hex'), 'ffd8');
 });

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { parseDataUrl, sniffMedia } from './assets.js';
 import { bookKinds, briefFor, cleanBible, cleanBrief, trimSizes } from './books.js';
 import { emptyGraph, nodeTypes, templates, validateGraph } from './canvas.js';
-import { defaultResolution, nearestDuration, RequestError } from './generation.js';
+import { confirmSpend, defaultResolution, nearestDuration, RequestError } from './generation.js';
 import { envNames } from './keys.js';
 import { presetGroups, presets } from './presets.js';
 import { estimateUsd, priceFor, pricesAsOf } from './pricing.js';
@@ -265,7 +265,8 @@ export function createApiServer(ctx) {
   });
   // What finishing a storyboard would still cost: missing frames, missing clips (still shots are free) and
   // unrecorded dialogue lines.
-  route('GET', `/api/storyboards/${uuid}/estimate`, (req, [id]) => {
+  route('GET', `/api/storyboards/${uuid}/estimate`, (req, [id]) => storyboardEstimate(id));
+  function storyboardEstimate(id) {
     const { sequence, shots } = sequences.detail(id);
     const s = sequence.settings;
     const items = [];
@@ -284,7 +285,7 @@ export function createApiServer(ctx) {
     const result = estimate(items);
     const videoSeconds = shots.filter((sh) => sh.details.method !== 'still').reduce((sum, sh) => sum + (sh.duration ?? 0), 0);
     return { ...result, videoSeconds, stillSeconds: shots.reduce((sum, sh) => sum + (sh.duration ?? 0), 0) - videoSeconds };
-  });
+  }
   // Face identity check: free models, downloaded only when the person asks in the app.
   route('GET', '/api/faces', () => faces?.status() ?? { installed: false, unavailable: true });
   route('POST', '/api/faces/install', async () => {
@@ -493,6 +494,11 @@ export function createApiServer(ctx) {
   route('POST', `/api/storyboards/${uuid}/produce`, async (req, [id]) => {
     const readiness = await productionReadiness(id);
     if (!readiness.ready) throw new RequestError(400, `Production not ready: ${readiness.blockers.join(' ')}`);
+    // Production keeps submitting in the background, so a paid run is confirmed once, up front, for the whole film.
+    const est = storyboardEstimate(id);
+    const paidLines = est.lines.filter((line) => !providers.get(line.provider)?.keyless);
+    if (paidLines.length) confirmSpend({ estimateUsd: est.totalUsd, unpriced: paidLines.filter((l) => l.usd == null).length, jobs: paidLines.length,
+      what: `Produce the film: ${paidLines.length} paid job(s)` });
     return { status: 202, body: await sequences.produce(id) };
   });
   route('POST', `/api/storyboards/${uuid}/stop`, (req, [id]) => sequences.stopProduction(id));
@@ -650,7 +656,16 @@ export function createApiServer(ctx) {
   route('DELETE', `/api/canvases/${uuid}`, (req, [id]) => ({ deleted: repo.canvases.remove(id) }));
   route('POST', `/api/canvases/${uuid}/run`, async (req, [id]) => {
     const body = await readBody(req, 16_384);
-    const { run } = canvasRunner.start(id, { targetNodeId: body.nodeId ?? null, defaults: body.defaults ?? {} });
+    // A canvas run submits in the background, so paid nodes are confirmed once, before it starts.
+    const defaults = body.defaults ?? {};
+    const paidNodes = needCanvas(id).graph.nodes.filter((node) => {
+      const data = node.data ?? {};
+      if (['generate', 'edit', 'video'].includes(node.type)) return !providers.get(data.provider || defaults.provider)?.keyless;
+      if (node.type === 'director') return !directors.get(String(data.director || defaults.director || '').split(':')[0])?.keyless;
+      return false;
+    });
+    if (paidNodes.length) confirmSpend({ estimateUsd: null, jobs: paidNodes.length, what: `this canvas run has ${paidNodes.length} paid step(s)` });
+    const { run } = canvasRunner.start(id, { targetNodeId: body.nodeId ?? null, defaults });
     return { status: 202, body: { run } };
   });
   route('GET', `/api/canvas-runs/${uuid}`, (req, [id]) => ({ run: repo.runs.get(id) ?? (() => { throw new RequestError(404, 'Run not found.'); })() }));
@@ -853,6 +868,8 @@ export function createApiServer(ctx) {
         // with the person unless they allowed MCP clients to approve.
         const context = {
           source: req.headers['x-lumina-client'] === 'mcp' ? 'mcp' : 'app',
+          confirmSpend: req.headers['x-lumina-confirm-spend'] === '1',
+          confirmPaid: budget.settings().confirmPaid !== false,
           approvalId: /^[a-f0-9-]{36}$/.test(String(req.headers['x-lumina-approval-id'] ?? '')) ? req.headers['x-lumina-approval-id'] : null,
         };
         const result = await requestContext.run(context, () => r.handler(req, match.slice(1), url, res));

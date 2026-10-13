@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { extractJson } from './books.js';
-import { nearestDuration, RequestError } from './generation.js';
+import { confirmSpend, nearestDuration, RequestError } from './generation.js';
 import { presets } from './presets.js';
 import { priceFor } from './pricing.js';
 import { colourStats, curveFilter, matchCurve } from './grade.js';
@@ -211,8 +211,12 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const sequence = needSequence(id);
     const shots = shotsOf(id);
     let clock = 0;
+    // The joined film is stale when any shot changed after it was made. shots.updated_at moves on every edit
+    // (trim, grade, duration, reorder, new frame/clip/dialogue take), so it is the one reliable signal.
+    const joinedAt = asset(sequence.outputAssetId)?.createdAt ?? null;
+    const joinStale = Boolean(joinedAt) && shots.some((s) => s.updatedAt && s.updatedAt > joinedAt);
     return {
-      sequence: { ...sequence, outputPath: asset(sequence.outputAssetId)?.path ?? null, join: joining.get(id) ?? null, production: producing.get(id) ?? null,
+      sequence: { ...sequence, joinStale, outputPath: asset(sequence.outputAssetId)?.path ?? null, join: joining.get(id) ?? null, production: producing.get(id) ?? null,
         enhance: sequence.outputAssetId ? enhancer?.status(sequence.outputAssetId) ?? null : null, themeCoverage: themeCoverage(sequence.settings.themes, shots) },
       shots: shots.map((shot) => {
         const startsAt = clock;
@@ -275,6 +279,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     }
     const key = director.keyless ? null : keys.get(director.keyProvider);
     if (!director.keyless && !key) throw new RequestError(400, `Add a ${director.label} key in Settings to use this writer.`);
+    if (!director.keyless) confirmSpend({ estimateUsd: null, what: `the paid writer ${spec} plans the shots` });
     const { shotCount: count, targetSeconds, clipLength, continuity, look, videoSecondsBudget } = sequence.settings;
     const videoModel = providers?.model(sequence.settings.videoProvider, sequence.settings.videoModel);
     const allowed = videoModel?.durations?.length ? videoModel.durations : null;

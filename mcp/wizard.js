@@ -123,12 +123,32 @@ export function nextStep(detail, estimate = null) {
   if (overrun.length || missingThemes.length) {
     const first = overrun[0];
     const parts = [overrun.length ? `dialogue runs past the end of shot(s) ${list(overrun)}` : '', missingThemes.length ? `themes with no shot: ${missingThemes.join(', ')}` : ''].filter(Boolean);
+    const review = call('Review the whole storyboard', 'get_storyboard', { storyboardId });
+    let choices;
+    if (!first) {
+      // Theme gaps are a warning, not a blocker.
+      choices = [call('Join anyway', 'join_storyboard', { storyboardId }), review];
+    } else if (first.duration >= 30) {
+      // Already at the 30 s cap: it cannot be lengthened, so shorten the speech or move some of it to a new shot.
+      const shotJson = shots.find((s) => s.id === first.id);
+      const spoken = lines(shotJson);
+      const trimmed = spoken.map((l, i) => (i === spoken.length - 1 ? { speaker: l.speaker, text: String(l.text ?? '').split(/(?<=[.!?])\s+/).slice(0, -1).join(' ') || '<a shorter line>' } : { speaker: l.speaker, text: l.text }));
+      choices = [call(`Shorten shot ${first.position}'s last line (edit the text, then re-record it)`, 'update_shot', { shotId: first.id, details: { dialogue: trimmed } }),
+        call(`Look at shot ${first.position}`, 'preview_shot', { shotId: first.id }), review];
+    } else {
+      const longer = Math.min(30, Math.max(first.duration + 1, first.neededSeconds));
+      choices = [call(`Lengthen shot ${first.position} to ${longer} s`, 'update_shot', { shotId: first.id, duration: longer }),
+        call(`Look at shot ${first.position}`, 'preview_shot', { shotId: first.id }), review];
+    }
     return result('fix', `Fix before joining: ${parts.join('; ')}.`,
-      first ? `Shot ${first.position}'s speech is longer than the shot. Make the shot longer, or shorten the line?` : `Theme(s) ${missingThemes.join(', ')} appear in no shot. Tag a shot with it or accept the gap?`,
-      [...(first ? [call(`Lengthen shot ${first.position} to ${Math.min(30, Math.max(first.duration + 1, first.neededSeconds))} s`, 'update_shot', { shotId: first.id, duration: Math.min(30, Math.max(first.duration + 1, first.neededSeconds)) }),
-        call(`Look at shot ${first.position}`, 'preview_shot', { shotId: first.id })] : []),
-      call('Review the whole storyboard', 'get_storyboard', { storyboardId })],
-      first ? { sheet: null, shotIds: [first.id] } : null);
+      first ? (first.duration >= 30 ? `Shot ${first.position}'s speech is longer than the shot, and 30 s is the longest a shot can be. Shorten the line, or split the scene so part of the speech moves to a new shot (re-plan with import_shot_plan, which needs your OK to replace)?` : `Shot ${first.position}'s speech is longer than the shot. Make the shot longer, or shorten the line?`) : `Theme(s) ${missingThemes.join(', ')} appear in no shot. Tag a shot with it, or join anyway?`,
+      choices, first ? { sheet: null, shotIds: [first.id] } : null);
+  }
+
+  if (sequence.outputAssetId && sequence.joinStale) {
+    return result('join', 'Shots changed after the film was joined: re-join to apply your edits.',
+      'Re-join the clips so the film includes your edits? It runs locally and costs nothing.',
+      [call('Re-join the film', 'join_storyboard', { storyboardId }), look]);
   }
 
   if (sequence.outputAssetId) {

@@ -25,7 +25,8 @@ test('book writer requests return a budget refusal without provider traffic or l
     t.app.keys.set('openrouter','fake-test-key');
     const project=(await t.call('POST','/api/projects',{name:'unpriced writing'})).body.project;
     const book=(await t.call('POST',`/api/projects/${project.id}/books`,{title:'Test',kind:'novel',writer:`openrouter:${createDirectors().get('openrouter').models[0]}`})).body.book;
-    const result=await t.call('POST',`/api/books/${book.id}/bible`,{});
+    assert.equal((await t.call('POST',`/api/books/${book.id}/bible`,{})).status,428,'the app asks before a paid writer');
+    const result=await t.call('POST',`/api/books/${book.id}/bible`,{},{headers:{'x-lumina-confirm-spend':'1'}});
     assert.equal(result.status,402,JSON.stringify(result.body));
     assert.match(result.body.error,/unpriced writer/);
     assert.equal((await t.call('GET','/api/budget')).body.spentUsd,0);
