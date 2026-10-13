@@ -38,3 +38,29 @@ test('local GPU provider: ready only when every model file is in the cache; list
     await t.close();
   }
 });
+
+test('Wan reports a failed low-memory fallback instead of crashing the worker', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const script = String.raw`
+import json, textwrap, types
+source = open('local/wan_worker.py').read()
+loop = textwrap.dedent(source[source.index('    for attempt in (1, 2):'):])
+messages = []
+class OOM(Exception): pass
+torch = types.SimpleNamespace(cuda=types.SimpleNamespace(OutOfMemoryError=OOM))
+gc = types.SimpleNamespace(collect=lambda: None)
+traceback = types.SimpleNamespace(print_exc=lambda: None)
+request = {'id': 'test'}
+low_vram = False
+def send(value): messages.append(value)
+def release(): pass
+def run(value): raise RuntimeError('CUDA out of memory')
+def use_main_memory(): raise RuntimeError('cannot allocate host memory')
+exec(compile(loop, '<wan-retry>', 'exec'))
+assert any('Could not enter low-memory mode' in m.get('error','') for m in messages), messages
+print(json.dumps(messages))
+`;
+  const r = spawnSync('python3', ['-c', script], { encoding:'utf8', timeout:10000 });
+  assert.equal(r.status,0,r.stderr);
+  assert.match(r.stdout,/cannot allocate host memory/);
+});

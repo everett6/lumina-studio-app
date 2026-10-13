@@ -119,7 +119,8 @@ export async function lastFrame(file) {
 // 24 fps by default, with a silent stereo track so it joins like any generated clip. The image is enlarged first so the
 // move stays smooth. motion: push-in, pull-out, pan-left, pan-right, rise, static.
 export const stillMotions = ['push-in', 'pull-out', 'pan-left', 'pan-right', 'rise', 'static'];
-export async function renderStill(imageFile, { duration, motion = 'push-in', width = 1920, height = 1080, fps = 24 }) {
+// `video: true` takes a video instead of a picture (e.g. a lip-synced still shot) and moves the camera over it.
+export async function renderStill(imageFile, { duration, motion = 'push-in', width = 1920, height = 1080, fps = 24, video = false }) {
   const frames = Math.max(1, Math.round(duration * fps));
   const t = `(on/${Math.max(1, frames - 1)})`; // 0 → 1 over the shot
   const zoom = { 'push-in': `1+0.12*${t}`, 'pull-out': `1.12-0.12*${t}`, 'pan-left': '1.12', 'pan-right': '1.12', rise: '1.12', static: '1' }[motion] ?? '1';
@@ -129,7 +130,7 @@ export async function renderStill(imageFile, { duration, motion = 'push-in', wid
   const dir = await mkdtemp(path.join(tmpdir(), 'lumina-still-'));
   const out = path.join(dir, 'still.mp4');
   try {
-    await runVideo(['-v', 'error', '-loop', '1', '-framerate', String(fps), '-i', imageFile, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+    await runVideo(['-v', 'error', ...(video ? [] : ['-loop', '1', '-framerate', String(fps)]), '-i', imageFile, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
       '-filter_complex', `[0:v]scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width * 2}:${height * 2},`
         + `zoompan=z='${zoom}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=${fps},setsar=1,format=yuv420p[v]`,
       '-map', '[v]', '-map', '1:a', '-t', duration.toFixed(3), ...encode, '-video_track_timescale', '15360', ...audioArgs, '-movflags', '+faststart', '-y', out], 600_000);

@@ -36,6 +36,8 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `enhance_image` | Upscale (2× or 4×) or remove the background of one image. **Spends money.** Inpainting needs a painted mask, so it is app-only. |
 | `import_manuscript` | Create a novel or nonfiction book from existing text, split into chapters at its headings. |
 | `create_storyboard` / `get_storyboard` / `update_shot` | Plan shots from an idea or a screenplay with a writer model (look, look bible, seed, continuity incl. start-and-end frames, output size, upscaler, approval, paid-video limit), read the storyboard with each shot's review state and check results, edit a shot and its continuity details (scene, cast, location, action, dialogue, start/end state, what must not change, video or free still, lock). |
+| `import_shot_plan` | Import a complete shot plan written in the chat, without a paid writer call. Use `create_storyboard` with `plan:false` first. |
+| `production_readiness` | Check required assets, local models, NVIDIA runtime, ffmpeg, requested finishing tools and budget before production. |
 | `review_shot` | Accept, flag or reject a shot's clip, or approve its frame before video is paid for. |
 | `render_still_shot` | Render a free still shot (the frame with a slow camera move) locally. |
 | `voice_dialogue` | Record a shot's dialogue in each character's voice. **Spends a little.** |
@@ -114,6 +116,24 @@ Tested 2026-10-12: GPT-6 Astra created a project, imported a 6 fps anime clip an
 
 Node.js 22.13 or newer is required. Run `npm install` in the repository first so the MCP SDK is present.
 
+## Version 0.9.0 anime production
+
+For a strict $12 profile, turn on **Settings → Budget → Use $12 anime budget**. This profile checks known prices,
+rejects requests without a known unit price, counts existing spending, sets a $2 per-request limit, requires approval
+above $1, and reserves $1 for retries. MCP clients cannot change these limits or approve spending by default.
+Estimates can differ from provider charges, so configure a provider-side prepaid credit cap or hard limit of at most
+$12 on a dedicated account. Lumina cannot guarantee against bad generation or prevent a provider from invoicing more
+than the estimate; without the provider-side cap, the $12 setting is not an invoice guarantee.
+
+Write the screenplay and shot plan in ChatGPT or Claude, call `create_storyboard` with `plan:false`, then import the
+plan with `import_shot_plan`. Assign local models per shot using `details.model` values such as
+`local|animagine-xl-4` for anime stills and `local|wan2.2-ti2v-5b` for video. Use `local|kokoro-82m` for local
+speech. The weights and runtime must be installed on the Lumina computer; Wan needs a supported NVIDIA GPU and
+substantial model storage. Local inference avoids provider API charges but uses local compute and power. Call
+`production_readiness` and `estimate_film_cost`, clear blockers, review and approve the estimate and frames, then
+produce and review the clips. Lip sync is excluded and is not enabled by default. See
+[docs/SHIPPING_ANIME.md](SHIPPING_ANIME.md) for settings, model setup, finishing steps and release verification.
+
 ## Verified
 
 `tests/mcp.test.js` starts Lumina with the offline mock provider, connects a real MCP client over stdio, and calls
@@ -143,6 +163,11 @@ for them that keeps everything on your computer:
 - Lumina must be open for the connector and website to work.
 
 ### One click: Host Lumina online
+
+The HTTPS tunnel makes your locally running Lumina site and MCP endpoint reachable from ChatGPT or claude.ai; it
+does not sign those services in for you. Create a Lumina account, connect the `/mcp` endpoint using OAuth, then
+approve access on Lumina's consent page by signing into that Lumina account. The chat client itself remains signed
+in separately in its own product.
 
 Settings → Remote access → **Put Lumina online** starts a Cloudflare *quick tunnel* (`cloudflared tunnel --url …`, no
 Cloudflare account needed) and turns remote access on at the address it gets. If `cloudflared` isn't installed, Lumina
@@ -187,5 +212,7 @@ schemas without the `$schema` keyword, and advertises `offline_access`; ChatGPT'
 site root, an immediate token refresh, initialize, tools/list) was replayed against Lumina and succeeds. ChatGPT itself
 has not been re-tried since.
 
-Not verified: an actual claude.ai connection. Those products may expect details
-(scopes, metadata fields) that the local test doesn't cover. If a connection fails, the Lumina log shows the request.
+Version 0.9.0 release limitation: no actual signed-in ChatGPT connection or paid Seedance render was tested. The
+OAuth and tunnel checks above used an MCP client and simulated ChatGPT's request sequence; they do not confirm the
+ChatGPT product's signed-in end-to-end behavior. No paid cloud job was submitted. Those acceptance checks still
+require the relevant account and provider setup. If a connection fails, the Lumina log shows the request.

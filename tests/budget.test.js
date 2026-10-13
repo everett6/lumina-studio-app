@@ -193,6 +193,7 @@ test('live model list: real capabilities replace hand-typed ones, models missing
   assert.deepEqual(grok.resolutions, ['480p', '720p', '1080p']);
   assert.equal(grok.maxReferences, 1);
   assert.equal(provider.models[2].maxReferences, 0, 'no first-frame support: no start image');
+  assert.deepEqual(provider.models[2].liveSkus, { duration_seconds_480p: '0.02' }, 'newly discovered cloud models retain billable unit prices');
   assert.deepEqual(provider.models[0].livePrice, { usd: 0.04, per: 'image' }, 'the dearest endpoint');
   assert.equal(provider.models[0].maxReferences, 14, 'all character and location references fit');
   assert.equal(provider.models[0].seed, true);

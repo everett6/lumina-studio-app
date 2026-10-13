@@ -1,7 +1,7 @@
 import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast, askText } from './lib.js';
 
 // Storyboard: an idea becomes a shot list; each shot gets a still frame, then a clip; clips join into one video.
-const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0, faces: null, tools: null };
+const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0, faces: null, tools: null, mouthFor: null };
 const jobActive = (job) => job && ['queued', 'running'].includes(job.status);
 const statusText = { queued: 'Queued', running: 'Generating…', failed: 'Failed', interrupted: 'Interrupted' };
 const defaultLengths = [4, 5, 6, 8, 10];
@@ -419,7 +419,47 @@ function shotCard(shot, index, total) {
   });
   const still = shot.details.method === 'still';
   const unrecorded = shot.details.dialogue.filter((l) => !l.assetId).length;
-  const media = shot.videoPath ? h('video', { src: shot.videoPath, controls: true, loop: true, preload: 'metadata', poster: shot.imagePath ?? '' })
+  const recorded = shot.details.dialogue.filter((l) => l.assetId).length;
+  const lipSync = (box) => guard(async () => {
+    try {
+      await work(`lipsync-${shot.id}`, async () => show(await call(`/api/shots/${shot.id}/lipsync`, 'POST', box ? { box } : {})));
+      ui.mouthFor = null;
+      toast(`Shot ${shot.position} is lip-synced.`);
+    } catch (error) {
+      if (!error.data?.needBox) throw error;
+      ui.mouthFor = shot.id;
+      render();
+      toast('Drag a box over the speaker\'s mouth on the shot\'s picture.');
+    }
+  })();
+  // Drawing the mouth box: drag over the frame; the box is sent as fractions of the picture.
+  const mouthPicker = () => {
+    const img = h('img', { src: shot.imagePath, alt: `Frame for shot ${shot.position}`, draggable: false });
+    const mark = h('div.sb-mouth-box.hidden');
+    let start = null;
+    const at = (event) => {
+      const r = img.getBoundingClientRect();
+      return [Math.min(1, Math.max(0, (event.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (event.clientY - r.top) / r.height))];
+    };
+    const place = (a, b) => {
+      const [x1, x2] = [Math.min(a[0], b[0]), Math.max(a[0], b[0])];
+      const [y1, y2] = [Math.min(a[1], b[1]), Math.max(a[1], b[1])];
+      Object.assign(mark.style, { left: `${x1 * 100}%`, top: `${y1 * 100}%`, width: `${(x2 - x1) * 100}%`, height: `${(y2 - y1) * 100}%` });
+      mark.classList.remove('hidden');
+      return [x1, y1, x2, y2];
+    };
+    return h('div.sb-mouth-picker', {
+      onpointerdown: (event) => { start = at(event); event.currentTarget.setPointerCapture(event.pointerId); },
+      onpointermove: (event) => { if (start) place(start, at(event)); },
+      onpointerup: (event) => {
+        if (!start) return;
+        const box = place(start, at(event));
+        start = null;
+        if (box[2] - box[0] > 0.01 && box[3] - box[1] > 0.01) lipSync(box);
+      },
+    }, img, mark, h('span.sb-mouth-hint', {}, 'Drag over the mouth'));
+  };
+  const media = ui.mouthFor === shot.id && shot.imagePath ? mouthPicker() : shot.videoPath ? h('video', { src: shot.videoPath, controls: true, loop: true, preload: 'metadata', poster: shot.imagePath ?? '' })
     : shot.imagePath ? h('img', { src: shot.imagePath, alt: `Frame for shot ${shot.position}`, loading: 'lazy' })
       : h('div.sb-placeholder.muted', {}, 'No frame yet');
   return h('article.panel.sb-shot', {},
@@ -432,6 +472,8 @@ function shotCard(shot, index, total) {
         still
           ? h('button.button.secondary.small', { disabled: !shot.imagePath, onclick: start('still') }, shot.videoPath ? 'Re-render still' : 'Render still (free)')
           : h('button.button.secondary.small', { disabled: jobActive(shot.clipJob), onclick: start('animate') }, shot.videoPath ? 'Redo clip' : 'Animate'),
+        ui.options?.lipSync && shot.videoPath && recorded ? h('button.button.secondary.small', { disabled: ui.busy === `lipsync-${shot.id}`, title: 'Make the mouth move with the recorded dialogue (free, on this computer)', onclick: () => lipSync(null) },
+          ui.busy === `lipsync-${shot.id}` ? 'Lip-syncing…' : shot.details.lipsync?.result === shot.videoAssetId ? 'Redo lip sync' : 'Lip sync') : null,
         unrecorded ? h('button.button.secondary.small', { title: 'Speak the dialogue in each character\'s voice', onclick: guard(async () => {
           const result = await call(`/api/shots/${shot.id}/dialogue`);
           if (result.missingVoices.length) toast(`No voice set for: ${result.missingVoices.join(', ')}. Pick one on the Characters tab (or a narrator voice).`, 'error');

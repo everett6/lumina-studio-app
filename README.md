@@ -1,5 +1,7 @@
 # Lumina Studio
 
+**Version 0.9.0** adds an anime film production workflow. See [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md) for the strict $12 budget profile, local generation setup, MCP workflow, verification notes and shipping prerequisites.
+
 Lumina Studio is an open-source, Linux-first creative workspace for AI images. Bring your own API keys for OpenAI,
 fal.ai, Google Gemini or Replicate. Generate and edit images, keep everything in local projects, build reusable
 workflows on a node canvas, and let Claude drive it through MCP.
@@ -50,13 +52,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.6.0_amd64.deb
+sudo apt install ./dist/lumina-studio_0.9.0_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.6.0.AppImage"
+chmod +x "dist/Lumina Studio-0.9.0.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
@@ -110,13 +112,13 @@ as "From environment":
 - The local server listens on `127.0.0.1` only and requires a per-install token. See
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
 
-Generating images costs money on your provider accounts. Lumina shows which provider and model each request uses
-but does not estimate prices yet.
+Paid generations can incur provider charges. Lumina estimates and reserves known prices before queuing jobs, but estimates and provider invoices can differ. For the strict $12 anime workflow, use a dedicated provider account with a provider-side prepaid credit cap or hard limit; Lumina cannot cap invoices charged by another service. See [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md).
 
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, data model, jobs, providers, canvas, security.
-- [docs/MCP.md](docs/MCP.md): connecting Claude, and the plan for claude.ai and ChatGPT.
+- [docs/MCP.md](docs/MCP.md): connecting local MCP clients and web clients through OAuth and a tunnel.
+- [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md): version 0.9.0 anime production workflow and verification limits.
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next and known limits.
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 

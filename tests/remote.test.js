@@ -93,6 +93,15 @@ test('remote MCP: discovery → registration → account sign-in consent → PKC
     assert.equal(JSON.parse(created.content[0].text).name, 'From claude.ai');
     const image = await mcp.callTool({ name: 'generate_image', arguments: { projectId: JSON.parse(created.content[0].text).id, prompt: 'a lighthouse', provider: 'mock', model: 'mock-image' } });
     assert.ok(image.content.some((c) => c.type === 'image'), 'images come back inline over HTTP');
+    assert.ok(tools.some((tool) => tool.name === 'production_readiness'));
+    assert.ok(!tools.some((tool) => tool.name === 'lip_sync_shot'));
+    const parse = (r) => JSON.parse(r.content[0].text);
+    const board = parse(await mcp.callTool({ name: 'create_storyboard', arguments: { projectId: parse(created).id, title: 'Anime', idea: 'A guardian at dawn', look: 'anime', plan: false, imageProvider: 'mock', imageModel: 'mock-image', videoProvider: 'mock', videoModel: 'mock-video' } }));
+    const storyboardId = board.id ?? board.storyboardId;
+    const imported = await mcp.callTool({ name: 'import_shot_plan', arguments: { storyboardId, shots: [{ description: 'Guardian watches sunrise', duration: 4, details: { method: 'still' } }] } });
+    assert.equal(imported.isError, undefined, imported.content[0].text);
+    const ready = parse(await mcp.callTool({ name: 'production_readiness', arguments: { storyboardId } }));
+    assert.equal(ready.ready, true, JSON.stringify(ready));
     await mcp.close();
 
     // Refresh rotates tokens; the old refresh token stops working.

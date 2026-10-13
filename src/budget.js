@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 
 export const defaultBudget = {
   enabled: false,
+  strictPrices: false, // $12 anime profile rejects prices without a known unit cost
   totalUsd: 12, // hard cap since `since`
   dailyUsd: null,
   projectUsd: null,
@@ -62,7 +63,7 @@ export function createBudget({ repo }) {
     usd('totalUsd', { nullable: false });
     ['dailyUsd', 'projectUsd', 'perRequestUsd', 'approvalAboveUsd', 'retryReserveUsd'].forEach((key) => usd(key));
     usd('speechAssumedUsd', { nullable: false });
-    for (const key of ['enabled', 'mcpCanApprove']) if (typeof changes[key] === 'boolean') next[key] = changes[key];
+    for (const key of ['enabled', 'mcpCanApprove', 'strictPrices']) if (typeof changes[key] === 'boolean') next[key] = changes[key];
     if (changes.resetSpending === true) next.since = new Date().toISOString();
     repo.settings.set('budget', next);
     return status();
@@ -85,6 +86,7 @@ export function createBudget({ repo }) {
     if (!s.enabled) return { reserveUsd: estimateUsd, approval: null };
     let reserveUsd = estimateUsd;
     const unpriced = estimateUsd == null;
+    if (unpriced && s.strictPrices) throw new BudgetError('Strict budget: this request has no known price. Use a priced cloud model or a local model.', { unpriced: true });
     if (unpriced) {
       if (s.perRequestUsd == null) throw new BudgetError('This model has no published price, and without a per-request limit Lumina cannot cap it. Set a per-request limit in Settings → Budget, or choose a priced model.', { unpriced: true });
       reserveUsd = s.perRequestUsd; // a hard ceiling stands in for the unknown price

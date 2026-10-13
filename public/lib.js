@@ -149,7 +149,7 @@ export const state = { project: null, projects: [], catalog: null, detail: null,
 
 export function modelsFor(operation) {
   return (state.catalog?.providers ?? []).flatMap((provider) => provider.models
-    .filter((model) => model.operations.includes(operation))
+    .filter((model) => model.available !== false && model.operations.includes(operation))
     .map((model) => ({ provider, model, value: `${provider.id}|${model.id}` })));
 }
 

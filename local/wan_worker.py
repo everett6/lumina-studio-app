@@ -211,7 +211,11 @@ for line in sys.stdin:
         if attempt == 1 and not low_vram:
             # Out of GPU memory: move the model into main memory and run the same job again (slower, same result).
             send({"id": request.get("id"), "notice": "The GPU ran out of memory; continuing with the model in main memory (slower)."})
-            use_main_memory()
+            try:
+                use_main_memory()
+            except Exception as error:
+                send({"id": request.get("id"), "error": f"Could not enter low-memory mode: {type(error).__name__}: {error}"})
+                break
             continue
         send({"id": request.get("id"), "error": "The GPU ran out of memory even with the model in main memory. Close other programs using the GPU and try again."})
         break

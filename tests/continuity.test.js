@@ -32,7 +32,7 @@ async function filmSetup(t, settings = {}) {
     title: 'Dawn', idea: 'Pip visits the lake.', writer: 'mock:mock-director',
     settings: {
       shotCount: 3, characterIds: [pip.id, lake.id], imageProvider: 'mock', imageModel: 'mock-image', videoProvider: 'mock', videoModel: 'mock-video',
-      look: 'anime', lookBible: 'Muted dawn palette, soft rim light, 35mm lens.', ...settings,
+      narratorVoice: { provider: 'mock', model: 'mock-voice', voice: 'tone-low' }, look: 'anime', lookBible: 'Muted dawn palette, soft rim light, 35mm lens.', ...settings,
     },
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));
@@ -147,7 +147,10 @@ test('continuity: still shots render free, clips are checked for drift, approval
     assert.deepEqual([w, h], [1280, 720], 'still shots render at the film size');
     assert.ok(Math.abs(d - stillShot.duration) < 0.1);
 
-    for (const shot of shots.slice(0, 2)) await wait(t, await t.call('POST', `/api/shots/${shot.id}/animate`, {}));
+    for (const shot of shots.slice(0, 2)) {
+      await t.call('POST', `/api/shots/${shot.id}/approve-frame`, { approved: true });
+      await wait(t, await t.call('POST', `/api/shots/${shot.id}/animate`, {}));
+    }
     const checked = await waitFor(t, id, (d) => d.shots.slice(0, 2).every((s) => s.review.checks));
     const checks = checked.shots[0].review.checks;
     assert.ok(checks.some((c) => c.id === 'start-frame'), JSON.stringify(checks));

@@ -107,6 +107,7 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
     const provider = providers.get(input.provider);
     if (!provider) throw new RequestError(400, 'Choose an image provider.');
     const model = providers.model(input.provider, input.model);
+    if (model && provider.modelAvailable && !provider.modelAvailable(model.id)) throw new RequestError(400, 'Download this local model before generating.');
     if (!model) throw new RequestError(400, `${provider.label} does not offer that model.`);
     if (!provider.keyless && !keys.get(provider.id)) throw new RequestError(400, `Add a ${provider.label} API key in Settings first.`);
 
@@ -171,6 +172,9 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
       }
     }
     const director = media === 'speech' || tool ? null : resolveDirector(input.director);
+    if (director && budget?.settings().enabled && budget.settings().strictPrices && !directors.get(director.split(':')[0])?.keyless) {
+      throw new RequestError(402, 'Strict budget: paid prompt refinement has no bounded price. Refine the prompt in your MCP chat instead.');
+    }
     const record = {
       projectId: project.id, operation, provider: provider.id, model: model.id, prompt, director,
       params, inputAssetIds, canvasRunId: input.canvasRunId, nodeId: input.nodeId, bookPageId: input.bookPageId, bookTarget: input.bookTarget,
@@ -185,7 +189,7 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
     let reservation = null;
     if (paid && budget) {
       estimate = estimateUsd(price, { size: params.size, duration: params.duration, resolution: params.resolution, image: inputAssetIds.length > 0 });
-      if (estimate == null && operation === 'speech') estimate = budget.settings().speechAssumedUsd ?? 0.05;
+      if (estimate == null && operation === 'speech' && !budget.settings().strictPrices) estimate = budget.settings().speechAssumedUsd ?? 0.05;
       const earlier = input.bookTarget ? repo.generations.listByTarget(input.bookTarget).length > 0 : false;
       try {
         reservation = budget.authorize({

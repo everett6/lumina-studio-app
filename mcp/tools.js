@@ -61,7 +61,7 @@ export function registerLuminaTools(server, client) {
     const { providers } = await client.call('GET', '/api/catalog');
     if (provider && model) return { provider, model };
     const options = providers.filter((p) => p.ready && (!provider || p.id === provider))
-      .flatMap((p) => p.models.filter((m) => m.operations.includes(operation)).map((m) => ({ provider: p.id, model: m.id })));
+      .flatMap((p) => p.models.filter((m) => m.available !== false && m.operations.includes(operation)).map((m) => ({ provider: p.id, model: m.id })));
     if (!options.length) throw new Error(`No ${operation}-capable model has an API key configured. Add a key in Lumina → Settings.`);
     return options[0];
   }
@@ -107,7 +107,7 @@ export function registerLuminaTools(server, client) {
   }, safe(async () => {
     const { providers, directors } = await client.call('GET', '/api/catalog');
     return ok(text({
-      providers: providers.map((p) => ({ id: p.id, label: p.label, ready: p.ready, models: p.models.map(({ id, label, operations, sizes, qualities, maxReferences, durations, scales, price }) => ({ id, label, operations, sizes, qualities, maxReferences, durations, scales, listPrice: price ?? undefined })) })),
+      providers: providers.map((p) => ({ id: p.id, label: p.label, ready: p.ready, models: p.models.map(({ id, label, operations, sizes, qualities, maxReferences, durations, scales, price, available }) => ({ id, label, operations, sizes, qualities, maxReferences, durations, scales, available, listPrice: price ?? undefined })) })),
       directors: directors.map((d) => ({ id: d.id, ready: d.ready, options: d.models.map((m) => `${d.id}:${m}`) })),
     }));
   }));
@@ -484,10 +484,13 @@ export function registerLuminaTools(server, client) {
       outputHeight: z.union([z.literal(720), z.literal(1080), z.literal(1440), z.literal(2160)]).optional().describe('Delivery height (default 1080)'),
       upscale: z.enum(['none', 'fast', 'anime', 'ai']).optional().describe('How clips smaller than the delivery size are enlarged (once each, from the original): "anime" Real-ESRGAN anime model, "ai" Real-ESRGAN live action, "fast" Lanczos'),
       colorMatch: z.enum(['scene', 'film', 'off']).optional().describe('Match every shot\'s colours to the first shot of its scene (default) or of the film, free and local'),
+      narratorVoice: z.object({ provider: z.string(), model: z.string(), voice: z.string().optional() }).optional(),
+      interpolateFps: z.union([z.literal(0), z.literal(30)]).optional(),
       requireApproval: z.boolean().optional().describe('Frames and clips must be accepted (review_shot) before video is paid for and before the film is joined'),
       videoSecondsBudget: z.number().int().min(0).max(900).optional().describe('Seconds of paid video the writer may plan; the rest become free still shots'),
       transition: z.enum(['cut', 'crossfade']).optional(), finish: z.enum(['none', 'cinematic', 'anime']).optional().describe('"cinematic": 2.39:1 bars, film grain, fades; "anime": cleaner flat colour, richer colour, crisp line art, short fades'),
       aspect: z.enum(['16:9', '9:16', '1:1']).optional(), style: z.string().optional().describe('A style preset id from list_presets'), characterIds: charactersArg,
+      imageProvider: z.string().optional(), imageModel: z.string().optional(), videoProvider: z.string().optional(), videoModel: z.string().optional(),
       writer: z.string().optional().describe('Writer model as "provider:model" (see list_models directors); defaults to the first ready one'),
       plan: z.boolean().optional().describe('Plan the shots now (default true)'),
     },
@@ -495,14 +498,30 @@ export function registerLuminaTools(server, client) {
     const { providers, directors } = await client.call('GET', '/api/catalog');
     const first = (operation) => providers.filter((p) => p.ready).flatMap((p) => p.models.filter((m) => m.operations.includes(operation)).map((m) => [p.id, m.id]))[0] ?? [];
     const readyWriter = directors.find((d) => d.ready);
-    const [imageProvider, imageModel] = first('generate');
-    const [videoProvider, videoModel] = first('video');
+    const [defaultImageProvider, defaultImageModel] = first('generate');
+    const imageProvider = rest.imageProvider ?? defaultImageProvider;
+    const imageModel = rest.imageModel ?? defaultImageModel;
+    const [defaultVideoProvider, defaultVideoModel] = first('video');
+    const videoProvider = rest.videoProvider ?? defaultVideoProvider;
+    const videoModel = rest.videoModel ?? defaultVideoModel;
     const created = await client.call('POST', `/api/projects/${projectId}/storyboards`, {
       title, idea, screenplay, writer: writer ?? (readyWriter ? `${readyWriter.id}:${readyWriter.models[0]}` : null),
       settings: { shotCount, targetSeconds: targetMinutes ? Math.round(targetMinutes * 60) : undefined, clipLength, transition, finish, aspect, style, characterIds, imageProvider, imageModel, videoProvider, videoModel, ...rest },
     });
     return ok(text(storyboardSummary(plan ? await client.call('POST', `/api/storyboards/${created.sequence.id}/plan`, {}) : created)));
   }));
+
+  server.registerTool('import_shot_plan', {
+    title: 'Import a shot plan written in this chat',
+    description: 'Save a complete shot plan without a paid writer API call. For a strict $12 budget, write the script and plan in ChatGPT/Claude, create_storyboard with plan=false, then import it here. Models can be assigned per shot using details.model as provider|model, e.g. local|wan2.2-ti2v-5b. Never replace a plan without user approval.',
+    inputSchema: { storyboardId: z.string(), replace: z.boolean().optional(), shots: z.array(z.object({ description: z.string().min(1).max(2000), duration: z.number().int().min(1).max(30), camera: z.string().optional(), details: z.record(z.string(), z.unknown()).optional() })).min(1).max(60) },
+  }, safe(async ({ storyboardId, ...plan }) => ok(text(storyboardSummary(await client.call('POST', `/api/storyboards/${storyboardId}/import-plan`, plan))))));
+
+  server.registerTool('production_readiness', {
+    title: 'Check anime production readiness',
+    description: 'Check required frames/clips/voices, installed local models and NVIDIA runtime, ffmpeg, requested RIFE/Real-ESRGAN tools, and budget before production. Never spend until ready=true and the user approves the estimate. Lip sync is excluded.',
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => ok(text(await client.call('GET', `/api/storyboards/${storyboardId}/readiness`)))));
 
   server.registerTool('get_storyboard', {
     title: 'Get storyboard',
@@ -518,7 +537,7 @@ export function registerLuminaTools(server, client) {
       details: z.object({
         scene: z.string().max(80).optional(), locationId: z.string().nullable().optional(), characterIds: z.array(z.string()).max(6).optional(),
         action: z.string().max(1000).optional(), startState: z.string().max(500).optional(), endState: z.string().max(500).optional(), forbidden: z.string().max(500).optional(),
-        dialogue: z.array(z.object({ speaker: z.string().describe('A character id or "narrator"'), text: z.string().max(1000), start: z.number().min(0).nullable().optional() })).max(12).optional(),
+        dialogue: z.array(z.object({ speaker: z.string().describe('A character id or "narrator"'), text: z.string().max(1000), style: z.string().max(500).optional(), start: z.number().min(0).nullable().optional() })).max(12).optional(),
         method: z.enum(['video', 'still']).optional(), motion: z.string().optional().describe('Still-shot move: push-in, pull-out, pan-left, pan-right, rise, hold'),
         model: z.string().optional().describe('Per-shot video model as "provider|model" ("" = storyboard default)'),
         interpolate: z.boolean().optional(), trimStart: z.number().min(0).max(10).optional(), muteClipSound: z.boolean().optional(), locked: z.boolean().optional(),
@@ -634,6 +653,12 @@ export function registerLuminaTools(server, client) {
     if (checkOnly) return ok(text(await client.call('GET', `/api/assets/${assetId}/enhance`)));
     return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode, height })));
   }));
+
+  if (process.env.LUMINA_EXPERIMENTAL_LIPSYNC === '1') server.registerTool('lip_sync_shot', {
+    title: 'Lip sync a shot',
+    description: 'Make a storyboard shot\'s mouth move with its recorded dialogue, on the computer running Lumina (free). Anime look: three mouths are drawn in the shot\'s own style and switched with the voice (mouth flaps); live action: MuseTalk. Record the dialogue first (voice_dialogue). The mouth is found automatically; if that fails, pass mouthBox as fractions of the frame [x1, y1, x2, y2].',
+    inputSchema: { shotId: z.string(), mouthBox: z.array(z.number().min(0).max(1)).length(4).optional() },
+  }, safe(async ({ shotId, mouthBox }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/lipsync`, { box: mouthBox }))))));
 
   server.registerTool('interpolate_video', {
     title: 'Interpolate a video (smoother motion)',

@@ -5,10 +5,13 @@ import path from 'node:path';
 import { extractJson } from './books.js';
 import { nearestDuration, RequestError } from './generation.js';
 import { presets } from './presets.js';
+import { priceFor } from './pricing.js';
 import { colourStats, curveFilter, matchCurve } from './grade.js';
 import { checkClip, driftChecks, suggestedStatus } from './qc.js';
 import { lineTimes, mixSoundtrack } from './soundtrack.js';
-import { deliverFilm, hasFfmpeg, lastFrame, mediaSeconds, probe, renderStill, stillMotions, stitchClips } from './video.js';
+import { deliverFilm, hasFfmpeg, lastFrame, mediaSeconds, probe, renderStill, run, stillMotions, stitchClips } from './video.js';
+import { drawMouths, findMouth, lipSync, lipSyncInstalled } from './providers/local.js';
+import { writeFile } from 'node:fs/promises';
 
 const cameraPresets = presets.filter((p) => p.group === 'camera');
 const stylePresets = presets.filter((p) => p.group === 'style');
@@ -127,9 +130,9 @@ export function cleanShotDetails(input = {}, base = {}) {
       const previous = base.dialogue?.[i];
       const textValue = String(line?.text ?? '').trim().slice(0, 1000);
       const speaker = typeof line?.speaker === 'string' ? line.speaker : 'narrator';
-      const same = previous && previous.text === textValue && previous.speaker === speaker;
+      const same = previous && previous.text === textValue && previous.speaker === speaker && (previous.style ?? '') === (line.style ?? previous.style ?? '');
       return {
-        speaker, text: textValue, start: Number.isFinite(Number(line?.start)) && line?.start !== null && line?.start !== '' ? Math.max(0, Number(line.start)) : null,
+        speaker, text: textValue, style: typeof line?.style === 'string' ? line.style.slice(0, 500) : previous?.style ?? '', start: Number.isFinite(Number(line?.start)) && line?.start !== null && line?.start !== '' ? Math.max(0, Number(line.start)) : null,
         // Recorded audio stays only while the words and speaker are unchanged.
         assetId: same ? previous.assetId ?? null : null, seconds: same ? previous.seconds ?? null : null,
       };
@@ -148,12 +151,13 @@ export function cleanShotDetails(input = {}, base = {}) {
     muteClipSound: typeof input.muteClipSound === 'boolean' ? input.muteClipSound : base.muteClipSound ?? false,
     locked: typeof input.locked === 'boolean' ? input.locked : base.locked ?? false,
     post: base.post ?? {}, // cached derived clips (upscaled / interpolated), keyed by source and settings
+    lipsync: base.lipsync ?? null, // { source, result, mode, box } once the clip has been lip-synced
   };
 }
 
 // Storyboards: an idea (or a screenplay) becomes a shot list, each shot gets an approved still frame and then a
 // clip (or a free still shot), and the clips, dialogue and music become one finished film.
-export function createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, faces = null, log = console }) {
+export function createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, budget = null, faces = null, log = console }) {
   const joining = new Map(); // storyboard id -> { state, done, total, error }
   const pending = new Set(); // background checks and probes, awaited on shutdown
   const track = (promise) => {
@@ -239,6 +243,9 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const [directorId, model] = spec.split(':');
     const director = directors.get(directorId);
     if (!director || !director.models.includes(model)) throw new RequestError(400, 'Unknown writer model.');
+    if (!director.keyless && budget?.settings().enabled && budget.settings().strictPrices) {
+      throw new RequestError(402, 'Strict budget: write the shot plan in your MCP chat and import it; paid planning has no bounded price.');
+    }
     const key = director.keyless ? null : keys.get(director.keyProvider);
     if (!director.keyless && !key) throw new RequestError(400, `Add a ${director.label} key in Settings to use this writer.`);
     const { shotCount: count, targetSeconds, clipLength, continuity, look, videoSecondsBudget } = sequence.settings;
@@ -295,6 +302,26 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     return detail(id);
   }
 
+  function importPlan(id, { shots: incoming, replace = false } = {}) {
+    needSequence(id);
+    const current = shotsOf(id);
+    if (current.length && !replace) throw new RequestError(409, 'Confirm replacement of the existing shot plan.');
+    if (current.some((s) => s.details.locked)) throw new RequestError(409, 'Unlock the existing shots before replacing the plan.');
+    if (current.some((s) => active(`shot-image:${s.id}`) || active(`shot-video:${s.id}`))) throw new RequestError(409, 'Wait for active shot jobs before replacing the plan.');
+    if (!Array.isArray(incoming) || incoming.length < 1 || incoming.length > maxShots) throw new RequestError(400, `Import 1–${maxShots} shots.`);
+    const list = incoming.map((shot) => {
+      if (typeof shot.description !== 'string' || !shot.description.trim() || shot.description.length > 2000) throw new RequestError(400, 'Every shot needs a description under 2000 characters.');
+      const duration = Number(shot.duration);
+      if (!Number.isInteger(duration) || duration < 1 || duration > 30) throw new RequestError(400, 'Shot durations must be whole seconds between 1 and 30.');
+      const details = cleanShotDetails(shot.details ?? {});
+      for (const characterId of [...details.characterIds, details.locationId].filter(Boolean)) if (!repo.characters.get(characterId)) throw new RequestError(404, 'A shot character or location does not exist.');
+      return { description: shot.description.trim(), duration, camera: cameraPresets.some((p) => p.id === shot.camera) ? shot.camera : null, details };
+    });
+    if (list.reduce((sum, shot) => sum + shot.duration, 0) > maxTargetSeconds) throw new RequestError(400, 'The film may not exceed 15 minutes.');
+    repo.shots.replaceAll(id, list);
+    return detail(id);
+  }
+
   // Shot edits. Locked shots keep their story (description, dialogue, start/end state) until unlocked on purpose.
   function updateShot(shotId, body) {
     const shot = needShot(shotId);
@@ -312,6 +339,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       camera: body.camera === undefined ? undefined : cameraPresets.some((p) => p.id === body.camera) ? body.camera : null,
       duration: body.duration === undefined ? undefined : Math.min(30, Math.max(1, Math.round(Number(body.duration)) || 5)),
       details,
+      review: touchesStory ? { ...shot.review, status: 'pending', frameApproved: null } : undefined,
     });
     return detail(shot.sequenceId);
   }
@@ -381,6 +409,14 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     };
   }
 
+  function paidClip(sequence, shot) {
+    if (shot.details.method === 'still') return false;
+    const { provider, model } = choice(sequence, 'video', {}, shot);
+    const p = providers.get(provider);
+    const price = priceFor(provider, model, providers.model(provider, model));
+    return !p?.keyless || Boolean(price?.usd || price?.skus);
+  }
+
   // Clips start from the shot's approved frame when the model accepts a start image; in keyframe mode they also
   // end on the next shot's frame when it is in the same scene and the model supports a last frame.
   function animate(shotId, override = {}) {
@@ -388,6 +424,12 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const sequence = needSequence(shot.sequenceId);
     if (!shot.description.trim()) throw new RequestError(400, 'Describe this shot first.');
     if (shot.details.method === 'still') throw new RequestError(400, 'This is a still shot: render it locally instead (free).');
+    if (sequence.settings.requireApproval && (!shot.imageAssetId || shot.review.frameApproved !== shot.imageAssetId)) throw new RequestError(409, 'Approve this shot’s current frame before making a clip.');
+    if (budget?.settings().enabled && budget.settings().strictPrices && paidClip(sequence, shot)) {
+      if (!shot.imageAssetId || shot.review.frameApproved !== shot.imageAssetId) throw new RequestError(409, 'Strict budget: approve the current frame before a paid clip.');
+      const waiting = shotsOf(sequence.id).find((s) => s.id !== shot.id && paidClip(sequence, s) && ((s.videoAssetId && s.review.status !== 'accepted') || active(`shot-video:${s.id}`)));
+      if (waiting) throw new RequestError(409, `Strict budget: review shot ${waiting.position} before paying for the next clip.`);
+    }
     const running = active(`shot-video:${shot.id}`);
     if (running && !override.force) return { generation: running, alreadyRunning: true };
     const { provider, model } = choice(sequence, 'video', override, shot);
@@ -429,6 +471,67 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     repo.shots.update(shot.id, { videoAssetId: clip.id, review: { status: 'pending' } });
     await runChecks(shot.id);
     return detail(sequence.id);
+  }
+
+  // Lip sync, free and local. Anime: three mouths are drawn on the clip's first frame by the anime image model and
+  // switched with the voice (mouth flaps, on twos); live action: MuseTalk redraws the lower face. It always starts
+  // from the original clip, so it can be redone after the dialogue changes. Still shots are synced without the camera
+  // move, which is added afterwards. `box` is the mouth's box as fractions of the frame [x1, y1, x2, y2]; without it
+  // the mouth is found automatically (anime face detector), and a 422 asks for a box when that fails.
+  async function lipSyncShot(shotId, { box = null } = {}) {
+    const shot = needShot(shotId);
+    const sequence = needSequence(shot.sequenceId);
+    const synced = shot.details.lipsync;
+    const source = asset(synced && synced.result === shot.videoAssetId ? synced.source : shot.videoAssetId);
+    if (!source) throw new RequestError(400, 'Make this shot\'s clip first.');
+    const lines = shot.details.dialogue.filter((line) => line.assetId && asset(line.assetId));
+    if (!lines.length) throw new RequestError(400, 'Voice this shot\'s dialogue first.');
+    const mode = sequence.settings.look === 'anime' ? 'flaps' : 'musetalk';
+    if (!lipSyncInstalled(mode)) throw new RequestError(501, mode === 'flaps' ? 'Anime lip sync needs Animagine XL 4.0 and the voice environment (see docs: Local voices and lip sync).' : 'Lip sync needs MuseTalk and the voice environment (see docs: Local voices and lip sync).');
+    const still = shot.details.method === 'still';
+    const duration = shot.duration ?? 5;
+    const dir = await mkdtemp(path.join(tmpdir(), 'lumina-lipsync-'));
+    try {
+      // The voice track, placed in the shot exactly as the film's soundtrack will place it.
+      const lengths = [];
+      for (const line of lines) lengths.push(line.seconds ?? await mediaSeconds(assetStore.path(asset(line.assetId))));
+      const { times } = lineTimes(lines, duration, lengths);
+      const voice = path.join(dir, 'voice.wav');
+      await run('ffmpeg', ['-v', 'error', ...lines.flatMap((line) => ['-i', assetStore.path(asset(line.assetId))]),
+        '-filter_complex', `${lines.map((_, i) => `[${i}:a]aresample=24000,aformat=channel_layouts=mono,adelay=${Math.round(times[i] * 1000)}:all=1[a${i}]`).join(';')};`
+          + `${lines.map((_, i) => `[a${i}]`).join('')}amix=inputs=${lines.length}:normalize=0,apad,atrim=0:${duration}[out]`,
+        '-map', '[out]', '-y', voice], 300_000);
+      // The picture: a still shot is synced as a still picture, then gets its camera move.
+      let video = assetStore.path(source);
+      const size = outputSize(sequence);
+      if (still) {
+        video = path.join(dir, 'hold.mp4');
+        await writeFile(video, await renderStill(assetStore.path(asset(shot.imageAssetId) ?? source), { duration, motion: 'static', width: size.width, height: size.height }));
+      }
+      const info = await probe(video);
+      const first = path.join(dir, 'first.png');
+      await run('ffmpeg', ['-v', 'error', '-i', video, '-frames:v', '1', '-y', first], 120_000);
+      const pixels = Array.isArray(box) && box.length === 4
+        ? box.map((v, i) => Math.round(Math.min(1, Math.max(0, Number(v))) * (i % 2 ? info.height : info.width)))
+        : await findMouth(first);
+      if (!pixels || pixels[2] - pixels[0] < 8 || pixels[3] - pixels[1] < 6) {
+        throw Object.assign(new RequestError(422, 'The mouth could not be found automatically. Drag a box over the speaker\'s mouth on the shot\'s picture, then press Lip sync again.'), { needBox: true });
+      }
+      const out = path.join(dir, 'synced.mp4');
+      const mouths = mode === 'flaps' ? await drawMouths({ image: first, box: pixels, seed: sequence.settings.seed ?? 0, out: path.join(dir, 'mouths') }) : null;
+      await lipSync({ video, audio: voice, mode, box: mode === 'flaps' ? pixels : [pixels[0] - (pixels[2] - pixels[0]), pixels[1] - 2 * (pixels[3] - pixels[1]), pixels[2] + (pixels[2] - pixels[0]), pixels[3] + (pixels[3] - pixels[1])], mouths, out });
+      const bytes = still
+        ? await renderStill(out, { duration, motion: shot.details.motion, width: size.width, height: size.height, video: true })
+        : await readFile(out);
+      const saved = await assetStore.save({ bytes, projectId: sequence.projectId, kind: 'video', label: `Shot ${shot.position} (lip-synced)`, parentAssetId: source.id });
+      const current = needShot(shot.id);
+      repo.shots.update(shot.id, { videoAssetId: saved.id, review: { status: 'pending' },
+        details: { ...current.details, lipsync: { source: source.id, result: saved.id, mode, box: pixels } } });
+      await runChecks(shot.id);
+      return detail(sequence.id);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 
   // Free checks after every new clip: technical problems and drift from the approved frames.
@@ -491,7 +594,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         return;
       }
       queued.push(generations.submit({
-        projectId: sequence.projectId, operation: 'speech', prompt: line.text, provider: voice.provider, model: voice.model, voice: voice.voice,
+        projectId: sequence.projectId, operation: 'speech', prompt: line.text, provider: voice.provider, model: voice.model, voice: voice.voice, style: line.style,
         bookTarget: target,
       }));
     });
@@ -540,10 +643,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
           let clip = asset(shot.videoAssetId);
           const source = clip.id;
           if ((shot.details.interpolate || settings.interpolateFps) && shot.details.method !== 'still' && enhancer) {
-            const smooth = await derived(shot, `smooth|${source}|30`, async () => (await enhancer.interpolate(assetStore.path(clip), { fps: 30 }))?.bytes ?? null).catch((error) => {
-              log.info?.('Interpolation skipped', { shot: shot.position, detail: error.message });
-              return null;
-            });
+            const smooth = await derived(shot, `smooth|${source}|30`, async () => (await enhancer.interpolate(assetStore.path(clip), { fps: 30 }))?.bytes ?? null);
             if (smooth) clip = smooth;
           }
           progress(`Shot ${shot.position}: smoothing`);
@@ -638,6 +738,17 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     }
     if (shots.some((s) => !s.imageAssetId)) choice(sequence, 'image');
     if (!(await hasFfmpeg())) throw new RequestError(501, 'Producing a film needs ffmpeg (on Debian/Ubuntu: sudo apt install ffmpeg).');
+    const missingVoices = new Set();
+    for (const shot of shots) for (const line of shot.details.dialogue) {
+      if (line.assetId && asset(line.assetId)) continue;
+      const character = line.speaker === 'narrator' ? null : repo.characters.get(line.speaker);
+      const voice = character?.voice ?? sequence.settings.narratorVoice;
+      if (!voice) missingVoices.add(character?.name ?? 'Narrator');
+      else if (!providers?.model(voice.provider, voice.model)?.operations.includes('speech')) throw new RequestError(400, 'Choose an available speech model for every speaker.');
+    }
+    if (missingVoices.size) throw new RequestError(400, `Configure a voice before production for: ${[...missingVoices].join(', ')}.`);
+    if (shots.some((s) => s.details.interpolate) || sequence.settings.interpolateFps) await enhancer?.rifeTool({ allowDownload: false });
+    if (['anime', 'ai'].includes(sequence.settings.upscale)) await enhancer?.aiTool({ allowDownload: false });
     if (producing.get(id)?.state === 'running') throw new RequestError(409, 'This film is already in production.');
     producing.set(id, { state: 'running', step: 'Starting', error: null, startedAt: Date.now() });
     for (const shot of shots) makeDialogue(shot.id);
@@ -669,6 +780,13 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       const lineBusy = (s) => (s.details.dialogue ?? []).some((_, i) => busyJob(`shot-line:${s.id}:${i}`));
       if (shots.some((s) => busyJob(`shot-image:${s.id}`) || busyJob(`shot-video:${s.id}`) || lineBusy(s))) return;
       const total = shots.length;
+      if (budget?.settings().enabled && budget.settings().strictPrices) {
+        const waiting = shots.find((s) => s.videoAssetId && paidClip(sequence, s) && s.review.status !== 'accepted');
+        if (waiting) {
+          Object.assign(production, { state: 'review', step: `Review paid shot ${waiting.position} before spending on the next clip` });
+          return;
+        }
+      }
       if (sequence.settings.continuity === 'chain') {
         const index = shots.findIndex((s) => !s.videoAssetId);
         if (index >= 0) {
@@ -693,7 +811,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
             rerun.add(id);
             return;
           }
-          if (sequence.settings.requireApproval && shot.review.frameApproved !== shot.imageAssetId) {
+          if (sequence.settings.requireApproval && (!shot.imageAssetId || shot.review.frameApproved !== shot.imageAssetId)) {
             Object.assign(production, { state: 'review', step: `Approve the frame of shot ${shot.position}, then press Produce film again` });
             return;
           }
@@ -711,7 +829,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         // Frames first, all of them: with approval required, production waits here so the frames (which decide
         // every face and set) are approved before any money goes on video.
         if (sequence.settings.requireApproval && !production.framesApproved) {
-          const unapproved = shots.filter((s) => !s.videoAssetId && !s.review.frameApproved);
+          const unapproved = shots.filter((s) => !s.videoAssetId && s.review.frameApproved !== s.imageAssetId);
           if (unapproved.length) {
             Object.assign(production, { state: 'review', step: `Approve the frames of ${unapproved.length} shot(s), then press Produce film again` });
             return;
@@ -724,7 +842,11 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         const needClips = shotsOf(id).filter((s) => s.description.trim() && !s.videoAssetId);
         if (needClips.length) {
           production.step = `Making ${needClips.length} clip(s) (${total - needClips.length} of ${total} done)`;
-          for (const shot of needClips) animate(shot.id);
+          if (budget?.settings().enabled && budget.settings().strictPrices) {
+            for (const shot of needClips.filter((s) => !paidClip(sequence, s))) animate(shot.id);
+            const paid = needClips.find((s) => paidClip(sequence, s));
+            if (paid) animate(paid.id);
+          } else for (const shot of needClips) animate(shot.id);
           return;
         }
       }
@@ -801,7 +923,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   const shotFingerprint = (shot) => createHash('sha256').update(JSON.stringify([shot.videoAssetId, shot.imageAssetId, shot.details.dialogue?.map((l) => l.assetId)])).digest('hex').slice(0, 12);
 
   return {
-    detail, create, update, plan, updateShot, review, approveFrame, generateFrame, animate, renderStillShot, runChecks, makeDialogue,
+    detail, create, update, plan, importPlan, updateShot, review, approveFrame, generateFrame, animate, renderStillShot, runChecks, makeDialogue, lipSyncShot,
     stitch, produce, stopProduction, onGenerationUpdate, idle, needShot, needSequence, outputSize, shotFingerprint,
   };
 }

@@ -150,7 +150,32 @@ function createWorker(workerFile, python = findPython) {
   return { request, stop };
 }
 
-const workers = { wan: createWorker(workerPath('wan_worker.py')), anime: createWorker(workerPath('sdxl_worker.py')), voice: createWorker(workerPath('voice_worker.py'), voicePython) };
+const workers = {
+  wan: createWorker(workerPath('wan_worker.py')), anime: createWorker(workerPath('sdxl_worker.py')),
+  voice: createWorker(workerPath('voice_worker.py'), voicePython), lipsync: createWorker(workerPath('lipsync_worker.py'), voicePython),
+};
+const animeFace = () => process.env.LUMINA_ANIME_FACE || path.join(os.homedir(), '.local', 'share', 'lumina-studio', 'anime-face', 'lbpcascade_animeface.xml');
+// Lip sync: anime mouth flaps need the anime image model (to draw the mouths) and the anime face detector;
+// MuseTalk (live action) needs its UNet, the Stable Diffusion VAE and Whisper-tiny.
+export const lipSyncInstalled = (mode) => Boolean(voicePython()) && (mode === 'musetalk'
+  ? snapshotHas('TMElyralab/MuseTalk', ['musetalkV15/unet.pth', 'musetalkV15/musetalk.json']) && snapshotHas('stabilityai/sd-vae-ft-mse', ['config.json', 'diffusion_pytorch_model.safetensors'])
+    && snapshotHas('openai/whisper-tiny', ['config.json', 'pytorch_model.bin']) && existsSync(animeFace())
+  : animeModelInstalled() && existsSync(animeFace()));
+
+// Lumina-side helpers (not part of the provider contract): find the mouth on a picture, draw the three anime mouths,
+// and lip-sync a clip. Paths in, files out; one GPU job at a time like everything else here.
+export async function findMouth(image) {
+  return (await gpu('lipsync', { task: 'find-mouth', image }, null, { exclusive: false })).box ?? null;
+}
+export async function drawMouths({ image, box, prompt, seed, out }) {
+  await gpu('anime', { task: 'mouths', image, box, prompt, seed: seed ?? 0, out });
+  return { closed: path.join(out, 'closed.png'), half: path.join(out, 'half.png'), open: path.join(out, 'open.png') };
+}
+export async function lipSync({ video, audio, mode, box, mouths, out }) {
+  const flaps = mode !== 'musetalk';
+  await gpu('lipsync', { task: 'lipsync', mode: flaps ? 'flaps' : 'musetalk', video, audio, box, mouths, out }, null, { exclusive: !flaps });
+  return out;
+}
 process.once('exit', () => Object.values(workers).forEach((w) => w.stop()));
 // One GPU job at a time across both models; the other model's worker is stopped first so the GPU is free for it.
 let queue = Promise.resolve();
@@ -194,6 +219,11 @@ export default {
   // Ready when the model is downloaded (a quick file check). The Python check is slow, so it runs with the first job.
   available: () => modelInstalled() || animeModelInstalled() || voiceInstalled('kokoro'),
   unavailableNote: `Download the model first: hf download ${repoId} (34 GB), with Python, PyTorch (CUDA) and diffusers installed.`,
+  modelAvailable: (id) => id === 'wan2.2-ti2v-5b' ? modelInstalled() : id === 'animagine-xl-4' ? animeModelInstalled() : id === 'kokoro-82m' ? voiceInstalled('kokoro') : id === 'chatterbox' ? voiceInstalled('chatterbox') : false,
+  runtimeStatus: () => {
+    const cuda = spawnSync('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], { encoding: 'utf8', timeout: 5000 });
+    return { gpuAvailable: cuda.status === 0, gpu: cuda.status === 0 ? cuda.stdout.trim() : null, pythonAvailable: cuda.status === 0 ? Boolean(findPython()) : false, note: cuda.status === 0 ? null : 'NVIDIA driver is unavailable; local Wan cannot render in this environment.' };
+  },
   models: [
     {
       id: 'wan2.2-ti2v-5b', label: 'Wan 2.2 TI2V 5B · FP8 (your GPU)', operations: ['generate', 'video'],

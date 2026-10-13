@@ -1,6 +1,6 @@
 {
   "name": "lumina-studio",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,7 +12,8 @@
     "desktop": "electron .",
     "desktop:mock": "LUMINA_MOCK=1 electron .",
     "dist": "electron-builder --linux deb AppImage",
-    "mcp": "node mcp/server.js"
+    "mcp": "node mcp/server.js",
+    "doctor": "node scripts/doctor.mjs"
   },
   "engines": {
     "node": ">=22.13"
@@ -75,7 +76,9 @@
     },
     "deb": {
       "depends": [
-        "libsecret-1-0"
+        "libsecret-1-0",
+        "ffmpeg",
+        "libvulkan1"
       ]
     },
     "asarUnpack": [

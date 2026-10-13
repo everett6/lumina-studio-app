@@ -83,7 +83,7 @@ export function createApiServer(ctx) {
     return {
       providers: providers.list.map((p) => ({
         id: p.id, label: p.label, keyUrl: p.keyUrl ?? null, keyless: Boolean(p.keyless),
-        ready: Boolean(p.keyless ? (p.available?.() ?? true) : keyStatus[p.id]?.configured), note: p.keyless && p.available && !p.available() ? p.unavailableNote : undefined, models: p.models.map(({ liveSkus, livePrice, ...m }) => ({ ...m, defaultResolution: defaultResolution(m), price: catalogPrice(p.id, { ...m, liveSkus, livePrice }) })),
+        ready: Boolean(p.keyless ? (p.available?.() ?? true) : keyStatus[p.id]?.configured), note: p.keyless && p.available && !p.available() ? p.unavailableNote : undefined, models: p.models.map(({ liveSkus, livePrice, ...m }) => ({ ...m, available: p.modelAvailable?.(m.id) ?? true, defaultResolution: defaultResolution(m), price: catalogPrice(p.id, { ...m, liveSkus, livePrice }) })),
       })),
       directors: directors.list.map((d) => ({
         id: d.id, label: d.label, models: d.models, ready: Boolean(d.keyless || keyStatus[d.keyProvider]?.configured),
@@ -224,7 +224,7 @@ export function createApiServer(ctx) {
       const resolution = item.operation === 'video' && model.resolutions?.length ? (model.resolutions.includes(item.resolution) ? item.resolution : defaultResolution(model)) : null;
       const duration = item.operation === 'video' ? nearestDuration(model.durations, item.duration) : undefined;
       let usd = estimateUsd(priceFor(item.provider, model.id, model), { size: item.size, duration, resolution, image: Boolean(item.image) });
-      if (usd == null && item.operation === 'speech') usd = budget.settings().speechAssumedUsd ?? 0.05;
+      if (usd == null && item.operation === 'speech' && !budget.settings().strictPrices) usd = budget.settings().speechAssumedUsd ?? 0.05;
       return { ...item, duration, resolution, usd: usd == null ? null : Math.round(usd * 10000) / 10000, note: usd == null ? 'No published price' : null };
     });
     const known = lines.filter((l) => l.usd != null);
@@ -398,7 +398,7 @@ export function createApiServer(ctx) {
   });
 
   // ---------- Storyboards ----------
-  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings(), maxShots, maxTargetSeconds, stillMotions }));
+  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings(), lipSync: process.env.LUMINA_EXPERIMENTAL_LIPSYNC === '1', maxShots, maxTargetSeconds, stillMotions }));
   route('GET', `/api/projects/${uuid}/storyboards`, (req, [projectId]) => {
     needProject(projectId);
     return { storyboards: repo.sequences.listByProject(projectId) };
@@ -407,6 +407,7 @@ export function createApiServer(ctx) {
     const body = await readBody(req, 32 * 1024);
     return { status: 201, body: sequences.detail(sequences.create({ ...body, projectId }).id) };
   });
+  route('POST', `/api/storyboards/${uuid}/import-plan`, async (req, [id]) => sequences.importPlan(id, await readBody(req, 256 * 1024)));
   route('GET', `/api/storyboards/${uuid}`, (req, [id]) => sequences.detail(id));
   route('PATCH', `/api/storyboards/${uuid}`, async (req, [id]) => {
     sequences.update(id, await readBody(req, 32 * 1024));
@@ -416,13 +417,60 @@ export function createApiServer(ctx) {
     sequences.needSequence(id);
     return { deleted: repo.sequences.remove(id) };
   });
+  async function productionReadiness(id) {
+    const { sequence, shots } = sequences.detail(id);
+    const blockers = [];
+    const tools = await enhancer.tools();
+    if (!(await hasFfmpeg())) blockers.push('Install ffmpeg.');
+    if (!shots.length) blockers.push('Import or plan the shots first.');
+    if ((sequence.settings.interpolateFps || shots.some((s) => s.details.interpolate)) && !tools.rife) blockers.push('Install RIFE before production.');
+    if (['anime', 'ai'].includes(sequence.settings.upscale) && !tools.ai) blockers.push('Install Real-ESRGAN before production.');
+    const catalogData = await catalog();
+    const modelReady = (providerId, modelId) => {
+      const provider = catalogData.providers.find((p) => p.id === providerId);
+      const model = provider?.models.find((m) => m.id === modelId);
+      return model && provider.ready && model.available !== false;
+    };
+    const localRuntime = providers.get('local')?.runtimeStatus?.() ?? null;
+    const costs = [];
+    for (const shot of shots) {
+      const items = [];
+      if (!shot.imageAssetId) items.push({ operation: 'generate', provider: sequence.settings.imageProvider, model: sequence.settings.imageModel, size: '1536x1024' });
+      if (!shot.videoAssetId && shot.details.method !== 'still') {
+        const [provider, model] = shot.details.model ? shot.details.model.split('|') : [sequence.settings.videoProvider, sequence.settings.videoModel];
+        items.push({ operation: 'video', provider, model, duration: shot.duration, image: true });
+      }
+      for (const line of shot.details.dialogue) {
+        if (line.assetId) continue;
+        const voice = repo.characters.get(line.speaker)?.voice ?? sequence.settings.narratorVoice;
+        if (!voice) blockers.push(`Shot ${shot.position}: configure a voice for ${line.speaker}.`);
+        else items.push({ operation: 'speech', provider: voice.provider, model: voice.model });
+      }
+      for (const item of items) {
+        if (!modelReady(item.provider, item.model)) blockers.push(`Shot ${shot.position}: ${item.provider}/${item.model} is unavailable.`);
+        if (item.provider === 'local' && item.operation !== 'speech' && (!localRuntime?.gpuAvailable || !localRuntime?.pythonAvailable)) blockers.push(localRuntime?.note ?? 'Local GPU runtime is unavailable.');
+      }
+      costs.push(...estimate(items).lines);
+    }
+    const unknown = costs.filter((c) => c.usd == null).length;
+    const estimatedUsd = costs.reduce((sum, c) => sum + (c.usd ?? 0), 0);
+    const b = budget.status();
+    if (b.settings.enabled && b.settings.strictPrices && unknown) blockers.push(`${unknown} request(s) have unknown prices; strict budget will refuse them.`);
+    if (b.settings.enabled && estimatedUsd > b.remainingUsd - (b.settings.retryReserveUsd ?? 0)) blockers.push('Estimated work exceeds the remaining budget after the retry reserve.');
+    return { ready: blockers.length === 0, blockers: [...new Set(blockers)], estimatedUsd, unknownPrices: unknown, budget: b, tools, localRuntime, lipSync: false };
+  }
+  route('GET', `/api/storyboards/${uuid}/readiness`, (req, [id]) => productionReadiness(id));
   route('POST', `/api/storyboards/${uuid}/plan`, async (req, [id]) => sequences.plan(id, await readBody(req, 4096)));
   route('POST', `/api/storyboards/${uuid}/stitch`, async (req, [id]) => {
     const body = await readBody(req, 1024);
     const result = await sequences.stitch(id, { wait: body.wait === true });
     return body.wait === true ? result : { status: 202, body: result };
   });
-  route('POST', `/api/storyboards/${uuid}/produce`, async (req, [id]) => ({ status: 202, body: await sequences.produce(id) }));
+  route('POST', `/api/storyboards/${uuid}/produce`, async (req, [id]) => {
+    const readiness = await productionReadiness(id);
+    if (!readiness.ready) throw new RequestError(400, `Production not ready: ${readiness.blockers.join(' ')}`);
+    return { status: 202, body: await sequences.produce(id) };
+  });
   route('POST', `/api/storyboards/${uuid}/stop`, (req, [id]) => sequences.stopProduction(id));
   // Frame interpolation: RIFE makes the in-between frames so the video plays at `fps` (same length). The result is a
   // new video in the library. Clips with a cut are refused (it would blend two shots).
@@ -476,6 +524,17 @@ export function createApiServer(ctx) {
   route('POST', `/api/shots/${uuid}/review`, async (req, [id]) => sequences.review(id, await readBody(req, 4096)));
   route('POST', `/api/shots/${uuid}/approve-frame`, async (req, [id]) => sequences.approveFrame(id, (await readBody(req, 1024)).approved !== false));
   route('POST', `/api/shots/${uuid}/still`, (req, [id]) => sequences.renderStillShot(id));
+  // Lip sync a shot's clip to its recorded dialogue (local and free). `box`: the mouth, as fractions of the frame.
+  route('POST', `/api/shots/${uuid}/lipsync`, async (req, [id]) => {
+    if (process.env.LUMINA_EXPERIMENTAL_LIPSYNC !== '1') throw new RequestError(501, 'Lip sync is excluded from this release.');
+    const body = await readBody(req, 4096);
+    try {
+      return await sequences.lipSyncShot(id, { box: Array.isArray(body.box) ? body.box.slice(0, 4).map(Number) : null });
+    } catch (error) {
+      if (error.needBox) return { status: 422, body: { error: error.message, needBox: true } };
+      throw error;
+    }
+  });
   route('POST', `/api/shots/${uuid}/checks`, async (req, [id]) => {
     const checks = await sequences.runChecks(id);
     if (!checks) throw new RequestError(400, 'This shot has no clip to check yet.');

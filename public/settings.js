@@ -202,6 +202,7 @@ async function renderBudget() {
     return [input, h('label', {}, h('span.field-label', {}, label.toUpperCase()), input)];
   };
   const enabled = h('input', { type: 'checkbox', checked: s.enabled });
+  const strict = h('input', { type: 'checkbox', checked: s.strictPrices });
   const mcp = h('input', { type: 'checkbox', checked: s.mcpCanApprove });
   const [total, totalLabel] = field('Total budget (USD)', 'totalUsd');
   const [daily, dailyLabel] = field('Per day', 'dailyUsd');
@@ -212,7 +213,7 @@ async function renderBudget() {
   const num = (input) => (input.value === '' ? null : Number(input.value));
   const save = (extra = {}) => async () => {
     try {
-      await api('/api/budget', { method: 'PUT', body: { enabled: enabled.checked, mcpCanApprove: mcp.checked, totalUsd: num(total) ?? 0, dailyUsd: num(daily), projectUsd: num(project),
+      await api('/api/budget', { method: 'PUT', body: { enabled: enabled.checked, strictPrices: strict.checked, mcpCanApprove: mcp.checked, totalUsd: num(total) ?? 0, dailyUsd: num(daily), projectUsd: num(project),
         perRequestUsd: num(perRequest), approvalAboveUsd: num(approval), retryReserveUsd: num(retry) ?? 0, ...extra } });
       toast('Budget saved.');
       await renderBudget();
@@ -254,6 +255,12 @@ async function renderBudget() {
     h('div.key-head', {}, h('b', {}, 'Spending limits'), h(`span.badge${s.enabled ? '.ok' : ''}`, {}, s.enabled ? `${money(status.spentUsd)} of ${money(s.totalUsd)} used` : 'Off')),
     h('p.muted', {}, 'When on, every paid job is priced and checked against these limits before it starts; the amount is reserved until the provider reports the real cost. Requests from Claude or ChatGPT can never change the limits.'),
     h('label.check-row', {}, enabled, h('span', {}, 'Enforce these limits')),
+    h('label.check-row', {}, strict, h('span', {}, 'Refuse unknown prices (recommended for a fixed budget)')),
+    h('button.button.secondary.small', { onclick: async () => {
+      await api('/api/budget', { method: 'PUT', body: { enabled: true, strictPrices: true, totalUsd: 12, perRequestUsd: 2, retryReserveUsd: 1, approvalAboveUsd: 1, mcpCanApprove: false } });
+      await renderBudget();
+      toast('$12 budget enabled. Existing spending remains counted.');
+    } }, 'Use $12 anime budget'),
     h('div.remote-grid', {}, totalLabel, dailyLabel, projectLabel, perRequestLabel, approvalLabel, retryLabel),
     h('label.check-row', {}, mcp, h('span', {}, 'Let Claude or ChatGPT approve spends above the threshold (off = only you, here)')),
     h('div.key-row', {},
