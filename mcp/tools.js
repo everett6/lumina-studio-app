@@ -481,6 +481,7 @@ export function registerLuminaTools(server, client) {
       seed: z.number().int().min(0).optional().describe('One seed for every frame and clip (random by default)'),
       outputHeight: z.union([z.literal(720), z.literal(1080), z.literal(1440), z.literal(2160)]).optional().describe('Delivery height (default 1080)'),
       upscale: z.enum(['none', 'fast', 'anime', 'ai']).optional().describe('How clips smaller than the delivery size are enlarged (once each, from the original): "anime" Real-ESRGAN anime model, "ai" Real-ESRGAN live action, "fast" Lanczos'),
+      colorMatch: z.enum(['scene', 'film', 'off']).optional().describe('Match every shot\'s colours to the first shot of its scene (default) or of the film, free and local'),
       requireApproval: z.boolean().optional().describe('Frames and clips must be accepted (review_shot) before video is paid for and before the film is joined'),
       videoSecondsBudget: z.number().int().min(0).max(900).optional().describe('Seconds of paid video the writer may plan; the rest become free still shots'),
       transition: z.enum(['cut', 'crossfade']).optional(), finish: z.enum(['none', 'cinematic']).optional().describe('"cinematic": 2.39:1 bars, film grain, fades'),

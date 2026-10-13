@@ -5,6 +5,7 @@ import path from 'node:path';
 import { extractJson } from './books.js';
 import { nearestDuration, RequestError } from './generation.js';
 import { presets } from './presets.js';
+import { colourStats, curveFilter, matchCurve } from './grade.js';
 import { checkClip, driftChecks, suggestedStatus } from './qc.js';
 import { lineTimes, mixSoundtrack } from './soundtrack.js';
 import { deliverFilm, hasFfmpeg, lastFrame, mediaSeconds, probe, renderStill, stillMotions, stitchClips } from './video.js';
@@ -68,6 +69,9 @@ export function cleanSequenceSettings(input = {}, base = {}) {
     outputHeight: pick('outputHeight', (v) => [720, 1080, 1440, 2160].includes(v), 1080),
     upscale: pick('upscale', (v) => ['none', 'fast', 'anime', 'ai'].includes(v), 'none'),
     interpolateFps: pick('interpolateFps', (v) => [0, 30].includes(v), 0),
+    // Colour matching between shots: 'scene' matches every shot to the first shot of its scene, 'film' to the first
+    // shot of the film, 'off' leaves the models' colours as they are.
+    colorMatch: pick('colorMatch', (v) => ['off', 'scene', 'film'].includes(v), 'scene'),
     requireApproval: typeof input.requireApproval === 'boolean' ? input.requireApproval : base.requireApproval ?? false,
     // Seconds of generated video the writer may plan; other shots become free still shots (0 = no limit).
     videoSecondsBudget: Math.min(maxTargetSeconds, Math.max(0, Math.round(Number(input.videoSecondsBudget ?? base.videoSecondsBudget ?? 0)) || 0)),
@@ -508,13 +512,27 @@ export function createSequenceService({ repo, directors, keys, generations, asse
           }
           items.push({ file: assetStore.path(clip), duration: shot.duration ?? undefined, trimStart: shot.details.trimStart || 0, mute: shot.details.muteClipSound, shot });
         }
-        // 2. The picture: exact lengths, crossfades, near-lossless.
+        // 2. One colour grade across the film: each shot matched to its scene's (or the film's) first shot, applied
+        // inside the join's own encode.
+        if (settings.colorMatch !== 'off' && items.length > 1) {
+          state.step = 'Matching colours between shots';
+          const stats = [];
+          for (const item of items) stats.push(await colourStats(item.file).catch(() => null));
+          const anchors = new Map();
+          items.forEach((item, i) => {
+            const group = settings.colorMatch === 'film' ? '' : item.shot.details.scene || `shot-${i}`;
+            if (!anchors.has(group) && stats[i]) anchors.set(group, i);
+            const anchor = anchors.get(group);
+            if (anchor !== undefined && anchor !== i && stats[i]) item.vf = curveFilter(matchCurve(stats[i], stats[anchor])) || undefined;
+          });
+        }
+        // 3. The picture: exact lengths, crossfades, near-lossless.
         state.step = 'Joining the shots';
         const joined = await stitchClips(items.map(({ shot, ...item }) => item), { transition: settings.transition, finish: 'none', size, deliver: false });
         const picture = path.join(dir, 'picture.mp4');
         await import('node:fs/promises').then((fs) => fs.writeFile(picture, joined.bytes));
         progress('Mixing the sound');
-        // 3. The sound: dialogue at its times, music and ambience under it.
+        // 4. The sound: dialogue at its times, music and ambience under it.
         let clockSeconds = 0;
         const lines = [];
         for (const item of items) {
@@ -534,7 +552,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         const mixed = path.join(dir, 'mixed.mp4');
         await mixSoundtrack(picture, mixed, { lines, music: bed(settings.music), ambience: bed(settings.ambience), clipVolume: settings.clipVolume, duration: joined.duration });
         progress('Final encode');
-        // 4. One delivery encode, with the finish.
+        // 5. One delivery encode, with the finish.
         const finished = path.join(dir, 'film.mp4');
         await deliverFilm(mixed, finished, { finish: settings.finish });
         const info = await probe(finished);

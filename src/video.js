@@ -149,6 +149,7 @@ export async function renderStill(imageFile, { duration, motion = 'push-in', wid
 // the end; `deliver: false` skips it and returns the near-lossless join (for a later soundtrack mix + delivery).
 export async function stitchClips(clips, { onProgress, transition = 'cut', finish = 'none', fadeSeconds = 0.5, size = null, deliver = true } = {}) {
   if (!clips.length) throw new Error('There are no clips to join.');
+  // Items: { file, duration, trimStart, vf } — `vf` is an optional filter (e.g. a colour match) applied first.
   const items = clips.map((clip) => (typeof clip === 'string' ? { file: clip } : clip));
   const files = items.map((item) => item.file);
   const infos = [];
@@ -170,11 +171,13 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
       const item = items[index];
       // With a set duration, the piece is that long (plus the crossfade overlap it lends to the next shot).
       const target = item.duration != null ? item.duration + (dissolve && index < files.length - 1 ? fadeSeconds : 0) : null;
-      const audioInput = info.hasAudio ? [] : ['-f', 'lavfi', '-t', String(Math.max(0.1, target ?? info.duration)), '-i', 'anullsrc=r=48000:cl=stereo'];
+      // Silence stands in for clips without sound and for clips whose own sound is muted.
+      const ownSound = info.hasAudio && !item.mute;
+      const audioInput = ownSound ? [] : ['-f', 'lavfi', '-t', String(Math.max(0.1, target ?? info.duration)), '-i', 'anullsrc=r=48000:cl=stereo'];
       const hold = target != null ? `,tpad=stop_mode=clone:stop_duration=${Math.ceil(target + 1)}` : '';
       await runVideo(['-v', 'error', ...(item.trimStart ? ['-ss', Number(item.trimStart).toFixed(3)] : []), '-i', file, ...audioInput,
-        '-map', '0:v:0', '-map', info.hasAudio ? '0:a:0' : '1:a:0',
-        '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${hold},format=yuv420p`,
+        '-map', '0:v:0', '-map', ownSound ? '0:a:0' : '1:a:0',
+        '-vf', `${item.vf ? `${item.vf},` : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${hold},format=yuv420p`,
         '-af', target != null ? `${audioFormat},apad` : audioFormat, ...encode, '-video_track_timescale', '15360', ...audioArgs,
         ...(target != null ? ['-t', target.toFixed(3)] : ['-shortest']), '-y', part], 600_000);
       parts.push({ file: part, duration: (await probe(part)).duration });

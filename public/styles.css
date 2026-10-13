@@ -529,3 +529,23 @@ input[type=range] { width: 100%; accent-color: #d6c27a; }
 @media (max-width: 720px) { .sb-line { grid-template-columns: 1fr; } }
 .badge[data-tone=ok] { color: var(--ok); background: #18301f; }
 .character-card.locked { border-color: #4a4430; }
+
+/* Timeline */
+.sb-timeline-panel { padding: 4px 14px 12px; }
+.sb-timeline-panel .panel-details { border: 0; padding: 0; }
+.tl-track { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 4px; }
+.tl-label { font: 10px var(--mono); color: var(--muted); text-transform: uppercase; }
+.tl-lane { position: relative; height: 26px; background: #141412; border-radius: 4px; overflow: hidden; }
+.tl-ruler { height: 16px; background: none; overflow: visible; }
+.tl-tick { position: absolute; top: 0; font: 9px var(--mono); color: var(--muted); border-left: 1px solid var(--line-2); padding-left: 3px; }
+.tl-shot { position: absolute; top: 2px; bottom: 2px; border: 1px solid #0f0f0d; border-radius: 3px; background: #3a3a34; color: #dcdcd2; font: 10px var(--mono); cursor: pointer; overflow: hidden; padding: 0; }
+.tl-shot[data-status=accepted] { background: #2f4a22; }
+.tl-shot[data-status=needs_review], .tl-shot[data-status=pending] { background: #4a3f1c; }
+.tl-shot[data-status=needs_regeneration], .tl-shot[data-status=needs_repair], .tl-shot[data-status=rejected] { background: #5a2a22; }
+.tl-shot[data-status=missing] { background: #22221e; color: var(--muted); }
+.tl-shot[data-still=true] { background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgba(255,255,255,.06) 6px 12px); }
+.tl-line { position: absolute; top: 5px; bottom: 5px; min-width: 3px; border-radius: 3px; background: #4b6a8a; font: 10px var(--mono); color: #e8eef5; overflow: hidden; padding-left: 2px; }
+.tl-line[data-recorded=false] { background: transparent; border: 1px dashed #6b8aaa; color: #9fb4c8; }
+.tl-line[data-over=true] { background: #7a3328; border-color: var(--danger); }
+.tl-bed { position: absolute; inset: 7px 0; border-radius: 3px; background: #5a4a7a; }
+.tl-bed[data-kind=ambience] { background: #3f5f55; }

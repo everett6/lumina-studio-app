@@ -425,9 +425,9 @@ function filmPanels(sequence) {
     const box = h('input', { type: 'checkbox', checked: Boolean(settings[key]), onchange: () => saveSettings({ [key]: box.checked }) });
     return h('label.check-row', { title: hint }, box, h('span', {}, label));
   };
-  const select = (label, key, options, cast = String) => {
+  const select = (label, key, options, cast = String, fallback = options[0][0]) => {
     const node = h('select', { 'aria-label': label, onchange: () => saveSettings({ [key]: cast(node.value) }) }, ...options.map(([v, text]) => h('option', { value: v }, text)));
-    node.value = String(settings[key]);
+    node.value = String(settings[key] ?? fallback); // settings saved before an option existed use its default
     return h('label', {}, h('span.field-label', {}, label.toUpperCase()), node);
   };
   const bible = h('textarea', { rows: 3, maxLength: 1500, value: settings.lookBible ?? '', 'aria-label': 'Look bible',
@@ -468,15 +468,63 @@ function filmPanels(sequence) {
     h('details.panel-details', {}, h('summary', {}, 'Screenplay'), screenplay),
     h('details.panel-details', {}, h('summary', {}, 'Delivery — size and upscaling'),
       h('div.sb-grid', {},
-        select('Output size', 'outputHeight', [['720', '720p'], ['1080', '1080p (Full HD)'], ['1440', '1440p'], ['2160', '2160p (4K)']], Number),
+        select('Output size', 'outputHeight', [['720', '720p'], ['1080', '1080p (Full HD)'], ['1440', '1440p'], ['2160', '2160p (4K)']], Number, '1080'),
         select('Upscaler for smaller clips', 'upscale', [['none', 'None (Lanczos fit only)'], ['anime', 'AI — anime (Real-ESRGAN anime video)'], ['ai', 'AI — live action (Real-ESRGAN x4plus)'], ['fast', 'Fast GPU (sharp Lanczos)']]),
-        select('Frame rate', 'interpolateFps', [['0', 'As generated'], ['30', 'Smooth to 30 fps (RIFE)']], Number)),
-      h('p.muted.small-note', {}, 'Each clip is enlarged once, from its original, straight to the output size; working files are near-lossless and the film is encoded once at the end.')),
+        select('Frame rate', 'interpolateFps', [['0', 'As generated'], ['30', 'Smooth to 30 fps (RIFE)']], Number),
+        select('Colour matching', 'colorMatch', [['scene', 'Match shots within each scene'], ['film', 'Match every shot to the first'], ['off', 'Off (keep each model\'s colours)']])),
+      h('p.muted.small-note', {}, 'Each clip is enlarged once, from its original, straight to the output size, and its colours are matched to its scene\'s first shot; working files are near-lossless and the film is encoded once at the end.')),
     h('details.panel-details', {}, h('summary', {}, 'Sound — dialogue, music, ambience'),
       h('label', {}, h('span.field-label', {}, 'NARRATOR VOICE'), narrator),
       bed('music', 'Music'), bed('ambience', 'Ambience'),
       level('Clip sound (effects from the video model)', settings.clipVolume ?? 1, (clipVolume) => saveSettings({ clipVolume })),
       h('p.muted.small-note', {}, 'Dialogue is spoken in each character\'s voice (set it on the Characters tab), levelled to match, and the music ducks under it.')));
+}
+
+// Timeline: the film to scale — every shot, every dialogue line where it will be heard, and the music and ambience
+// beds. Lines without a recording yet are drawn at an estimated length (about 2.6 words a second). Lines that run
+// past the end of their shot are shown in red. Click a shot to jump to it.
+function timeline() {
+  const { sequence, shots } = ui.detail;
+  const total = shots.reduce((sum, s) => sum + (s.duration ?? 0), 0);
+  if (!total) return null;
+  const pct = (seconds) => `${(seconds / total) * 100}%`;
+  const names = new Map((state.characters ?? []).map((c) => [c.id, c.name]));
+  const pictures = [];
+  const lines = [];
+  let elapsed = 0;
+  for (const shot of shots) {
+    const length = shot.duration ?? 0;
+    const status = shot.videoPath ? shot.review?.status ?? 'pending' : 'missing';
+    pictures.push(h('button.tl-shot', {
+      style: `left:${pct(elapsed)};width:${pct(length)}`, dataset: { status, still: String(shot.details.method === 'still') },
+      title: `Shot ${shot.position}: ${length} s${shot.details.scene ? ` · ${shot.details.scene}` : ''} · ${shot.videoPath ? reviewLabels[status] ?? status : 'no clip yet'}`,
+      onclick: () => document.querySelectorAll('.sb-shot')[shot.position - 1]?.scrollIntoView({ behavior: 'smooth', block: 'center' }),
+    }, String(shot.position)));
+    let cursor = 0.4;
+    for (const line of shot.details.dialogue) {
+      const seconds = line.seconds ?? Math.max(0.8, line.text.split(/\s+/).length / 2.6);
+      const at = Number.isFinite(line.start) && line.start !== null ? line.start : cursor;
+      cursor = at + seconds + 0.25;
+      const over = at + seconds > length + 0.05;
+      const who = line.speaker === 'narrator' ? 'Narrator' : names.get(line.speaker) ?? 'Unknown';
+      lines.push(h('span.tl-line', {
+        style: `left:${pct(elapsed + at)};width:${pct(Math.min(seconds, total - elapsed - at))}`, dataset: { over: String(over), recorded: String(Boolean(line.assetId)) },
+        title: `${who}: “${line.text}” (${seconds.toFixed(1)} s${line.seconds ? '' : ', estimated'}${over ? `, runs ${(at + seconds - length).toFixed(1)} s past the shot` : ''})`,
+      }, who[0]));
+    }
+    elapsed += length;
+  }
+  const step = total > 240 ? 60 : total > 60 ? 15 : 5;
+  const ticks = [];
+  for (let t = 0; t <= total; t += step) ticks.push(h('span.tl-tick', { style: `left:${pct(t)}` }, clock(t)));
+  const bed = (key, label) => (sequence.settings[key] ? h('div.tl-track', {}, h('span.tl-label', {}, label), h('div.tl-lane', {}, h('span.tl-bed', { dataset: { kind: key }, title: `${label} at ${Math.round(sequence.settings[key].volume * 100)}%` }))) : null);
+  const overruns = lines.filter((l) => l.dataset.over === 'true').length;
+  return h('details.panel-details.sb-timeline', { open: true },
+    h('summary', {}, `Timeline · ${clock(total)}${overruns ? ` · ${overruns} line(s) too long for their shot` : ''}`),
+    h('div.tl-track', {}, h('span.tl-label', {}, ''), h('div.tl-lane.tl-ruler', {}, ...ticks)),
+    h('div.tl-track', {}, h('span.tl-label', {}, 'Picture'), h('div.tl-lane', {}, ...pictures)),
+    lines.length ? h('div.tl-track', {}, h('span.tl-label', {}, 'Dialogue'), h('div.tl-lane', {}, ...lines)) : null,
+    bed('music', 'Music'), bed('ambience', 'Ambience'));
 }
 
 function estimateLine() {
@@ -540,6 +588,7 @@ function render() {
       h('video', { src: sequence.outputPath, controls: true, preload: 'metadata' }),
       enhanceRow(sequence),
       h('p.muted.small-note', {}, 'Re-join after changing clips to update this video.')) : null,
+    shots.length ? h('section.panel.sb-timeline-panel', {}, timeline()) : null,
     h('div.sb-shots', {}, ...shots.map((shot, index) => shotCard(shot, index, shots.length))),
     h('button.button.secondary.small', { disabled: shots.length >= (ui.options?.maxShots ?? 60), onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/shots`, 'POST', { description: '' }))) }, '+ Add a shot'),
   ].filter(Boolean));
