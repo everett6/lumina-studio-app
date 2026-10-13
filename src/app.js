@@ -8,6 +8,7 @@ import { createBookService } from './books.js';
 import { createCanvasRunner } from './canvas.js';
 import { openDatabase, transaction } from './db.js';
 import { createBudget } from './budget.js';
+import { createCreditMonitor } from './credits.js';
 import { createModelCatalog } from './catalog.js';
 import { createDirectors } from './directors/index.js';
 import { createGenerationService } from './generation.js';
@@ -41,8 +42,9 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const directors = createDirectors({ enableMock });
   const keys = createKeyStore({ file: path.join(dataDir, 'keys.json'), cipher });
   const budget = createBudget({ repo });
+  const credits = createCreditMonitor({ keys });
   const modelCatalog = createModelCatalog({ repo, provider: providers.get('openrouter'), log });
-  const jobs = createJobRunner({ repo, assetStore, providers, directors, keys, budget, log });
+  const jobs = createJobRunner({ repo, assetStore, providers, directors, keys, budget, credits, log });
   const generations = createGenerationService({ repo, providers, directors, keys, jobs, budget, db, transaction });
   const canvasRunner = createCanvasRunner({ repo, generations, jobs, directors, keys });
   const books = createBookService({ repo, directors, keys, generations, providers, assetStore });
@@ -63,7 +65,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), binDir: path.join(dataRoot, 'bin'), tunnelCommand: process.env.LUMINA_TUNNEL_COMMAND || null, log,
   });
   const server = createApiServer({
-    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, modelCatalog,
+    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
   });
   await new Promise((resolve, reject) => {

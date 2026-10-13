@@ -42,6 +42,7 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `render_still_shot` | Render a free still shot (the frame with a slow camera move) locally. |
 | `voice_dialogue` | Record a shot's dialogue in each character's voice. **Spends a little.** |
 | `estimate_film_cost` | Price everything a storyboard still needs and whether it fits the budget. Free. |
+| `openrouter_credit_status` | Read-only current-key allowance/usage and timestamp; account-wide credits explicitly unavailable without a management key. Unknown allowance blocks new paid OpenRouter jobs. |
 | `budget_status` / `decide_approval` | Read limits, spending and pending approvals; approve only if the user allowed MCP approvals in the app. |
 | `refresh_models` | Re-read OpenRouter's public model list and prices. Free. |
 | `generate_shot` | Make one shot's still frame or video clip. **Spends money; clips are slow.** |

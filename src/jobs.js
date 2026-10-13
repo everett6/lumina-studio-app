@@ -3,13 +3,13 @@ import { providerPrompt, toolOperations } from './generation.js';
 import { userMessage } from './providers/http.js';
 
 // Errors that mean the provider turned the request away before doing any paid work.
-const refusedCategories = new Set(['missing_key', 'auth', 'invalid_request', 'rate_limit', 'policy']);
+const refusedCategories = new Set(['missing_key', 'auth', 'invalid_request', 'rate_limit', 'policy', 'credit_limit']);
 
 // Durable job runner. Generation rows are the queue: 'queued' rows survive restarts and resume. Long provider
 // jobs (video) save the provider's job id as soon as it is accepted, so after a restart Lumina keeps polling the
 // same job instead of starting (and paying for) a new one. Rows left 'running' without such an id are marked
 // 'interrupted', with billing 'unknown' when the request may already have reached a paid provider.
-export function createJobRunner({ repo, assetStore, providers, directors, keys, budget, concurrency = 2, log = console }) {
+export function createJobRunner({ repo, assetStore, providers, directors, keys, budget, credits, concurrency = 2, log = console }) {
   const queue = [];
   const events = new EventEmitter();
   events.setMaxListeners(0);
@@ -35,6 +35,12 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     try {
       const provider = providers.get(job.provider);
       if (!provider) throw Object.assign(new Error('Provider unavailable'), { category: 'invalid_request' });
+      const allowanceKey = job.provider === 'openrouter' && !job.providerJob ? keys.get('openrouter') : null;
+      if (job.provider === 'openrouter' && !job.providerJob) {
+        if (!credits) throw Object.assign(new Error('OpenRouter credit monitor is unavailable.'), { category: 'credit_limit' });
+        await credits.preflight({ repo, generationId: id,
+          reserveUsd: budget?.settings().enabled ? budget.settings().retryReserveUsd ?? 0 : 0 });
+      }
       let prompt = providerPrompt(job);
       if (job.director && job.operation !== 'speech') {
         const [directorId, model] = job.director.split(':');
@@ -50,6 +56,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         images.push(await assetStore.read(asset));
       }
       const key = provider.keyless ? null : keys.get(provider.id);
+      if (allowanceKey !== null && key !== allowanceKey) throw Object.assign(new Error('The OpenRouter key changed during preflight. No paid request was submitted; check the new key allowance before retrying.'), { category: 'credit_limit' });
       const { params } = job;
       let output;
       if (toolOperations.includes(job.operation)) {
@@ -94,7 +101,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         const outcome = !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
         const ledger = budget?.settle(job, { outcome, usage: error.usage });
         repo.generations.update(id, {
-          status: 'failed', errorCategory: category, userError: error.category ? userMessage(error) : error.message,
+          status: 'failed', errorCategory: category, userError: category === 'credit_limit' ? error.message : error.category ? userMessage(error) : error.message,
           completedAt: new Date().toISOString(), durationMs: Date.now() - started,
           billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : null,
         });

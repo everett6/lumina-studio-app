@@ -1,9 +1,20 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { probe, run, runCapture, runVideo, videoEncoder } from './video.js';
 import { fetchZipEntries, readZip } from './zip.js';
+
+// Align to source timestamps rather than stretching the last source frame to the end of the audio.
+export function interpolationTimeline(sourceFrames, sourceFps, targetFps) {
+  if (!Number.isInteger(sourceFrames) || sourceFrames < 2 || !Number.isFinite(sourceFps) || sourceFps <= 0 || !Number.isFinite(targetFps) || targetFps <= sourceFps) {
+    throw new Error('Interpolation requires at least two frames and a higher finite target frame rate.');
+  }
+  const generatedFrames = Math.round((sourceFrames - 1) * targetFps / sourceFps) + 1;
+  const deliveryFrames = Math.ceil(sourceFrames * targetFps / sourceFps - 1e-6);
+  const anchors = Array.from({ length: sourceFrames }, (_, index) => ({ source: index + 1, target: Math.round(index * targetFps / sourceFps) + 1 }));
+  return { generatedFrames, deliveryFrames, anchors, duration: deliveryFrames / targetFps };
+}
 
 // Video enhancement on this computer's GPU.
 //
@@ -93,17 +104,29 @@ export function createEnhancer({ binDir, workDir, log = console }) {
       mkdirSync(out);
       await run('ffmpeg', ['-v', 'error', '-i', file, '-start_number', '1', path.join(frames, '%08d.png')], 600_000);
       onProgress?.(1, 3);
-      const count = Math.max(2, Math.round(info.duration * fps));
+      const sources = readdirSync(frames).filter((name) => /^\d{8}\.png$/.test(name)).sort();
+      const timeline = interpolationTimeline(sources.length, info.fps, fps);
+      const count = timeline.generatedFrames;
       await exec(tool.binary, ['-i', frames, '-o', out, '-m', tool.model, '-n', String(count), '-f', '%08d.png'], { timeout: 3_600_000 });
-      const made = readdirSync(out).filter((name) => name.endsWith('.png')).length;
-      if (made < count - 1) throw new Error(`RIFE made ${made} of ${count} frames.`);
+      const made = readdirSync(out).filter((name) => /^\d{8}\.png$/.test(name)).sort();
+      const frameName = (index) => `${String(index).padStart(8, '0')}.png`;
+      if (made.length !== count || made.some((name, index) => name !== frameName(index + 1))) {
+        throw new Error(`RIFE returned an incomplete or non-contiguous frame sequence (${made.length} of ${count}). Original clip retained.`);
+      }
+      // Restore source anchors losslessly before encoding. Non-integer ratios align to the nearest target
+      // frame (at most half a delivery frame); this is timestamp preservation, not ground-truth motion QC.
+      for (const anchor of timeline.anchors) await copyFile(path.join(frames, frameName(anchor.source)), path.join(out, frameName(anchor.target)));
+      for (let index = count + 1; index <= timeline.deliveryFrames; index++) {
+        await copyFile(path.join(frames, sources.at(-1)), path.join(out, frameName(index)));
+      }
       onProgress?.(2, 3);
       const result = path.join(dir, 'smooth.mp4');
       await runVideo(['-v', 'error', '-framerate', String(fps), '-start_number', '1', '-i', path.join(out, '%08d.png'), '-i', file,
-        '-map', '0:v:0', ...(info.hasAudio ? ['-map', '1:a:0', '-c:a', 'copy'] : []), '-vf', 'format=yuv420p', ...encode, '-shortest', '-movflags', '+faststart', '-y', result], 600_000);
+        '-map', '0:v:0', ...(info.hasAudio ? ['-map', '1:a:0', '-c:a', 'copy'] : []), '-vf', 'format=yuv420p', ...encode, '-t', String(timeline.duration), '-movflags', '+faststart', '-y', result], 600_000);
       onProgress?.(3, 3);
       const done = await probe(result);
-      return { bytes: await readFile(result), width: done.width, height: done.height, duration: done.duration, fps: done.fps };
+      if (Math.abs(done.duration - timeline.duration) > 1 / fps + 0.005 || Math.abs(done.fps - fps) > 0.01 || (info.hasAudio && !done.hasAudio)) throw new Error('Interpolated output failed duration/frame-rate/audio checks. Original clip retained.');
+      return { bytes: await readFile(result), width: done.width, height: done.height, duration: done.duration, fps: done.fps, sourceAnchors: timeline.anchors.length };
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

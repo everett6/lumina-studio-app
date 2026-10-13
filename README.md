@@ -125,3 +125,9 @@ Paid generations can incur provider charges. Lumina estimates and reserves known
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Overnight production safeguards (source updates)
+
+MCP `openrouter_credit_status` reads the configured key's remaining allowance without changing its limit. New OpenRouter jobs require a fresh known allowance sufficient for unresolved reservations and the protected retry reserve. Account-wide credits remain unavailable without a management key. Already accepted video jobs are polled rather than resubmitted.
+
+Finishing now interpolates per shot, assembles and mixes at native master size, then upscales the completed film. Upscaling does not blend frames across cuts; unchanged mixed masters reuse their cached upscale. RIFE restores source anchors before encoding and aligns them to the nearest delivery frame. These safeguards do not guarantee artifact-free motion or identity consistency; review the result before buying another take.

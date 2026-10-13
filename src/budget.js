@@ -131,8 +131,9 @@ export function createBudget({ repo }) {
   // After a job ends: settle its reservation. `usage.cost` is the provider's own figure when it gives one.
   function settle(generation, { outcome, usage }) {
     if (!repo.spend.get(generation.id)) return null;
-    const cost = Number(usage?.cost);
-    if (Number.isFinite(cost)) return repo.spend.settle(generation.id, { status: 'charged', actualUsd: cost, note: 'Provider-reported charge' });
+    const rawCost = usage?.cost;
+    const cost = rawCost == null || rawCost === '' ? NaN : Number(rawCost);
+    if (Number.isFinite(cost) && cost >= 0) return repo.spend.settle(generation.id, { status: 'charged', actualUsd: cost, note: 'Provider-reported charge' });
     if (outcome === 'completed') return repo.spend.settle(generation.id, { status: 'charged', note: 'Provider gave no charge; counted at the estimate' });
     if (outcome === 'refused') return repo.spend.settle(generation.id, { status: 'released', actualUsd: 0, note: 'The provider refused the request before running it' });
     return repo.spend.settle(generation.id, { status: 'unknown', note: 'Lumina cannot tell whether this was billed; still counted. Check the provider\'s activity page, then mark it.' });

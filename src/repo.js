@@ -359,6 +359,12 @@ export function createRepo(db) {
       const row = db.prepare(`SELECT COALESCE(SUM(COALESCE(actual_usd, estimated_usd)), 0) AS usd, COUNT(*) AS n FROM spend_ledger WHERE ${where.join(' AND ')}`).get(...args);
       return { usd: Math.round(row.usd * 10000) / 10000, count: row.n };
     },
+    outstanding(provider) {
+      const row = db.prepare(`SELECT COALESCE(SUM(COALESCE(actual_usd, estimated_usd)), 0) AS usd,
+        SUM(CASE WHEN COALESCE(actual_usd, estimated_usd) IS NULL THEN 1 ELSE 0 END) AS unpriced
+        FROM spend_ledger WHERE provider = ? AND status IN ('reserved', 'unknown')`).get(provider);
+      return { usd: row.usd, unpriced: row.unpriced ?? 0 };
+    },
     list: (limit = 200) => db.prepare('SELECT * FROM spend_ledger ORDER BY created_at DESC LIMIT ?').all(limit).map(toSpend),
     byModel: () => db.prepare(`SELECT provider, model, COUNT(*) AS jobs, SUM(COALESCE(actual_usd, estimated_usd)) AS usd FROM spend_ledger
       WHERE status IN ('reserved', 'charged', 'unknown') GROUP BY provider, model ORDER BY usd DESC`).all(),

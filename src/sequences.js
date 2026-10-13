@@ -9,7 +9,7 @@ import { priceFor } from './pricing.js';
 import { colourStats, curveFilter, matchCurve } from './grade.js';
 import { checkClip, driftChecks, suggestedStatus } from './qc.js';
 import { lineTimes, mixSoundtrack } from './soundtrack.js';
-import { deliverFilm, hasFfmpeg, lastFrame, mediaSeconds, probe, renderStill, run, stillMotions, stitchClips } from './video.js';
+import { deliverFilm, filmFps, hasFfmpeg, lastFrame, mediaSeconds, probe, renderStill, run, stillMotions, stitchClips } from './video.js';
 import { drawMouths, findMouth, lipSync, lipSyncInstalled } from './providers/local.js';
 import { writeFile } from 'node:fs/promises';
 
@@ -71,7 +71,7 @@ export function cleanSequenceSettings(input = {}, base = {}) {
       ? Math.abs(Math.trunc(Number(input.seed ?? base.seed))) % 2147483647 : Math.floor(Math.random() * 2147483646) + 1,
     transition: pick('transition', (v) => ['cut', 'crossfade'].includes(v), 'cut'),
     finish: pick('finish', (v) => ['none', 'cinematic', 'anime'].includes(v), 'none'),
-    // Delivery: frame height of the finished film; clips smaller than it are upscaled once each, from the original.
+    // Delivery: assemble/mix at master size, then upscale the completed film.
     outputHeight: pick('outputHeight', (v) => [720, 1080, 1440, 2160].includes(v), 1080),
     upscale: pick('upscale', (v) => ['none', 'fast', 'anime', 'ai'].includes(v), 'none'),
     interpolateFps: pick('interpolateFps', (v) => [0, 30].includes(v), 0),
@@ -630,14 +630,14 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     if (!(await hasFfmpeg())) throw new RequestError(501, 'Joining clips needs ffmpeg, which is not installed on this computer (on Debian/Ubuntu: sudo apt install ffmpeg).');
     const settings = sequence.settings;
     const size = outputSize(sequence);
-    const postSteps = usable.length * ((settings.upscale !== 'none' ? 1 : 0) + 1);
+    const postSteps = usable.length + (settings.upscale !== 'none' ? 1 : 0);
     const state = { state: 'running', done: 0, total: postSteps + 3, clips: usable.length, skipped: shots.length - usable.length, error: null, duration: null, step: 'Preparing shots' };
     joining.set(id, state);
     const progress = (step) => Object.assign(state, { done: Math.min(state.total, state.done + 1), step });
     const job = (async () => {
       const dir = await mkdtemp(path.join(tmpdir(), 'lumina-film-'));
       try {
-        // 1. Each shot's best version: smoothed when asked, upscaled to the film's size once from its original.
+        // 1. Interpolate within shots; never interpolate across the assembled film's cuts.
         const items = [];
         for (const shot of usable) {
           let clip = asset(shot.videoAssetId);
@@ -647,18 +647,21 @@ export function createSequenceService({ repo, directors, keys, generations, asse
             if (smooth) clip = smooth;
           }
           progress(`Shot ${shot.position}: smoothing`);
-          if (settings.upscale !== 'none' && enhancer) {
-            const info = await probe(assetStore.path(clip));
-            if (info.height < size.height - 8 && info.width < size.width - 8) {
-              const up = await derived(needShot(shot.id), `upscaled|${clip.id}|${settings.upscale}|${size.width}x${size.height}`, async () => (await enhancer.enhanceVideo(assetStore.path(clip), {
-                mode: settings.upscale, target: size, profile: 'mezzanine',
-              })).bytes);
-              if (up) clip = up;
-            }
-            progress(`Shot ${shot.position}: upscaling`);
-          }
           items.push({ file: assetStore.path(clip), duration: shot.duration ?? undefined, trimStart: shot.details.trimStart || 0, mute: shot.details.muteClipSound, shot });
         }
+        const sourceInfos = [];
+        for (const item of items) sourceInfos.push(await probe(item.file));
+        const rate = settings.interpolateFps === 30 ? 30 : filmFps(sourceInfos.map((info) => info.fps));
+        items.forEach((item, index) => {
+          const seconds = item.duration ?? Math.max(0, sourceInfos[index].duration - item.trimStart);
+          if (!(seconds > 0)) throw new Error(`Shot ${item.shot.position} has no usable duration.`);
+          item.duration = Math.max(1, Math.round(seconds * rate)) / rate;
+        });
+        // Preserve native detail through assembly; do not resize to delivery size before AI upscaling.
+        const masterHeight = settings.upscale === 'none' ? size.height : Math.min(size.height,
+          Math.max(...sourceInfos.map((info) => Math.min(info.height, info.width * size.height / size.width))));
+        const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+        const masterSize = { width: even(masterHeight * size.width / size.height), height: even(masterHeight) };
         // 2. One colour grade across the film: each shot matched to its scene's (or the film's) first shot, applied
         // inside the join's own encode.
         if (settings.colorMatch !== 'off' && items.length > 1) {
@@ -675,7 +678,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         }
         // 3. The picture: exact lengths, crossfades, near-lossless.
         state.step = 'Joining the shots';
-        const joined = await stitchClips(items.map(({ shot, ...item }) => item), { transition: settings.transition, finish: 'none', size, deliver: false, fps: settings.interpolateFps === 30 ? 30 : null });
+        const joined = await stitchClips(items.map(({ shot, ...item }) => item), { transition: settings.transition, finish: 'none', size: masterSize, deliver: false, fps: rate });
         const picture = path.join(dir, 'picture.mp4');
         await import('node:fs/promises').then((fs) => fs.writeFile(picture, joined.bytes));
         progress('Mixing the sound');
@@ -698,11 +701,32 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         };
         const mixed = path.join(dir, 'mixed.mp4');
         await mixSoundtrack(picture, mixed, { lines, music: bed(settings.music), ambience: bed(settings.ambience), clipVolume: settings.clipVolume, duration: joined.duration });
+        let deliverySource = mixed;
+        if (settings.upscale !== 'none' && masterSize.height < size.height - 8) {
+          if (!enhancer) throw new Error('The requested film upscaler is unavailable.');
+          state.step = 'Upscaling the completed film';
+          const digest = createHash('sha256').update(await readFile(mixed)).update(JSON.stringify([settings.upscale, size])).digest('hex');
+          const cacheName = `filmUpscale:${id}`;
+          const cache = repo.settings.get(cacheName, {});
+          let upscaled = cache.digest === digest ? asset(cache.assetId) : null;
+          if (!upscaled) {
+            const result = await enhancer.enhanceVideo(mixed, { mode: settings.upscale, target: size,
+              profile: 'mezzanine', deflicker: false }); // temporal deflicker would blend across hard cuts
+            upscaled = await assetStore.save({ bytes: result.bytes, projectId: sequence.projectId,
+              kind: 'video', label: `${sequence.title} (upscaled master)` });
+            repo.settings.set(cacheName, { digest, assetId: upscaled.id });
+          }
+          deliverySource = assetStore.path(upscaled);
+          state.upscaledMasterAssetId = upscaled.id;
+          progress('Completed-film upscale');
+        }
         progress('Final encode');
         // 5. One delivery encode, with the finish.
         const finished = path.join(dir, 'film.mp4');
-        await deliverFilm(mixed, finished, { finish: settings.finish });
+        await deliverFilm(deliverySource, finished, { finish: settings.finish });
         const info = await probe(finished);
+        if (Math.abs(info.duration - joined.duration) > 1 / rate + 0.005) throw new Error('Final film duration differs from the edit timeline by more than one frame.');
+        if (!info.hasAudio) throw new Error('Final film lost its mixed audio track.');
         const saved = await assetStore.save({ bytes: await readFile(finished), projectId: sequence.projectId, kind: 'video', label: `${sequence.title} (film)` });
         repo.sequences.update(id, { outputAssetId: saved.id });
         Object.assign(state, { state: 'completed', duration: info.duration, width: info.width, height: info.height, done: state.total, step: 'Done' });
@@ -716,6 +740,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         await rm(dir, { recursive: true, force: true });
       }
     })();
+    track(job);
     if (wait) {
       await job;
       if (state.state === 'failed') throw new RequestError(502, state.error);

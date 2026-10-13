@@ -71,7 +71,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, modelCatalog, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -199,6 +199,7 @@ export function createApiServer(ctx) {
       throw error.status && !(error instanceof RequestError) ? new RequestError(error.status, error.message) : error;
     }
   };
+  route('GET', '/api/providers/openrouter/credits', async (req, params, url) => ({ status: 200, body: await credits.status({ refresh: url.searchParams.get('refresh') === 'true' }) }));
   route('GET', '/api/budget', () => budget.status());
   route('PUT', '/api/budget', async (req) => {
     appOnly('Budget limits');

@@ -176,7 +176,7 @@ test('continuity: still shots render free, clips are checked for drift, approval
   }
 });
 
-test('continuity: dialogue is voiced per character and mixed in; upscaled clips are made once and reused', { skip: !media && 'needs ffmpeg', timeout: 300_000 }, async () => {
+test('continuity: dialogue is voiced per character and mixed in; the completed film is upscaled after mixing and reused', { skip: !media && 'needs ffmpeg', timeout: 300_000 }, async () => {
   const t = await startTestApp();
   try {
     const { pip, id } = await filmSetup(t, { shotCount: 2, upscale: 'fast', outputHeight: 720 });
@@ -197,7 +197,9 @@ test('continuity: dialogue is voiced per character and mixed in; upscaled clips 
     assert.equal(first.status, 200, JSON.stringify(first.body));
     const after = (await t.call('GET', `/api/storyboards/${id}`)).body;
     const cached = after.shots.map((s) => Object.keys(s.details.post).find((k) => k.startsWith('upscaled|')));
-    assert.ok(cached.every(Boolean), 'each shot was upscaled once and kept');
+    assert.ok(cached.every((key) => !key), 'shots are not individually upscaled before assembly');
+    const master = t.app.repo.settings.get(`filmUpscale:${id}`);
+    assert.ok(master.assetId, 'the completed mixed film has a cached upscaled master');
     const file = path.join(t.dataRoot, 'film.mp4');
     writeFileSync(file, await bytesOf(t, first.body.sequence.outputPath));
     const info = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file]).toString());
@@ -212,7 +214,8 @@ test('continuity: dialogue is voiced per character and mixed in; upscaled clips 
     const again = await t.call('POST', `/api/storyboards/${id}/stitch`, { wait: true });
     assert.equal(again.status, 200);
     const reused = (await t.call('GET', `/api/storyboards/${id}`)).body.shots.map((s) => s.details.post);
-    assert.deepEqual(reused, after.shots.map((s) => s.details.post), 'no second upscale');
+    assert.deepEqual(reused, after.shots.map((s) => s.details.post), 'shot interpolation cache unchanged');
+    assert.equal(t.app.repo.settings.get(`filmUpscale:${id}`).assetId, master.assetId, 'no second whole-film upscale');
   } finally {
     await t.close();
   }

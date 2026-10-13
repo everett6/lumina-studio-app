@@ -587,6 +587,13 @@ export function registerLuminaTools(server, client) {
       videoSeconds: result.videoSeconds, freeStillSeconds: result.stillSeconds }));
   }));
 
+  server.registerTool('openrouter_credit_status', {
+    title: 'Check OpenRouter remaining key allowance',
+    description: 'Read the current OpenRouter API key spending limit, remaining allowance and usage, with a timestamp. Does not spend credits or change limits. Account-wide credits require a management key and are reported unavailable here. Null is unknown, not free or unlimited. Check before paid work and compare with budget_status and reservations.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { refresh: z.boolean().optional().describe('Fetch a fresh snapshot instead of a cache up to 30 seconds old') },
+  }, safe(async ({ refresh = false }) => ok(text(await client.call('GET', `/api/providers/openrouter/credits?refresh=${refresh}`)))));
+
   server.registerTool('budget_status', {
     title: 'Budget status',
     description: 'Spending limits, what has been spent or reserved, and approvals waiting for a decision. Limits can only be changed in the app.',

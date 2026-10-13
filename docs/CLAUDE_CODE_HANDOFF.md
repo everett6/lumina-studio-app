@@ -1,0 +1,66 @@
+# Lumina overnight handoff log
+
+## Owner instructions
+
+Polish/debug/optimize the anime pipeline; use 2–3 Sonnet 5.5 Claude Code reviewers at the 30-minute mark; add active MCP visibility of OpenRouter credits; use cloud and local Wan clips together; upscale after film assembly; rigorously check audio/interpolation/continuity; skip lip sync; preserve the existing hard cap; push verified changes to GitHub when finished and stop workers.
+
+## Baseline and schedule
+
+- Baseline: v0.9.0 / 392ddda, public repository `everett6/lumina-studio-app`, branch `studio-v1` tracking public main.
+- Baseline validation: 78 passing tests, two skipped; real local pilot 1920×1080, 30 fps, 3.712 seconds, H.264/AAC.
+- Overnight work started about 11:08 pm Pacific, October 12; first review launch about 11:38 pm; end around 7:08 am October 13.
+- Heartbeat `lumina-overnight-polish`: every 30 minutes, 16 runs. Stop/disable on completion or at window end.
+- No new paid generation is authorized beyond the existing $12 workflow/hard cap. Read-only credit checks are authorized. Do not increase/reset caps or print keys.
+
+## Verified external API facts
+
+OpenRouter `GET /api/v1/key` reports the current key's usage and `limit_remaining`; `GET /api/v1/credits` reports account credits and requires a management key. Return permission/missing-key information instead of inventing a balance.
+
+Sources:
+- https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key
+- https://openrouter.ai/docs/api/api-reference/credits/get-remaining-credits
+
+## Pending
+
+1. Read-only credit service/API/MCP tool and conservative preflight integration.
+2. Move AI upscaling to the completed film, preserving per-shot interpolation and exact soundtrack timing.
+3. Launch scheduled Sonnet reviewers once; integrate their findings.
+4. Real Wan/audio/interpolation comparisons, rigorous regressions and runtime failure tests.
+5. README/log updates, build/smoke test, push, and stop workers.
+
+Append evidence and decisions as work progresses. Do not turn earlier “planned” checks into “passed” claims without command output/artifacts.
+
+## First work segment completed
+
+- Added `src/credits.js`: read-only OpenRouter `/key` monitor with a 30-second cache, fetch timestamps, numeric limit/usage fields, explicit unknown/unavailable values, and no raw labels/hashes/credentials returned.
+- Added `GET /api/providers/openrouter/credits` and MCP `openrouter_credit_status` (readOnlyHint). These changes are in source; they are not yet in the installed v0.9.0 AppImage or published release.
+- Added `tests/credits.test.js`. `npm run check` passed; `node --test tests/credits.test.js tests/remote.test.js` passed five tests. Diff whitespace check passed.
+- Credit monitoring is visibility only so far. Next: integrate conservative, fresh provider allowance with paid-job preflight/reservations; do not claim that integration is complete.
+- `scripts/run-sonnet-night-reviews.mjs` is ready and syntax-checked. It rejects early launches, uses exact `claude-sonnet-5-5`, launches three read-only custom reviewer roles once, limits each CLI API session to $1 where supported, and saves private reports in `/tmp/lumina-overnight/sonnet/`. Per-worker timeout is 30 minutes. No generation or MCP tools are exposed to reviewers.
+- First reviewer launch remains scheduled for 30 minutes after the request; no Sonnet reviewers have been launched early.
+
+## Current source changes to preserve
+
+`src/credits.js`, `src/app.js`, `src/api.js`, `mcp/tools.js`, `tests/credits.test.js`, the overnight plan/log, and reviewer launcher. The pre-existing untracked `.claude/` directory belongs to the user and should not be removed or published blindly.
+
+## First heartbeat: credit and finishing implementation
+
+- Three exact `claude-sonnet-5-5` custom reviewers launched at 06:39 UTC. All exited immediately with `authentication_failed`: Claude Code OAuth expired and could not refresh. Reports show zero API tokens/cost. No model substitution. Manifest/status/results retained under `/tmp/lumina-overnight/sonnet`; do not launch duplicates. User must sign Claude Code back in for these reviews.
+- Fresh OpenRouter `/key` preflight now runs before new provider requests. Missing allowance/cost fails closed; all reserved and unknown OpenRouter ledger rows count, plus protected retry reserve. Accepted provider-job recovery skips new-spend checks and polls the same job. Cap settings and historical spending are unchanged. Key rotation cannot return another key's cached allowance.
+- Fixed settlement of null/empty/negative charges: retain the estimate rather than counting them as zero.
+- Credit/budget regression command: `node --test tests/credits.test.js tests/credit-jobs.test.js tests/budget.test.js`: 12 passed, zero failures. No real paid requests.
+- Film stitching now resolves missing shot lengths from media, snaps timeline lengths to delivery frames, mixes at native master size, then upscales the entire mixed film. Whole-film temporal deflicker is disabled to avoid crossing cuts. Content/settings-addressed master cache avoids repeating the upscale. Final checks require audio and duration within one frame. Stitch jobs are awaited during shutdown.
+- `node --test tests/continuity.test.js`: eight passed. Full suite before the interpolation adjustment: 86 tests, 84 passed, two skipped, zero failures. A second full run including new interpolation tests is in progress; do not call it passed yet.
+- RIFE timing fix: generated span ends at the last source frame timestamp, then holds the tail through the original video-frame duration. Source anchors are restored before encoding; non-integer ratios land within half a delivery frame. Exact contiguous output count required. Original source remains intact on failure.
+- Real installed RIFE run on `/tmp/lumina-shipping-smoke/wan.mp4`: 17 original anchors, output 1280×704 at 30 fps, 0.733008 seconds. Source is the previously generated low-step Wan smoke clip, not a full-quality anime benchmark. Output/comparison artifacts saved under `/tmp/lumina-overnight/real`.
+- Remaining: signed-in web-client/live-cloud verification, broader cut/occlusion/audio/mixed-source checks, Sonnet reviews (auth blocked), full suite result, packaging and release. No live credit snapshot recorded yet; do not infer available funds.
+
+## Verification checkpoint at first heartbeat
+
+- Full regression after the interpolation change: 88 tests, 86 passed, two skipped, zero failures (`/tmp/lumina-night-regression-final.log`). Added a subsequent hard-cut regression: three interpolation tests pass, including refusal before GPU/download work.
+- MCP end-to-end credit call initially exposed an API envelope bug: string `status` fields were mistaken for HTTP status wrappers. Fixed the route to return `{status: 200, body: snapshot}`. Re-run `node --test tests/mcp.test.js`: all five tests pass, including `openrouter_credit_status` and missing-key semantics.
+- Actual source-anchor comparison at source frame 8 / target frame 10: PSNR 42.82 dB after delivery encoding. Side-by-side visually retains this sampled silhouette, costume and background. This measures one restored anchor, not interpolation ground truth or unseen occlusions. Saved `anchor-comparison.png` and logs in the private real-test directory.
+- Actual installed-model whole-film pilot: existing Wan clip plus an existing local still-motion clip, source-size 640×360 assembly, real Kokoro soundtrack, Real-ESRGAN anime upscale after mixing, anime finish. Output `/tmp/lumina-overnight/real/whole-film.mp4`: 1920×1080, 30 fps, 45 frames, 1.509 seconds, audio present. Expected video timeline 1.5 seconds; container deviation 9 ms (< one frame). Decode timestamps monotonic on both streams; audio mean -24.0 dB, peak -6.7 dB (not clipped).
+- This pilot uses local media, not a paid cloud render, and is too short to establish production-quality motion. No cloud credits spent. Real cloud/Wan interoperability is represented by adapter/mixed-provider regressions, not falsely claimed as a live cloud test.
+- Sonnet worker PIDs have exited. OAuth failure remains actionable; no duplicate launches or substitutions.
+- Next heartbeat: broader interpolation/occlusion and error/restart coverage, packaging smoke/release preparation, public README verification, and remaining live-client checks where accessible. Existing v0.9.0 installation remains unchanged until the new build passes.
