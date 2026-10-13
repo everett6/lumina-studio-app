@@ -667,6 +667,17 @@ export function registerLuminaTools(server, client) {
     inputSchema: { shotId: z.string(), mouthBox: z.array(z.number().min(0).max(1)).length(4).optional() },
   }, safe(async ({ shotId, mouthBox }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/lipsync`, { box: mouthBox }))))));
 
+  server.registerTool('inspect_video', {
+    title: 'View video samples for review',
+    description: 'Read video dimensions, duration, fps and audio presence, and view up to six timestamped thumbnail frames. Free local decoding; no generation, billing or edits. Use on a clip before accepting it or buying another take. Samples cannot prove motion accuracy or rule out drift between sampled frames.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { assetId: z.string(), times: z.array(z.number().min(0)).min(1).max(6).optional() },
+  }, safe(async ({ assetId, times }) => {
+    const result = await client.call('GET', `/api/assets/${assetId}/inspect${times ? `?times=${times.join(',')}` : ''}`);
+    return ok(text({ assetId, ...result.metadata, sampleTimes: result.frames.map((frame) => frame.requestedTimeSeconds), note: result.note }),
+      ...result.frames.map((frame) => ({ type: 'image', mimeType: frame.mimeType, data: frame.data })));
+  }));
+
   server.registerTool('interpolate_video', {
     title: 'Interpolate a video (smoother motion)',
     description: 'Make the in-between frames of a video with RIFE v4.6 on the GPU of the computer running Lumina, so it plays at `fps` with the same length (e.g. 12 → 24 fps rebuilds every other frame; 24 → 60 for smooth motion). Saves a new video in the library and returns its asset id (and file path on a local connection). Clips containing a cut are refused. RIFE must be installed from the app first (Storyboard → Picture quality → Smooth).',

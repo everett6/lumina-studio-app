@@ -23,7 +23,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
       'create_book', 'list_books', 'get_book', 'update_book', 'draft_bible', 'plan_pages', 'edit_page', 'revise_page', 'generate_illustration',
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
       'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
-      'update_character', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'interpolate_video']) {
+      'update_character', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'inspect_video', 'interpolate_video']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -68,6 +68,12 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     assert.ok(imported.assetId && existsSync(imported.file));
     const notText = await client.callTool({ name: 'import_video', arguments: { projectId: project.id, filePath: path.join(testsDir, 'mcp.test.js') } });
     assert.ok(notText.isError);
+    const inspection = await client.callTool({ name: 'inspect_video', arguments: { assetId: imported.assetId, times: [0, 0.25] } });
+    assert.equal(inspection.isError, undefined);
+    assert.equal(inspection.content.filter((c) => c.type === 'image').length, 2);
+    assert.deepEqual(parse(inspection).sampleTimes, [0, 0.25]);
+    const invalidInspection = await client.callTool({ name: 'inspect_video', arguments: { assetId: imported.assetId, times: [999] } });
+    assert.equal(invalidInspection.isError, true);
     const smooth = await client.callTool({ name: 'interpolate_video', arguments: { assetId: imported.assetId, fps: 24 } });
     assert.ok(smooth.isError);
     assert.match(smooth.content[0].text, /RIFE|not installed/);

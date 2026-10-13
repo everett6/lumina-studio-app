@@ -12,8 +12,8 @@ import { createHash } from 'node:crypto';
 // A missing price is never treated as zero: it needs an approval and is reserved at the per-request limit.
 
 export const defaultBudget = {
-  enabled: false,
-  strictPrices: false, // $12 anime profile rejects prices without a known unit cost
+  enabled: true, // new installs start with the requested $12 protections
+  strictPrices: true, // $12 anime profile rejects prices without a known unit cost
   totalUsd: 12, // hard cap since `since`
   dailyUsd: null,
   projectUsd: null,

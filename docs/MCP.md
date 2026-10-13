@@ -42,6 +42,7 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `render_still_shot` | Render a free still shot (the frame with a slow camera move) locally. |
 | `voice_dialogue` | Record a shot's dialogue in each character's voice. **Spends a little.** |
 | `estimate_film_cost` | Price everything a storyboard still needs and whether it fits the budget. Free. |
+| `inspect_video` | View up to six timestamped video thumbnails plus technical metadata, without generation or edits. Supports visual review before accepting a shot; samples do not prove motion correctness. |
 | `openrouter_credit_status` | Read-only current-key allowance/usage and timestamp; account-wide credits explicitly unavailable without a management key. Unknown allowance blocks new paid OpenRouter jobs. |
 | `budget_status` / `decide_approval` | Read limits, spending and pending approvals; approve only if the user allowed MCP approvals in the app. |
 | `refresh_models` | Re-read OpenRouter's public model list and prices. Free. |
@@ -67,6 +68,16 @@ Where Lumina keeps its data decides which app the tools talk to:
 
 ### Claude Code
 
+The installed desktop binary provides MCP directly (version 0.9.2 onward):
+
+```bash
+claude mcp add -s user lumina-studio -- "$HOME/Applications/Lumina-Studio.AppImage" --mcp
+```
+
+For a `.deb` installation use `/opt/Lumina Studio/lumina-studio --mcp` as the command. No repository checkout or separate Node install is needed for this desktop helper. It uses the running app's authenticated API and can open the desktop app on the first tool call. The helper requires a Linux desktop session; for a headless environment use the source Node server below.
+
+Source/development setup:
+
 ```bash
 claude mcp add -s user lumina-studio -- node /path/to/lumina-studio/mcp/server.js
 ```
@@ -82,7 +93,20 @@ claude mcp add lumina-studio --env LUMINA_DATA_DIR=/path/to/data-root -- node /p
 
 ### Claude Desktop
 
-Add this to `claude_desktop_config.json`:
+For the installed AppImage, add this to `claude_desktop_config.json` (replace the username/path):
+
+```json
+{
+  "mcpServers": {
+    "lumina-studio": {
+      "command": "/home/YOUR_USER/Applications/Lumina-Studio.AppImage",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+For source/development setup:
 
 ```json
 {

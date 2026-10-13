@@ -290,3 +290,23 @@ export async function deliverFilm(input, output, { finish = 'none' } = {}) {
   await runVideo(['-v', 'error', '-i', input, '-map', '0:v:0', ...(info.hasAudio ? ['-map', '0:a:0'] : []), '-vf', filters.join(','),
     ...encode, ...(info.hasAudio ? audio : []), '-movflags', '+faststart', '-y', output], 3_600_000);
 }
+
+// Bounded, read-only visual samples for MCP review. These are observations, not an automatic quality verdict.
+export async function inspectVideo(file, times = null) {
+  const info = await probe(file);
+  const videoEnd = info.frames ? Math.min(info.duration, info.frames / info.fps) : info.duration;
+  const last = Math.max(0, videoEnd - 1 / info.fps);
+  const selected = times ?? [0, last / 4, last / 2, last * 3 / 4, last];
+  if (!Array.isArray(selected) || !selected.length || selected.length > 6 || selected.some((time) => !Number.isFinite(time) || time < 0 || time > last + 1e-6)) {
+    throw Object.assign(new Error(`Choose one to six finite sample times between 0 and ${last.toFixed(3)} seconds.`), { status: 400 });
+  }
+  const frames = [];
+  for (const time of selected) {
+    const bytes = await new Promise((resolve, reject) => execFile('ffmpeg', ['-v','error','-ss',String(time),'-i',file,
+      '-vf','scale=480:480:force_original_aspect_ratio=decrease','-frames:v','1','-threads','1','-f','image2pipe','-vcodec','png','-'],
+    {encoding:'buffer',timeout:30000,maxBuffer:2*1024*1024}, (error, stdout) => error ? reject(new Error('Video sample decoding failed.')) : resolve(stdout)));
+    if (!bytes.length) throw new Error('No frame could be decoded at the selected time.');
+    frames.push({ requestedTimeSeconds: time, mimeType: 'image/png', data: bytes.toString('base64') });
+  }
+  return { metadata: info, frames, note: 'Sampled frames support visual review. They cannot prove motion accuracy, audio sync or absence of drift between samples.' };
+}

@@ -1,6 +1,6 @@
 # Lumina Studio
 
-**Version 0.9.1** adds an anime film production workflow. See [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md) for the strict $12 budget profile, local generation setup, MCP workflow, verification notes and shipping prerequisites.
+**Version 0.9.2** adds an anime film production workflow. See [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md) for the strict $12 budget profile, local generation setup, MCP workflow, verification notes and shipping prerequisites.
 
 Lumina Studio is an open-source, Linux-first creative workspace for AI images. Bring your own API keys for OpenAI,
 fal.ai, Google Gemini or Replicate. Generate and edit images, keep everything in local projects, build reusable
@@ -52,13 +52,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.9.1_amd64.deb
+sudo apt install ./dist/lumina-studio_0.9.2_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.9.1.AppImage"
+chmod +x "dist/Lumina Studio-0.9.2.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
@@ -133,3 +133,15 @@ MCP `openrouter_credit_status` reads the configured key's remaining allowance wi
 Finishing now interpolates per shot, assembles and mixes at native master size, then upscales the completed film. Upscaling does not blend frames across cuts; unchanged mixed masters reuse their cached upscale. RIFE restores source anchors before encoding and aligns them to the nearest delivery frame. These safeguards do not guarantee artifact-free motion or identity consistency; review the result before buying another take.
 
 Local model generation and GPU finishing share a FIFO queue in each Lumina backend. Model changes wait for the previous worker to exit; quitting waits for queued generation and finishing writes before closing SQLite. Other applications or separate backend processes can still consume GPU memory.
+
+### Connect the installed app to Claude Code
+
+With version 0.9.2 or later, the desktop binary includes its own stdio MCP entry:
+
+```bash
+claude mcp add -s user lumina-studio -- "$HOME/Applications/Lumina-Studio.AppImage" --mcp
+```
+
+For the `.deb`, use `/opt/Lumina Studio/lumina-studio` as the command. The helper uses the same app, projects, keys and budget; it does not start a second backend. See [docs/MCP.md](docs/MCP.md) for Claude Desktop and web-client setup.
+
+New installs enable the strict $12 budget by default. Explicit existing settings and spending history are preserved; check `budget_status` after upgrading if you previously disabled enforcement. The local remaining budget is not a provider credit balance. MCP `inspect_video` returns bounded timestamped thumbnails and technical metadata for clip review before accepting or purchasing another take.

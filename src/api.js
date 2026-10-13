@@ -15,7 +15,7 @@ import { userMessage } from './providers/http.js';
 import { cleanSequenceSettings, maxShots, maxTargetSeconds } from './sequences.js';
 import { createSearch } from './search.js';
 import { currentRequest, requestContext } from './context.js';
-import { hasFfmpeg, stillMotions } from './video.js';
+import { hasFfmpeg, inspectVideo, stillMotions } from './video.js';
 
 const staticTypes = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -138,6 +138,15 @@ export function createApiServer(ctx) {
     return { folder, assets: assets.length };
   });
 
+  route('GET', `/api/assets/${uuid}/inspect`, async (req, [id], url) => {
+    const asset = repo.assets.get(id);
+    if (!asset) throw new RequestError(404, 'Asset not found.');
+    if (!asset.mimeType?.startsWith('video/')) throw new RequestError(400, 'Choose a video asset to inspect.');
+    const raw = url.searchParams.get('times');
+    if (raw !== null && (!raw || raw.split(',').length > 6)) throw new RequestError(400, 'Choose one to six sample times.');
+    const times = raw === null ? null : raw.split(',').map((value) => value.trim() ? Number(value) : NaN);
+    return inspectVideo(assetStore.path(asset), times);
+  });
   route('GET', '/api/assets', (req, params, url) => ({ assets: repo.assets.listByKind(url.searchParams.get('kind') === 'generation' ? 'generation' : 'reference') }));
   route('POST', '/api/assets', async (req) => {
     const body = await readBody(req, 12 * 1024 * 1024);

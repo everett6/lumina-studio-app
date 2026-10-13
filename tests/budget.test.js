@@ -89,7 +89,7 @@ test('budget: unpriced requests need approval and reserve the per-request ceilin
     },
   };
   const budget = createBudget({ repo });
-  budget.update({ enabled: true, totalUsd: 12, perRequestUsd: null });
+  budget.update({ enabled: true, strictPrices: false, totalUsd: 12, perRequestUsd: null });
   assert.throws(() => budget.authorize({ projectId: 'p', estimateUsd: null, signature: 's' }), /no published price/);
   budget.update({ perRequestUsd: 2 });
   assert.throws(() => budget.authorize({ projectId: 'p', estimateUsd: null, signature: 's' }), (e) => e.extra.needsApproval && /needs approval/.test(e.message));
@@ -198,4 +198,22 @@ test('live model list: real capabilities replace hand-typed ones, models missing
   assert.equal(provider.models[0].maxReferences, 14, 'all character and location references fit');
   assert.equal(provider.models[0].seed, true);
   assert.equal(catalog.status().videoModels, 2);
+});
+
+
+test('new installs enable the strict $12 budget; existing explicit limits and spending are preserved', async () => {
+  const t = await startTestApp({ budgetSettings: {} });
+  try {
+    const first = (await t.call('GET', '/api/budget')).body;
+    assert.equal(first.settings.enabled, true);
+    assert.equal(first.settings.strictPrices, true);
+    assert.equal(first.settings.totalUsd, 12);
+    assert.equal(first.settings.retryReserveUsd, 1);
+    assert.equal(first.settings.mcpCanApprove, false);
+    t.app.repo.settings.set('budget', { enabled: false, strictPrices: false, totalUsd: 4, since: '2026-01-01T00:00:00Z' });
+    const existing = (await t.call('GET', '/api/budget')).body;
+    assert.equal(existing.settings.totalUsd, 4);
+    assert.equal(existing.settings.enabled, false);
+    assert.equal(existing.settings.since, '2026-01-01T00:00:00Z');
+  } finally { await t.close(); }
 });

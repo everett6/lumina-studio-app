@@ -1,4 +1,4 @@
-# Anime production in Lumina 0.9.1
+# Anime production in Lumina 0.9.2
 
 ## The $12 workflow
 
@@ -67,3 +67,13 @@ Read-only key allowance enforcement, source-timestamp interpolation anchors, con
 A real local 1.5-second edit (Wan pilot + still-motion clip, Kokoro soundtrack) was assembled at 640×360, then upscaled with the installed Real-ESRGAN anime model to 1920×1080/30 fps. It has 45 video frames, monotonic decode timestamps, 1.509-second container duration, and audio peak -6.7 dB. One restored source anchor measured 42.82 dB PSNR after encoding. These measurements do not verify in-between motion against ground truth, full-quality Wan output, or live cloud generation.
 
 The scheduled Sonnet 5.5 reviews could not authenticate because Claude Code's OAuth session expired. No substitute model was used. Source review and tests continue; log details are in [CLAUDE_CODE_HANDOFF.md](CLAUDE_CODE_HANDOFF.md).
+
+### 0.9.2 agent access and safe defaults
+
+The installed binary supports `--mcp`; Claude Code/Desktop can use the AppImage or `.deb` binary directly without a checkout or separate Node runtime. It is a client of the authenticated running app, and does not start another backend. Restart the app after upgrading and refresh MCP tools in your chat client.
+
+Fresh installs enable strict $12 budget checks by default. Explicit saved settings remain unchanged, so verify `budget_status` if you previously disabled enforcement. Remaining local budget is not a provider-credit balance. OpenRouter allowance is a separate read-only check.
+
+`inspect_video` returns metadata plus up to six timestamped thumbnails, locally or through the remote MCP gateway. Use it to inspect originals and processed clips before accepting a shot or buying another take. Audio processing resamples to 48 kHz stereo, normalizes dialogue and limits the final mix; resampling does not recreate missing audio detail.
+
+A held-out test on an existing local generated Wan clip reconstructed 59 omitted observed frames (12→24 fps): RIFE aggregate PSNR 40.65 dB, repeat-frame baseline 36.78 dB. RIFE scored below the repeat baseline on 15 individual frames. This supports cautious use, not perfect interpolation. The reference is generated Wan motion, not physical ground truth or a drawn-anime benchmark. Saved comparison artifacts stay local. Original clips remain available.
