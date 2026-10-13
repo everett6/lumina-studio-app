@@ -18,6 +18,7 @@ import { createRemoteGateway } from './remote.js';
 import { createRepo } from './repo.js';
 import { createSequenceService } from './sequences.js';
 import { createEnhancer } from './enhance.js';
+import { createFaceChecker } from './faces.js';
 
 export const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(path.join(appRoot, 'package.json'), 'utf8')).version;
@@ -46,7 +47,8 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const canvasRunner = createCanvasRunner({ repo, generations, jobs, directors, keys });
   const books = createBookService({ repo, directors, keys, generations, providers, assetStore });
   const enhancer = createEnhancer({ binDir: path.join(dataRoot, 'bin'), workDir: path.join(dataRoot, 'tmp'), log });
-  const sequences = createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, log });
+  const faces = createFaceChecker({ binDir: path.join(dataRoot, 'bin'), log });
+  const sequences = createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, faces, log });
   jobs.events.on('update', books.onGenerationUpdate);
   jobs.events.on('update', sequences.onGenerationUpdate);
   const tokenFile = path.join(dataDir, 'api-token');
@@ -61,7 +63,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), binDir: path.join(dataRoot, 'bin'), tunnelCommand: process.env.LUMINA_TUNNEL_COMMAND || null, log,
   });
   const server = createApiServer({
-    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, jobs, token, remote, budget, modelCatalog,
+    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, modelCatalog,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
   });
   await new Promise((resolve, reject) => {

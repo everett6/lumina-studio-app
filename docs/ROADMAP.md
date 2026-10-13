@@ -64,6 +64,14 @@
 - Budget ledger with hard limits, approvals and no double billing; live OpenRouter model list and prices; resumable
   provider jobs after a restart.
 
+## Done (v0.8.1): free polish
+
+- Shot-to-shot colour matching (per scene or film-wide), applied inside the join's own encode.
+- Face identity check: YuNet + SFace through ONNX Runtime WebAssembly, models fetched on request with pinned
+  checksums; flags a clip where a person no longer matches their reference photos.
+- Timeline preview with dialogue placement and overruns, music and ambience beds.
+- Fix: "mute the clip's own sound" is now applied when joining.
+
 ## Next
 
 1. **Verify with real accounts.** Adapters are tested against faked HTTP only. Run one low-cost call per provider

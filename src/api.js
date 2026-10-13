@@ -71,7 +71,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, jobs, token, remote, budget, modelCatalog, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, modelCatalog, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -252,6 +252,17 @@ export function createApiServer(ctx) {
     const result = estimate(items);
     const videoSeconds = shots.filter((sh) => sh.details.method !== 'still').reduce((sum, sh) => sum + (sh.duration ?? 0), 0);
     return { ...result, videoSeconds, stillSeconds: shots.reduce((sum, sh) => sum + (sh.duration ?? 0), 0) - videoSeconds };
+  });
+  // Face identity check: free models, downloaded only when the person asks in the app.
+  route('GET', '/api/faces', () => faces?.status() ?? { installed: false, unavailable: true });
+  route('POST', '/api/faces/install', async () => {
+    appOnly('Installing the face check');
+    if (!faces) throw new RequestError(501, 'The face check is not available here.');
+    try {
+      return await faces.install();
+    } catch (error) {
+      throw new RequestError(502, error.message);
+    }
   });
   route('GET', '/api/models/status', () => modelCatalog.status());
   route('POST', '/api/models/refresh', async () => {

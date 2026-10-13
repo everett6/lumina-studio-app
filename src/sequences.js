@@ -116,7 +116,7 @@ export function cleanShotDetails(input = {}, base = {}) {
 
 // Storyboards: an idea (or a screenplay) becomes a shot list, each shot gets an approved still frame and then a
 // clip (or a free still shot), and the clips, dialogue and music become one finished film.
-export function createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, log = console }) {
+export function createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, faces = null, log = console }) {
   const joining = new Map(); // storyboard id -> { state, done, total, error }
   const pending = new Set(); // background checks and probes, awaited on shutdown
   const track = (promise) => {
@@ -404,6 +404,13 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       const start = asset(generation?.inputAssetIds?.[0]);
       const end = asset(generation?.params?.endFrameAssetId);
       checks.push(...await driftChecks(assetStore.path(clip), { startFrame: start ? assetStore.path(start) : null, endFrame: end ? assetStore.path(end) : null }));
+    }
+    // Identity: do the people in the shot still look like their reference photos? (Only when installed; real faces.)
+    if (faces?.status().installed && sequence.settings.look !== 'anime') {
+      const people = shotCast(sequence, shot).map((cid) => repo.characters.get(cid)).filter((c) => c && c.kind === 'character')
+        .map((c) => ({ name: c.name, referencePaths: c.referenceAssetIds.map((rid) => asset(rid)).filter((a) => a?.mimeType?.startsWith('image/')).map((a) => assetStore.path(a)) }));
+      checks.push(...await faces.checkClip(assetStore.path(clip), people, { duration: shot.duration ?? 4 }).catch((error) => [
+        { id: 'faces', ok: true, severity: 'warning', detail: `Face check could not run: ${error.message}` }]));
     }
     const speechChecks = dialogueFit(shot);
     if (speechChecks) checks.push(speechChecks);

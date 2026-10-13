@@ -1,6 +1,6 @@
 {
   "name": "lumina-studio",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -22,6 +22,7 @@
     "@modelcontextprotocol/sdk": "^1.31.0",
     "docx": "^9.8.1",
     "express": "^5.2.1",
+    "onnxruntime-web": "^1.30.0",
     "pdfkit": "^0.20.2",
     "zod": "^4.6.5"
   },
@@ -47,7 +48,13 @@
       "public/**",
       "mcp/**",
       "build/icon.png",
-      "package.json"
+      "package.json",
+      "!node_modules/onnxruntime-web/lib/**",
+      "!node_modules/onnxruntime-web/dist/**",
+      "node_modules/onnxruntime-web/dist/package.json",
+      "node_modules/onnxruntime-web/dist/ort.node.min.mjs",
+      "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs",
+      "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm"
     ],
     "directories": {
       "output": "dist",
@@ -68,7 +75,10 @@
       "depends": [
         "libsecret-1-0"
       ]
-    }
+    },
+    "asarUnpack": [
+      "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.*"
+    ]
   },
   "desktopName": "lumina-studio.desktop",
   "repository": {

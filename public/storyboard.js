@@ -1,7 +1,7 @@
 import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast, askText } from './lib.js';
 
 // Storyboard: an idea becomes a shot list; each shot gets a still frame, then a clip; clips join into one video.
-const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0 };
+const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0, faces: null };
 const jobActive = (job) => job && ['queued', 'running'].includes(job.status);
 const statusText = { queued: 'Queued', running: 'Generating…', failed: 'Failed', interrupted: 'Interrupted' };
 const defaultLengths = [4, 5, 6, 8, 10];
@@ -464,7 +464,8 @@ function filmPanels(sequence) {
         h('label', {}, h('span.field-label', {}, 'SEED (SAME FOR EVERY SHOT)'), seed),
         h('label', {}, h('span.field-label', {}, 'PAID VIDEO LIMIT (SECONDS)'), budgetSeconds),
         check('Approve frames and clips before they are used', 'requireApproval', 'Production stops for you to approve every frame (before video is paid for) and every clip (before the film is joined).')),
-      h('p.muted.small-note', {}, 'Characters and locations you add above are attached to every shot they appear in (description and reference photos). Lock a character once it looks right.')),
+      h('p.muted.small-note', {}, 'Characters and locations you add above are attached to every shot they appear in (description and reference photos). Lock a character once it looks right.'),
+      faceRow()),
     h('details.panel-details', {}, h('summary', {}, 'Screenplay'), screenplay),
     h('details.panel-details', {}, h('summary', {}, 'Delivery — size and upscaling'),
       h('div.sb-grid', {},
@@ -525,6 +526,19 @@ function timeline() {
     h('div.tl-track', {}, h('span.tl-label', {}, 'Picture'), h('div.tl-lane', {}, ...pictures)),
     lines.length ? h('div.tl-track', {}, h('span.tl-label', {}, 'Dialogue'), h('div.tl-lane', {}, ...lines)) : null,
     bed('music', 'Music'), bed('ambience', 'Ambience'));
+}
+
+// The face identity check: after each clip, are the people in it the same people as in their reference photos?
+function faceRow() {
+  const f = ui.faces;
+  if (!f || f.unavailable) return null;
+  if (f.installed) return h('p.muted.small-note', {}, '✓ Face identity check on: every clip is compared with the reference photos of the people in it (live action; skipped for anime).');
+  return h('div.key-row', {},
+    h('span.muted', {}, `Face identity check: tells you when a person in a clip no longer looks like their reference photos. Free; needs a one-time ${f.downloadMb} MB download of two open models (OpenCV YuNet and SFace).`),
+    h('button.button.secondary.small', { disabled: ui.busy === 'faces', onclick: guard(async () => {
+      await work('faces', async () => { ui.faces = await call('/api/faces/install'); });
+      toast('Face check installed. New clips will be checked; press Re-check on a shot to check an existing one.');
+    }) }, ui.busy === 'faces' ? 'Downloading…' : 'Install'));
 }
 
 function estimateLine() {
@@ -617,6 +631,7 @@ export function initStoryboard() {
   on('tab', guard(async (tab) => {
     if (tab !== 'storyboard') return clearTimeout(ui.timer);
     ui.options ??= await call('/api/storyboard-options', 'GET');
+    ui.faces ??= await call('/api/faces', 'GET').catch(() => null);
     if (!ui.presets.length) ui.presets = (await call('/api/presets', 'GET')).presets;
     return loadList();
   }));

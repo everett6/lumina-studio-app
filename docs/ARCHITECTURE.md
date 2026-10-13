@@ -57,9 +57,15 @@ clip's first and last frames are shrunk to 32×18 thumbnails and compared with t
 difference; matching frames score 3–20, unrelated pictures 110+, threshold 30) plus a colour-shift check. Checks
 suggest a status; only a person (or an orchestrator via MCP) accepts a shot.
 
+With the face check installed (`src/faces.js`), each clip of a live-action film is also sampled at three points;
+YuNet finds faces and landmarks, each face is aligned to SFace's 112×112 template and turned into an identity vector,
+and the best cosine similarity against each person's reference photos is reported (same person at ≥ 0.363, OpenCV's
+published threshold).
+
 Joining (`stitch`): per shot, optional RIFE interpolation, then one upscale from the original straight to the
 delivery size (Real-ESRGAN anime-video or x4plus, cached per source and size) → `stitchClips` builds an exact-length
-near-lossless picture (crossfades borrow from the outgoing shot, so the film runs the sum of its shot lengths) →
+near-lossless picture, with each shot colour-matched to its scene's first shot (per-channel mean and spread,
+clamped and blended, `src/grade.js`) inside the same encode (crossfades borrow from the outgoing shot, so the film runs the sum of its shot lengths) →
 `src/soundtrack.js` mixes clip sound, dialogue (placed and loudness-normalised), music (ducked under speech) and
 ambience with a limiter, copying the picture → `deliverFilm` makes the single final encode with the optional
 cinematic finish.
