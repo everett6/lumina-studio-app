@@ -39,8 +39,11 @@ function fillSelect(select, values, label = (v) => v) {
 }
 
 function renderModelDetails() {
-  const { model } = selectedModel();
+  const { provider, model } = selectedModel();
   const mode = local.mode;
+  $('#run-note').textContent = provider?.keyless
+    ? 'Runs on this computer\'s GPU: free and private. Results are stored on this computer.'
+    : 'Runs on your own provider key. Results are stored on this computer.';
   $('#quality-field').classList.toggle('hidden', mode !== 'image' || !model?.qualities.length);
   if (mode === 'image' && model?.qualities.length) {
     const current = $('#quality-select').value;
@@ -162,7 +165,12 @@ function showGeneration(generation) {
   for (const id of ['#use-input-btn', '#variation-btn', '#add-canvas-btn', '#animate-btn']) $(id).classList.toggle('hidden', !isImage);
   $('#tool-menu-slot').replaceChildren(...(done && isImage ? [toolMenu({ id: generation.assetId, path: generation.assetPath })] : []));
   const caption = generation.finalPrompt && generation.finalPrompt !== generation.prompt ? `${generation.prompt}  →  ${generation.finalPrompt}` : generation.prompt;
-  $('#preview-caption').textContent = caption;
+  // The prompt as typed; click to see the full prompt the model was sent.
+  const shown = $('#preview-caption');
+  shown.classList.remove('expanded');
+  shown.textContent = generation.prompt;
+  shown.title = caption !== generation.prompt ? 'Click to see the full prompt sent to the model' : '';
+  shown.onclick = () => { shown.textContent = shown.classList.toggle('expanded') ? caption : generation.prompt; };
 }
 
 function renderHistory() {

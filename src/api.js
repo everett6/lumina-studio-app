@@ -157,6 +157,14 @@ export function createApiServer(ctx) {
     const label = String(req.headers['x-lumina-label'] ?? 'audio').slice(0, 120);
     return { status: 201, body: { asset: await assetStore.save({ bytes, projectId, kind: 'audio', label }) } };
   });
+  // A video file to work on (e.g. to smooth or upscale): the raw MP4 as the body, up to 300 MB.
+  route('POST', `/api/projects/${uuid}/video`, async (req, [projectId]) => {
+    needProject(projectId);
+    const bytes = await readRaw(req, 300 * 1024 * 1024);
+    if (sniffMedia(bytes) !== 'video/mp4') throw new RequestError(400, 'Upload an MP4 video.');
+    const label = String(req.headers['x-lumina-label'] ?? 'video').slice(0, 120);
+    return { status: 201, body: { asset: await assetStore.save({ bytes, projectId, kind: 'video', label }) } };
+  });
   route('DELETE', `/api/assets/${uuid}`, async (req, [id]) => {
     const asset = repo.assets.get(id);
     if (!asset) throw new RequestError(404, 'Asset not found.');
@@ -263,6 +271,20 @@ export function createApiServer(ctx) {
     } catch (error) {
       throw new RequestError(502, error.message);
     }
+  });
+  // Upscaler (Real-ESRGAN) and frame interpolation (RIFE): installed, or downloaded when the person asks in the app.
+  route('GET', '/api/enhancer', async () => (enhancer ? enhancer.tools() : { ai: false, rife: false, unavailable: true }));
+  route('POST', '/api/enhancer/install', async (req) => {
+    appOnly('Installing the upscaler');
+    const { tool } = await readBody(req, 1024);
+    if (!enhancer) throw new RequestError(501, 'Enhancing is not available here.');
+    if (!['ai', 'rife'].includes(tool)) throw new RequestError(400, 'Choose ai (Real-ESRGAN) or rife.');
+    try {
+      await (tool === 'ai' ? enhancer.aiTool({ allowDownload: true }) : enhancer.rifeTool({ allowDownload: true }));
+    } catch (error) {
+      throw new RequestError(error.status ?? 502, error.message);
+    }
+    return enhancer.tools();
   });
   route('GET', '/api/models/status', () => modelCatalog.status());
   route('POST', '/api/models/refresh', async () => {
@@ -402,6 +424,26 @@ export function createApiServer(ctx) {
   });
   route('POST', `/api/storyboards/${uuid}/produce`, async (req, [id]) => ({ status: 202, body: await sequences.produce(id) }));
   route('POST', `/api/storyboards/${uuid}/stop`, (req, [id]) => sequences.stopProduction(id));
+  // Frame interpolation: RIFE makes the in-between frames so the video plays at `fps` (same length). The result is a
+  // new video in the library. Clips with a cut are refused (it would blend two shots).
+  route('POST', `/api/assets/${uuid}/interpolate`, async (req, [id]) => {
+    const body = await readBody(req, 1024);
+    const asset = repo.assets.get(id);
+    if (!asset) throw new RequestError(404, 'Asset not found.');
+    if (!asset.mimeType?.startsWith('video/')) throw new RequestError(400, 'Only videos can be interpolated.');
+    const fps = Number(body.fps ?? 30);
+    if (!Number.isInteger(fps) || fps < 2 || fps > 120) throw new RequestError(400, 'Choose a whole frame rate from 2 to 120.');
+    if (!enhancer) throw new RequestError(501, 'Interpolation is not available here.');
+    let result;
+    try {
+      result = await enhancer.interpolate(assetStore.path(asset), { fps });
+    } catch (error) {
+      throw new RequestError(error.status ?? 500, error.status === 428 ? `${error.message} Install it in the app (Storyboard → Picture quality → Smooth).` : error.message);
+    }
+    if (!result) throw new RequestError(400, `This video already plays at ${fps} fps or more.`);
+    const saved = await assetStore.save({ bytes: result.bytes, projectId: asset.projectId, kind: 'video', label: `${asset.label ?? 'Video'} (${fps} fps)`, parentAssetId: asset.id });
+    return { status: 201, body: { asset: saved, fps: result.fps, duration: result.duration, width: result.width, height: result.height } };
+  });
   route('GET', `/api/assets/${uuid}/enhance`, (req, [id]) => ({ enhance: enhancer.status(id) }));
   route('POST', `/api/assets/${uuid}/enhance`, async (req, [id]) => {
     const asset = repo.assets.get(id);

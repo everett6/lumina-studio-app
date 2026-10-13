@@ -239,5 +239,12 @@ export function createEnhancer({ binDir, workDir, log = console }) {
     });
   }
 
-  return { enhanceVideo, interpolate, aiTool, rifeTool, start, status: (assetId) => jobs.get(assetId) ?? null, targetSize };
+  // Which optional tools are installed (nothing is downloaded here).
+  async function tools() {
+    const ai = await aiTool({ allowDownload: false }).then(() => true, () => false);
+    const rife = existsSync(rifeBinary) && existsSync(path.join(rifeDir, 'rife-v4.6', 'flownet.bin'));
+    return { ai, rife, downloadMb: { ai: 47, rife: 20 } };
+  }
+
+  return { enhanceVideo, interpolate, aiTool, rifeTool, tools, start, status: (assetId) => jobs.get(assetId) ?? null, targetSize };
 }

@@ -96,3 +96,17 @@ test('face check runs after each clip in a storyboard once installed', { skip: !
     await t.close();
   }
 });
+
+test('upscaler status and install routes: status without downloading, install is app-only and checks the tool', async () => {
+  const t = await startTestApp();
+  try {
+    const status = (await t.call('GET', '/api/enhancer')).body;
+    assert.equal(typeof status.ai, 'boolean');
+    assert.equal(status.rife, false);
+    assert.deepEqual(status.downloadMb, { ai: 47, rife: 20 });
+    assert.equal((await t.call('POST', '/api/enhancer/install', { tool: 'ai' }, { headers: { 'x-lumina-client': 'mcp' } })).status, 403);
+    assert.equal((await t.call('POST', '/api/enhancer/install', { tool: 'other' })).status, 400);
+  } finally {
+    await t.close();
+  }
+});

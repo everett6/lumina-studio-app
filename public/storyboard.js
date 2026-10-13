@@ -1,7 +1,7 @@
 import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast, askText } from './lib.js';
 
 // Storyboard: an idea becomes a shot list; each shot gets a still frame, then a clip; clips join into one video.
-const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0, faces: null };
+const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0, faces: null, tools: null };
 const jobActive = (job) => job && ['queued', 'running'].includes(job.status);
 const statusText = { queued: 'Queued', running: 'Generating…', failed: 'Failed', interrupted: 'Interrupted' };
 const defaultLengths = [4, 5, 6, 8, 10];
@@ -195,25 +195,93 @@ function settingsPanel() {
     }, joiningNow ? `Joining… step ${join.done}/${join.total}` : `Join ${clips} clip(s) into one video`),
     ui.options?.ffmpeg ? null : h('span.muted', {}, 'Joining needs ffmpeg, which isn\'t installed.'));
 
-  return h('section.panel.sb-settings', {},
+  const story = h('section.panel.sb-settings', {},
+    h('div.sb-section-head', {}, h('h2', {}, 'Story'), h('span.muted', {}, 'What happens, who writes the shots, and how long it runs.')),
     h('div.sb-grid', {},
       h('label.sb-wide', {}, h('span.field-label', {}, 'TITLE'), title),
       h('label.sb-wide', {}, h('span.field-label', {}, 'IDEA'), idea),
       h('label', {}, h('span.field-label', {}, 'WRITER (PLANS THE SHOTS)'), writer),
       h('label', {}, h('span.field-label', {}, 'TARGET LENGTH (MINUTES)'), target),
       h('label', {}, h('span.field-label', {}, 'SHOTS'), count),
-      h('label', {}, h('span.field-label', {}, 'FRAME'), aspect),
-      h('label', {}, h('span.field-label', {}, 'STYLE'), style),
+      h('label', {}, h('span.field-label', {}, 'FRAME'), aspect)),
+    characters,
+    h('div.sb-section-head', {}, h('h2', {}, 'Models and look'), h('span.muted', {}, 'Which models make the frames and clips, and how the shots fit together.')),
+    h('div.sb-grid', {},
       modelPicker('image', 'generate', 'IMAGE MODEL (FRAMES)'),
       modelPicker('video', 'video', 'VIDEO MODEL (CLIPS)'),
+      h('label', {}, h('span.field-label', {}, 'STYLE'), style),
       ...filmFields(settings)),
-    characters, filmPanels(sequence), actions, productionLine(sequence),
-    h('p.muted', {}, [
-      withFrames.length ? `Running time: ${clock(runtime)} across ${withFrames.length} shot(s)${settings.targetSeconds ? ` (target ${clock(settings.targetSeconds)})` : ''}.` : '',
+    filmPanels(sequence));
+  const controls = h('div.sb-actions', {}, actions, productionLine(sequence),
+    h('p.muted.sb-runtime', {}, [
+      withFrames.length ? `Running time: ${clock(runtime)} across ${withFrames.length} shot(s)${settings.targetSeconds ? ` (target ${clock(settings.targetSeconds)})` : ''}.` : 'Write an idea and press Plan shots.',
       costLine ? `At list prices (${state.catalog?.pricesAsOf ?? 'recent'}): ${costLine}.` : '',
     ].filter(Boolean).join(' ')),
     estimateLine(),
     join?.state === 'failed' ? h('p.error-text', {}, join.error) : null);
+  return { story, controls };
+}
+
+// Picture quality, always in view: the finished film's size, how smaller clips are enlarged, motion and colour.
+function qualityPanel(sequence) {
+  const { settings } = sequence;
+  const tools = ui.tools ?? {};
+  const choose = guard(async (key, value) => {
+    const tool = key === 'upscale' && ['ai', 'anime'].includes(value) ? 'ai' : key === 'interpolateFps' && value ? 'rife' : null;
+    if (tool && !tools.unavailable && !tools[tool]) {
+      const what = tool === 'ai'
+        ? `The AI upscaler is Real-ESRGAN, which runs on your GPU. It is not installed yet.\n\nDownload it now from its official GitHub release (about ${tools.downloadMb?.ai ?? 47} MB) into Lumina's data folder?`
+        : `Smooth motion uses RIFE, which runs on your GPU. It is not installed yet.\n\nDownload it now from its official GitHub release (about ${tools.downloadMb?.rife ?? 20} MB) into Lumina's data folder?`;
+      if (!confirm(what)) return;
+      await work(`install-${tool}`, async () => { ui.tools = await call('/api/enhancer/install', 'POST', { tool }); });
+      toast(tool === 'ai' ? 'AI upscaler installed.' : 'Smooth motion installed.');
+    }
+    await saveSettings({ [key]: value });
+  });
+  const segment = (label, key, options, fallback) => {
+    const current = String(settings[key] ?? fallback);
+    return h('div.q-field', {}, h('span.field-label', {}, label),
+      h('div.segmented.q-segment', { role: 'radiogroup', 'aria-label': label }, ...options.map(([value, text, hint]) => h(`button${current === String(value) ? '.selected' : ''}`, {
+        type: 'button', role: 'radio', 'aria-checked': String(current === String(value)), title: hint ?? '', disabled: Boolean(ui.busy),
+        onclick: () => current !== String(value) && choose(key, value),
+      }, text))));
+  };
+  const [w, hgt] = { '16:9': [16, 9], '9:16': [9, 16], '1:1': [1, 1] }[settings.aspect] ?? [16, 9];
+  const height = settings.outputHeight ?? 1080;
+  const size = w >= hgt ? `${Math.round(height * w / hgt / 2) * 2}×${height}` : `${height}×${Math.round(height * hgt / w / 2) * 2}`;
+  const upscaler = { none: 'a plain resize', fast: 'the fast GPU sharpener', ai: 'Real-ESRGAN (AI, live action)', anime: 'Real-ESRGAN (AI, anime)' }[settings.upscale ?? 'none'];
+  const installing = ui.busy === 'install-ai' ? 'Downloading the AI upscaler…' : ui.busy === 'install-rife' ? 'Downloading RIFE…' : '';
+  return h('section.panel.sb-quality', {},
+    h('div.sb-section-head', {}, h('h2', {}, 'Picture quality'), h('span.muted', {}, `Finished film: ${size}. Clips smaller than that are enlarged once, from the original, with ${upscaler}.`)),
+    h('div.q-row', {},
+      segment('RESOLUTION', 'outputHeight', [[720, '720p', 'HD'], [1080, '1080p', 'Full HD'], [1440, '1440p', 'QHD'], [2160, '4K', 'Ultra HD (2160p)']], 1080),
+      segment('UPSCALER', 'upscale', [
+        ['ai', `AI · live action${tools.ai ? '' : ' ↓'}`, 'Real-ESRGAN x4plus: adds real detail. About a second per frame on the GPU.'],
+        ['anime', `AI · anime${tools.ai ? '' : ' ↓'}`, 'Real-ESRGAN anime video: crisp lines, no smearing. Several times faster.'],
+        ['fast', 'Fast GPU', 'Sharp Lanczos on the GPU (libplacebo): seconds, no new detail.'],
+        ['none', 'Off', 'Plain Lanczos resize only.']], 'none'),
+      segment('MOTION', 'interpolateFps', [[0, 'As made', 'Keep the model\'s frame rate (24 fps for cinema models).'], [30, `Smooth 30 fps${tools.rife ? '' : ' ↓'}`, 'RIFE makes in-between frames: steadier on 60 Hz screens.']], 0),
+      segment('COLOUR', 'colorMatch', [['scene', 'Match per scene'], ['film', 'Match whole film'], ['off', 'Off']], 'scene')),
+    installing ? h('p.badge', { dataset: { tone: 'busy' } }, installing) : null,
+    h('p.muted.small-note.q-note', {}, `${tools.ai ? 'AI upscaler installed.' : 'Options marked ↓ download a free tool the first time you pick them.'} Working files stay near-lossless; the film is encoded once at the end. Change these, then join again.`));
+}
+
+// The film: the player (opens on the first shot's frame, not a black fade-in), the main actions and progress.
+function filmHero(sequence, shots, controls) {
+  const poster = shots.find((s) => s.imagePath)?.imagePath ?? '';
+  const meta = h('span.sb-film-meta.muted', {});
+  const player = sequence.outputPath
+    ? h('video.sb-film', { src: sequence.outputPath, controls: true, preload: 'metadata', poster, playsInline: true,
+      onloadedmetadata: (event) => { meta.textContent = `${event.target.videoWidth}×${event.target.videoHeight} · ${clock(event.target.duration)}`; } })
+    : h('div.sb-film-empty', {}, poster ? h('img', { src: poster, alt: '' }) : null,
+      h('div.sb-film-empty-text', {}, h('b', {}, shots.length ? 'Your film appears here' : 'Start with an idea'),
+        h('span.muted', {}, shots.length ? 'Press Produce film: Lumina makes every frame and clip, then joins them.' : 'Write the idea below, then press Plan shots.')));
+  return h('section.panel.sb-hero', {},
+    h('div.panel-topline', {}, h('div', {}, h('span.section-title', {}, sequence.title), meta),
+      sequence.outputPath ? h('button.button.secondary.small', { onclick: () => downloadAsset(sequence.outputPath, `${sequence.title}.mp4`) }, 'Download film') : null),
+    h('div.sb-film-frame', { dataset: { aspect: sequence.settings.aspect } }, player),
+    controls,
+    sequence.outputPath ? enhanceRow(sequence) : null);
 }
 
 async function work(key, fn) {
@@ -417,18 +485,13 @@ function chooseAudio() {
   });
 }
 
-// The settings that make a film look like one film and sound finished: look bible and seed, delivery size and
-// upscaler, approval, and the soundtrack.
+// The settings that make a film look like one film and sound finished: look bible and seed, approval, the
+// screenplay and the soundtrack. (Size, upscaler, motion and colour are in the picture quality panel.)
 function filmPanels(sequence) {
   const { settings } = sequence;
   const check = (label, key, hint) => {
     const box = h('input', { type: 'checkbox', checked: Boolean(settings[key]), onchange: () => saveSettings({ [key]: box.checked }) });
     return h('label.check-row', { title: hint }, box, h('span', {}, label));
-  };
-  const select = (label, key, options, cast = String, fallback = options[0][0]) => {
-    const node = h('select', { 'aria-label': label, onchange: () => saveSettings({ [key]: cast(node.value) }) }, ...options.map(([v, text]) => h('option', { value: v }, text)));
-    node.value = String(settings[key] ?? fallback); // settings saved before an option existed use its default
-    return h('label', {}, h('span.field-label', {}, label.toUpperCase()), node);
   };
   const bible = h('textarea', { rows: 3, maxLength: 1500, value: settings.lookBible ?? '', 'aria-label': 'Look bible',
     placeholder: 'Sent with every frame and clip. e.g. “Muted teal-and-amber palette, 35 mm anamorphic lens, soft rim light, light film grain, late-1970s Tokyo.”',
@@ -467,13 +530,6 @@ function filmPanels(sequence) {
       h('p.muted.small-note', {}, 'Characters and locations you add above are attached to every shot they appear in (description and reference photos). Lock a character once it looks right.'),
       faceRow()),
     h('details.panel-details', {}, h('summary', {}, 'Screenplay'), screenplay),
-    h('details.panel-details', {}, h('summary', {}, 'Delivery — size and upscaling'),
-      h('div.sb-grid', {},
-        select('Output size', 'outputHeight', [['720', '720p'], ['1080', '1080p (Full HD)'], ['1440', '1440p'], ['2160', '2160p (4K)']], Number, '1080'),
-        select('Upscaler for smaller clips', 'upscale', [['none', 'None (Lanczos fit only)'], ['anime', 'AI — anime (Real-ESRGAN anime video)'], ['ai', 'AI — live action (Real-ESRGAN x4plus)'], ['fast', 'Fast GPU (sharp Lanczos)']]),
-        select('Frame rate', 'interpolateFps', [['0', 'As generated'], ['30', 'Smooth to 30 fps (RIFE)']], Number),
-        select('Colour matching', 'colorMatch', [['scene', 'Match shots within each scene'], ['film', 'Match every shot to the first'], ['off', 'Off (keep each model\'s colours)']])),
-      h('p.muted.small-note', {}, 'Each clip is enlarged once, from its original, straight to the output size, and its colours are matched to its scene\'s first shot; working files are near-lossless and the film is encoded once at the end.')),
     h('details.panel-details', {}, h('summary', {}, 'Sound — dialogue, music, ambience'),
       h('label', {}, h('span.field-label', {}, 'NARRATOR VOICE'), narrator),
       bed('music', 'Music'), bed('ambience', 'Ambience'),
@@ -594,15 +650,13 @@ function render() {
     return editor.replaceChildren(h('div.history-empty.muted', {}, 'Turn an idea into a short film: Lumina plans the shots, makes a frame for each, animates them, and joins the clips into one video.'));
   }
   const { sequence, shots } = ui.detail;
+  const { story, controls } = settingsPanel();
   return editor.replaceChildren(...[
-    settingsPanel(),
-    sequence.outputPath ? h('section.panel.sb-output', {},
-      h('div.panel-topline', {}, h('span.section-title', {}, 'Joined video'),
-        h('button.button.secondary.small', { onclick: () => downloadAsset(sequence.outputPath, `${sequence.title}.mp4`) }, 'Download')),
-      h('video', { src: sequence.outputPath, controls: true, preload: 'metadata' }),
-      enhanceRow(sequence),
-      h('p.muted.small-note', {}, 'Re-join after changing clips to update this video.')) : null,
+    filmHero(sequence, shots, controls),
+    qualityPanel(sequence),
+    story,
     shots.length ? h('section.panel.sb-timeline-panel', {}, timeline()) : null,
+    h('div.sb-section-head.sb-shots-head', {}, h('h2', {}, `Shots${shots.length ? ` · ${shots.length}` : ''}`), h('span.muted', {}, 'Each shot gets a frame, then a clip made from it. Accept the ones that look right.')),
     h('div.sb-shots', {}, ...shots.map((shot, index) => shotCard(shot, index, shots.length))),
     h('button.button.secondary.small', { disabled: shots.length >= (ui.options?.maxShots ?? 60), onclick: guard(async () => show(await call(`/api/storyboards/${sequence.id}/shots`, 'POST', { description: '' }))) }, '+ Add a shot'),
   ].filter(Boolean));
@@ -632,6 +686,7 @@ export function initStoryboard() {
     if (tab !== 'storyboard') return clearTimeout(ui.timer);
     ui.options ??= await call('/api/storyboard-options', 'GET');
     ui.faces ??= await call('/api/faces', 'GET').catch(() => null);
+    ui.tools ??= await call('/api/enhancer', 'GET').catch(() => null);
     if (!ui.presets.length) ui.presets = (await call('/api/presets', 'GET')).presets;
     return loadList();
   }));
