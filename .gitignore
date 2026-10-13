@@ -4,3 +4,4 @@ data/
 storage/assets/*
 exports/
 dist/
+__pycache__/
