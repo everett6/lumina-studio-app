@@ -10,7 +10,8 @@ import { ProviderError } from './http.js';
 // Wan 2.2 TI2V-5B (Apache 2.0) makes both the still frame (one-frame generation) and the clip (text-to-video, or
 // image-to-video from the shot's approved frame), at 720p, 24 fps. A Python worker (local/wan_worker.py) loads the
 // model once with FP8 weights and stays up between jobs; it is stopped after 10 idle minutes so the GPU is free for
-// other programs. Jobs run one at a time. The model must already be in the Hugging Face cache (downloaded with
+// other programs. If a job runs out of GPU memory, the worker moves the model into main memory (streamed to the GPU
+// layer by layer) and runs the job again: slower, same result. Jobs run one at a time. The model must already be in the Hugging Face cache (downloaded with
 // `hf download Wan-AI/Wan2.2-TI2V-5B-Diffusers`); the worker never downloads.
 
 const repoId = 'Wan-AI/Wan2.2-TI2V-5B-Diffusers';
@@ -81,6 +82,7 @@ function createWorker() {
         const job = waiting.get(message.id);
         if (!job) continue;
         if (message.progress) job.onProgress?.(message.progress, message.total);
+        else if (message.notice) console.info(`[local] ${message.notice}`);
         else if (message.done) { waiting.delete(message.id); job.resolve(message); }
         else if (message.error) { waiting.delete(message.id); job.reject(new ProviderError('provider', message.error)); }
       }
