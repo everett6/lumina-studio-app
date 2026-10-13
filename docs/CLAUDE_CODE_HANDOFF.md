@@ -81,3 +81,11 @@ Append evidence and decisions as work progresses. Do not turn earlier “planned
 ### v0.9.1 release gate
 
 Final full suite (`/tmp/lumina-night-091-release-tests.log`): **95 tests, 93 passed, two skipped, zero failures**. JavaScript checks, local Python AST checks and diff whitespace checks passed. Final packaged AppImage smoke passed with an empty startup log and a rendered window. Checksums prepared under `/tmp/lumina-overnight/release-091`. Publishing this bounded verified patch; live-account/production-quality acceptance remains explicitly pending.
+
+### Published checkpoint
+
+- Code commit **771dc6e** pushed to public main.
+- Release **v0.9.1** published: https://github.com/everett6/lumina-studio-app/releases/tag/v0.9.1
+- GitHub reports all three assets uploaded. Published AppImage/deb SHA256 digests match locally generated `SHA256SUMS.txt`.
+- `~/Applications/Lumina-Studio.AppImage` updated atomically to the verified build. Running user instances were not interrupted; the next launch uses v0.9.1.
+- Overnight heartbeat remains active for outstanding acceptance work. Next useful tasks: self-contained packaged MCP entry, broader local reference/interpolation comparisons and failure recovery. Signed-in web/provider checks remain unavailable without credentials/login; do not fabricate success. Stop/disable the heartbeat on actual completion or at 14:08:24 UTC.
