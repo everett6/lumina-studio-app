@@ -52,3 +52,5 @@ First scheduled review launch occurred at 06:39 UTC. All three Sonnet 5.5 sessio
 Second heartbeat: GPU contention and frame-clock defects fixed; shutdown/restart and mixed-rate/cut tests added. Version 0.9.1 packaged and smoke-tested in a temporary profile. Final regression/release verification in progress; live cloud/web-client and broader motion-quality acceptance remain pending.
 
 Third/fourth heartbeat: v0.9.2 candidate adds packaged stdio MCP, bounded visual inspection and safe fresh-install budgets. Held-out local interpolation comparison saved; it shows measurable gains and individual failures, not perfect accuracy. Full 50-step/49-frame local anime pilot is running with a 20-minute timeout. Live provider/web login acceptance remains unavailable; paid generation stays unused.
+
+Published checkpoint: v0.9.2 / 2abf82b, 98 tests (96 passed, two skipped), actual packaged MCP/default-startup checks passed, checksummed release installed for next launch. Main remaining independent work is the full-step pilot and finishing/QC; no live provider credit balance has been fabricated or spending limits reset.

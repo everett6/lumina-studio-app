@@ -22,11 +22,11 @@ Sources:
 
 ## Pending
 
-1. Read-only credit service/API/MCP tool and conservative preflight integration.
-2. Move AI upscaling to the completed film, preserving per-shot interpolation and exact soundtrack timing.
-3. Launch scheduled Sonnet reviewers once; integrate their findings.
-4. Real Wan/audio/interpolation comparisons, rigorous regressions and runtime failure tests.
-5. README/log updates, build/smoke test, push, and stop workers.
+1. Finish and inspect the running 50-step/49-frame local anime pilot; run interpolation/audio/whole-film finishing on it only after successful completion.
+2. Broader motion/occlusion/drift assessment; keep originals and avoid claiming ground truth or perfection.
+3. Live signed-in ChatGPT/claude.ai and bounded paid cloud acceptance remain unavailable. No paid tests until cost and credits can be bounded.
+4. Sonnet reviews remain auth-blocked after the single scheduled launch; workers have exited, no duplicates or model substitutions.
+5. Keep verification evidence current and stop/disable the heartbeat on actual completion or at 14:08:24 UTC. Published/install checkpoints are recorded below.
 
 Append evidence and decisions as work progresses. Do not turn earlier “planned” checks into “passed” claims without command output/artifacts.
 
@@ -106,3 +106,7 @@ Final full suite (`/tmp/lumina-night-091-release-tests.log`): **95 tests, 93 pas
 ### v0.9.2 release gate
 
 Final full suite with the actual packaged AppImage configured: **98 tests, 96 passed, two skipped, zero failures** (`/tmp/lumina-overnight/092-release-tests.log`). Both packaged-MCP tests passed, including a fresh desktop app with strict budget defaults and rendered startup. JavaScript and whitespace checks passed. This release gate covers packaged MCP/inspection/defaults; the 50-step pilot is still running and is not counted as passed evidence.
+
+### Published v0.9.2 checkpoint
+
+Commit **2abf82b** pushed to public main. Release https://github.com/everett6/lumina-studio-app/releases/tag/v0.9.2 published with AppImage, .deb and checksums. GitHub asset SHA256 digests match the locally built artifacts. Installed `~/Applications/Lumina-Studio.AppImage` updated atomically; existing running user instances not interrupted. Runtime upgrade/new tools require restart. The 50-step pilot has reached inference step 50 but decode/save completion is still pending at this checkpoint; do not count it as passed.
