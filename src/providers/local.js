@@ -93,6 +93,12 @@ const snapshotHas = (repo, files, dir = hubDir()) => {
 export const voiceInstalled = (engine) => Boolean(voicePython()) && (engine === 'chatterbox'
   ? snapshotHas(chatterboxRepo, ['ve.safetensors', 't3_cfg.safetensors', 's3gen.safetensors', 'tokenizer.json', 'conds.pt']) && snapshotHas(kokoroRepo, ['onnx/model.onnx'])
   : snapshotHas(kokoroRepo, ['onnx/model.onnx', 'voices/af_heart.bin']));
+export function voiceUnavailableNote(engine) {
+  if (!voicePython()) return 'The local voice environment is missing. Set LUMINA_VOICE_PYTHON to its Python executable or install the Lumina voice environment.';
+  if (!snapshotHas(kokoroRepo, ['onnx/model.onnx', 'voices/af_heart.bin'])) return 'Kokoro is not downloaded. Install the local voice model files (see docs: Local voices).';
+  if (engine === 'chatterbox' && !snapshotHas(chatterboxRepo, ['ve.safetensors', 't3_cfg.safetensors', 's3gen.safetensors', 'tokenizer.json', 'conds.pt'])) return 'Chatterbox is not downloaded. Install the local voice model files (see docs: Local voices).';
+  return null;
+}
 // Kokoro's preset voices: the first letter is the accent (a American, b British, j Japanese, z Mandarin, ...), the
 // second the voice (f female, m male).
 const kokoroVoices = ['af_heart', 'af_bella', 'af_nicole', 'af_aoede', 'af_kore', 'af_sarah', 'af_nova', 'af_sky', 'af_alloy', 'af_jessica', 'af_river',
@@ -303,7 +309,7 @@ export default {
   // Speech: Kokoro preset voices, or Chatterbox acting the line in that voice. Returns WAV.
   async speak({ model, text, voice, style }) {
     const engine = model === 'chatterbox' ? 'chatterbox' : 'kokoro';
-    if (!voiceInstalled(engine)) throw new ProviderError('provider', 'The local voice models are not set up yet (see docs: Local voices).');
+    if (!voiceInstalled(engine)) throw new ProviderError('provider', voiceUnavailableNote(engine));
     return inTemp(async (dir) => {
       const out = path.join(dir, 'line.wav');
       await gpu('voice', { task: 'speech', engine, text, voice, style, out }, null, { exclusive: engine === 'chatterbox' });

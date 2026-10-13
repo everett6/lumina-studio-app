@@ -83,3 +83,20 @@ A held-out test on an existing local generated Wan clip reconstructed 59 omitted
 A real 49-frame/50-step Wan anime pilot at 1280×704/24 fps completed on the RTX 5070 in about 7.25 minutes, with no OOM notice in its captured log. Fresh Kokoro speech, RIFE, native-size assembly, soundtrack and completed-film anime upscale produced 1920×1080/30 fps, 60 frames, 2.005 seconds, with monotonic decode timestamps and audio peak -3.1 dB. The sampled coat/silhouette/background were visually coherent. This single short shot does not establish face consistency, challenging occlusion behavior, production-scale runtime, or live cloud interoperability.
 
 Finishing now measures recorded dialogue directly and pauses on overrun instead of truncating it. Audio and source clips remain available. Shorten/re-record speech or extend the shot before resuming. This fixes a reproduced 5.5-second line being silently cut into a four-second film.
+
+## Local voices
+
+Two open-weight voice models run on this computer, free and offline:
+
+- **Kokoro 82M** (Apache 2.0): 33 preset voices (American, British, Japanese), on the CPU, faster than real time.
+- **Chatterbox** (MIT): acts the line in the chosen voice on the GPU (about 3.5 GB); the line's style text sets the intensity (for example "furious" or "calm"). It adds Resemble AI's inaudible watermark marking the audio as AI-made.
+
+Set them up once (about 3.6 GB of model files from Hugging Face, plus Python packages; no sudo):
+
+```bash
+scripts/setup-voices.sh
+```
+
+They get their own Python environment in `~/.local/share/lumina-studio/voice-env`, sharing your existing PyTorch, so the video models' packages are never replaced. Restart Lumina; the voices appear under **Local GPU** in every voice menu (characters, narrator, Create → Voice). If the environment lives elsewhere, set `LUMINA_VOICE_PYTHON` to its Python.
+
+Verified 2026-10-13 on the RTX 5070: a fresh environment built by the script spoke with both engines, and a two-shot storyboard with a Chatterbox character, a Kokoro character and a Kokoro narrator joined into an 11-second film whose Whisper transcript matched every line, in the right shot.

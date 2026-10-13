@@ -168,8 +168,7 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
   // Items: { file, duration, trimStart, vf } — `vf` is an optional filter (e.g. a colour match) applied first.
   const items = clips.map((clip) => (typeof clip === 'string' ? { file: clip } : clip));
   const files = items.map((item) => item.file);
-  const infos = [];
-  for (const file of files) infos.push(await probe(file));
+  const infos = await Promise.all(files.map((file) => probe(file)));
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
   const [width, height] = size ? [even(size.width), even(size.height)] : [even(infos[0].width), even(infos[0].height)];
   const rate = fps ?? filmFps(infos.map((info) => info.fps));

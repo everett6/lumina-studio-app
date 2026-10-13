@@ -495,7 +495,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     try {
       // The voice track, placed in the shot exactly as the film's soundtrack will place it.
       const lengths = [];
-      for (const line of lines) lengths.push(line.seconds ?? await mediaSeconds(assetStore.path(asset(line.assetId))));
+      lengths.push(...await Promise.all(lines.map((line) => mediaSeconds(assetStore.path(asset(line.assetId))))));
       const { times } = lineTimes(lines, duration, lengths);
       const voice = path.join(dir, 'voice.wav');
       await run('ffmpeg', ['-v', 'error', ...lines.flatMap((line) => ['-i', assetStore.path(asset(line.assetId))]),
@@ -688,13 +688,12 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         const lines = [];
         for (const item of items) {
           const shotLines = (item.shot.details.dialogue ?? []).filter((line) => line.assetId);
-          const lengths = [];
           for (const line of shotLines) {
-            const recording = asset(line.assetId);
-            if (!recording) throw new Error(`Shot ${item.shot.position} has a deleted dialogue recording.`);
-            lengths.push(await mediaSeconds(assetStore.path(recording)));
+            if (!asset(line.assetId)) throw new Error(`Shot ${item.shot.position} has a deleted dialogue recording.`);
           }
-          const { times, overrun } = lineTimes(shotLines, item.duration ?? 0, lengths);
+          // Measured from the files every time (a cached length can still belong to the previous take), all at once.
+          const measured = await Promise.all(shotLines.map((line) => mediaSeconds(assetStore.path(asset(line.assetId)))));
+          const { times, overrun } = lineTimes(shotLines, item.duration ?? 0, measured);
           if (overrun > 1 / 48000) throw new Error(`Shot ${item.shot.position}: recorded dialogue exceeds the shot by ${overrun.toFixed(2)} seconds. Shorten the speech or extend the shot before finishing; original audio is retained.`);
           shotLines.forEach((line, i) => {
             const audio = asset(line.assetId);
@@ -929,7 +928,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         // Only keep the audio if the line still says what was recorded.
         if (line && line.text === generation.prompt) {
           const audio = asset(generation.assetId);
-          dialogue[index] = { ...line, assetId: generation.assetId };
+          dialogue[index] = { ...line, assetId: generation.assetId, seconds: null }; // measured just below
           repo.shots.update(id, { details: { ...shot.details, dialogue } });
           if (audio) {
             track(mediaSeconds(assetStore.path(audio)).catch(() => null).then((seconds) => {

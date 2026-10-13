@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { modelInstalled } from '../src/providers/local.js';
+import { modelInstalled, voiceUnavailableNote } from '../src/providers/local.js';
 import { startTestApp, tempRoot } from './helpers.js';
 
 test('local GPU provider: ready only when every model file is in the cache; listed as free', async () => {
@@ -36,6 +36,16 @@ test('local GPU provider: ready only when every model file is in the cache; list
   } finally {
     if (previous === undefined) delete process.env.HF_HUB_CACHE; else process.env.HF_HUB_CACHE = previous;
     await t.close();
+  }
+});
+
+test('local voice errors distinguish a missing voice environment from missing model files', () => {
+  const previous = process.env.LUMINA_VOICE_PYTHON;
+  process.env.LUMINA_VOICE_PYTHON = path.join(tempRoot(), 'missing-python');
+  try {
+    assert.match(voiceUnavailableNote('kokoro'), /voice environment is missing/i);
+  } finally {
+    if (previous === undefined) delete process.env.LUMINA_VOICE_PYTHON; else process.env.LUMINA_VOICE_PYTHON = previous;
   }
 });
 
