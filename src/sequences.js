@@ -122,6 +122,32 @@ export function themeCoverage(themes = [], shots = []) {
   return { where, missing: names.filter((name) => !where[name].length) };
 }
 
+// A shot's own look ("make shot 3 darker"), applied when the film is joined. Neutral values are dropped.
+const gradeLimits = { brightness: [-0.3, 0.3, 0], contrast: [0.5, 1.5, 1], saturation: [0, 2, 1], warmth: [-1, 1, 0] };
+export function cleanGrade(input = {}) {
+  const grade = {};
+  for (const [key, [min, max, neutral]] of Object.entries(gradeLimits)) {
+    const value = Number(input[key]);
+    if (input[key] == null || !Number.isFinite(value)) continue;
+    const clamped = Math.round(Math.min(max, Math.max(min, value)) * 1000) / 1000;
+    if (clamped !== neutral) grade[key] = clamped;
+  }
+  return Object.keys(grade).length ? grade : null;
+}
+// The ffmpeg filter for a grade: eq for brightness/contrast/saturation, colour balance for warmth.
+export function gradeFilter(grade) {
+  if (!grade) return '';
+  const parts = [];
+  const { brightness = 0, contrast = 1, saturation = 1, warmth = 0 } = grade;
+  if (brightness || contrast !== 1 || saturation !== 1) parts.push(`eq=brightness=${brightness}:contrast=${contrast}:saturation=${saturation}`);
+  if (warmth) {
+    const w = (warmth * 0.15).toFixed(3);
+    const c = (-warmth * 0.15).toFixed(3);
+    parts.push(`colorbalance=rs=${w}:rm=${w}:bs=${c}:bm=${c}`);
+  }
+  return parts.join(',');
+}
+
 export function cleanShotDetails(input = {}, base = {}) {
   const str = (key, max) => (typeof input[key] === 'string' ? input[key].slice(0, max) : base[key] ?? '');
   const ids = (key, max) => (Array.isArray(input[key]) ? [...new Set(input[key].filter((id) => typeof id === 'string'))].slice(0, max) : base[key] ?? []);
@@ -150,6 +176,7 @@ export function cleanShotDetails(input = {}, base = {}) {
     trimStart: Math.min(10, Math.max(0, Number(input.trimStart ?? base.trimStart ?? 0) || 0)),
     muteClipSound: typeof input.muteClipSound === 'boolean' ? input.muteClipSound : base.muteClipSound ?? false,
     locked: typeof input.locked === 'boolean' ? input.locked : base.locked ?? false,
+    grade: input.grade === null ? null : input.grade && typeof input.grade === 'object' ? cleanGrade(input.grade) : base.grade ? cleanGrade(base.grade) : null,
     post: base.post ?? {}, // cached derived clips (upscaled / interpolated), keyed by source and settings
     lipsync: base.lipsync ?? null, // { source, result, mode, box } once the clip has been lip-synced
   };
@@ -157,7 +184,7 @@ export function cleanShotDetails(input = {}, base = {}) {
 
 // Storyboards: an idea (or a screenplay) becomes a shot list, each shot gets an approved still frame and then a
 // clip (or a free still shot), and the clips, dialogue and music become one finished film.
-export function createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, budget = null, faces = null, log = console }) {
+export function createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, budget = null, faces = null, log = console, progressOf = () => null }) {
   const joining = new Map(); // storyboard id -> { state, done, total, error }
   const pending = new Set(); // background checks and probes, awaited on shutdown
   const track = (promise) => {
@@ -177,7 +204,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
 
   function latest(target) {
     const g = repo.generations.listByTarget(target)[0];
-    return g ? { id: g.id, status: g.status, error: g.userError ?? null, billing: g.billing ?? null } : null;
+    return g ? { id: g.id, status: g.status, error: g.userError ?? null, billing: g.billing ?? null, provider: g.provider, progress: g.status === 'running' ? progressOf(g.id) : null } : null;
   }
 
   function detail(id) {
@@ -676,6 +703,11 @@ export function createSequenceService({ repo, directors, keys, generations, asse
             const anchor = anchors.get(group);
             if (anchor !== undefined && anchor !== i && stats[i]) item.vf = curveFilter(matchCurve(stats[i], stats[anchor])) || undefined;
           });
+        }
+        // The shot's own look goes on top of the match, so "darker" stays darker than its neighbours.
+        for (const item of items) {
+          const look = gradeFilter(item.shot.details.grade);
+          if (look) item.vf = item.vf ? `${item.vf},${look}` : look;
         }
         // 3. The picture: exact lengths, crossfades, near-lossless.
         state.step = 'Joining the shots';

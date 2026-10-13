@@ -14,6 +14,9 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
   const events = new EventEmitter();
   events.setMaxListeners(0);
   let active = 0;
+  // Live progress of running jobs (in memory only): id → { done, total, startedAt }. Cancellers stop running work.
+  const progress = new Map();
+  const cancellers = new Map();
 
   function pump() {
     while (active < concurrency && queue.length) {
@@ -31,6 +34,8 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     const job = repo.generations.get(id);
     if (!job || job.status !== 'queued') return;
     const started = Date.now();
+    const abort = new AbortController();
+    progress.set(id, { done: 0, total: 0, startedAt: new Date(started).toISOString() });
     repo.generations.update(id, { status: 'running', startedAt: new Date().toISOString() });
     events.emit('update', repo.generations.get(id));
     try {
@@ -57,6 +62,16 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         images.push(await assetStore.read(asset));
       }
       const key = provider.keyless ? null : keys.get(provider.id);
+      // Only providers that run on this computer can be stopped mid-job; paid jobs keep running once submitted.
+      if (provider.cancellable) cancellers.set(id, () => abort.abort());
+      const onProgress = (done, total) => {
+        if (Number.isFinite(done) && Number.isFinite(total) && total > 0) progress.set(id, { ...progress.get(id), done, total });
+      };
+      const signal = abort.signal;
+      const cancelled = () => {
+        if (signal.aborted) throw Object.assign(new Error('Cancelled.'), { category: 'cancelled' });
+      };
+      cancelled();
       if (allowanceKey !== null && key !== allowanceKey) throw Object.assign(new Error('The OpenRouter key changed during preflight. No paid request was submitted; check the new key allowance before retrying.'), { category: 'credit_limit' });
       const { params } = job;
       let output;
@@ -66,22 +81,23 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         if (params.maskAssetId && !maskAsset) throw Object.assign(new Error('The mask was deleted.'), { category: 'invalid_request' });
         output = await provider.tool({
           key, model: job.model, operation: job.operation, image: images[0], prompt, scale: params.scale,
-          mask: maskAsset ? await assetStore.read(maskAsset) : null,
+          mask: maskAsset ? await assetStore.read(maskAsset) : null, onProgress, signal,
         });
       } else if (job.operation === 'speech') {
-        output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style });
+        output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style, onProgress, signal });
       } else if (job.operation === 'video') {
         const endAsset = params.endFrameAssetId ? repo.assets.get(params.endFrameAssetId) : null;
         if (params.endFrameAssetId && !endAsset) throw Object.assign(new Error('The end frame was deleted.'), { category: 'invalid_request' });
         output = await provider.video({
           key, model: job.model, prompt, image: images[0] ?? null, endImage: endAsset ? await assetStore.read(endAsset) : null, seed: params.seed,
           duration: params.duration, aspect: params.aspect, resolution: params.resolution,
-          resumeJob: job.providerJob ?? null,
+          resumeJob: job.providerJob ?? null, onProgress, signal,
           onSubmitted: (info) => repo.generations.update(id, { providerJob: { ...info, submittedAt: new Date().toISOString() } }),
         });
       } else {
-        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed });
+        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, onProgress, signal });
       }
+      cancelled();
       const asset = await assetStore.save({
         bytes: output.bytes, projectId: job.projectId, kind: 'generation', generationId: id, parentAssetId: job.inputAssetIds[0] ?? null,
       });
@@ -91,7 +107,8 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       });
       const ledger = budget?.settle(job, { outcome: 'completed', usage: output.usage });
       if (ledger) repo.generations.update(id, { billing: 'charged' });
-    } catch (error) {
+    } catch (caught) {
+      const error = abort.signal.aborted ? Object.assign(new Error('Cancelled.'), { category: 'cancelled' }) : caught;
       const category = error.category || 'provider';
       log.error?.('Generation failed', { id, provider: job.provider, category, detail: error.detail ?? error.message });
       // A project deleted mid-job cascades the row away; nothing left to update.
@@ -99,21 +116,55 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         // Was this billed? A refusal before any provider job existed was not; anything after the provider
         // accepted the job, or a lost connection, may have been.
         const submitted = Boolean(repo.generations.get(id).providerJob);
-        const outcome = !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
+        const outcome = category === 'cancelled' && !submitted ? 'refused' : !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
         const ledger = budget?.settle(job, { outcome, usage: error.usage });
         repo.generations.update(id, {
-          status: 'failed', errorCategory: category, userError: ['credit_limit', 'budget_limit'].includes(category) ? error.message : error.category ? userMessage(error) : error.message,
+          status: 'failed', errorCategory: category, userError: ['credit_limit', 'budget_limit', 'cancelled'].includes(category) ? error.message : error.category ? userMessage(error) : error.message,
           completedAt: new Date().toISOString(), durationMs: Date.now() - started,
           billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : null,
         });
       }
     }
+    progress.delete(id);
+    cancellers.delete(id);
     const final = repo.generations.get(id);
     if (final) events.emit('update', final);
   }
 
+  // Percent done and a straight-line ETA from the steps finished so far.
+  function progressOf(id) {
+    const p = progress.get(id);
+    if (!p) return null;
+    const fraction = p.total ? Math.min(1, p.done / p.total) : 0;
+    const elapsed = (Date.now() - Date.parse(p.startedAt)) / 1000;
+    return { done: p.done, total: p.total, fraction: Math.round(fraction * 1000) / 1000, startedAt: p.startedAt,
+      etaSeconds: fraction > 0 && fraction < 1 ? Math.round(elapsed * (1 - fraction) / fraction) : null };
+  }
+
   return {
     events,
+    progress: progressOf,
+    // Stop a job: a queued one never starts (any provider); a running one only when it runs on this computer.
+    cancel(id) {
+      const job = repo.generations.get(id);
+      if (!job) return { ok: false, status: 404, reason: 'Generation not found.' };
+      if (job.status === 'queued') {
+        const at = queue.indexOf(id);
+        if (at >= 0) queue.splice(at, 1);
+        const ledger = budget?.settle(job, { outcome: 'refused' });
+        repo.generations.update(id, { status: 'failed', errorCategory: 'cancelled', userError: 'Cancelled before it started.', completedAt: new Date().toISOString(),
+          billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : job.billing });
+        const final = repo.generations.get(id);
+        events.emit('update', final);
+        if (active === 0 && queue.length === 0) events.emit('idle');
+        return { ok: true, generation: final };
+      }
+      if (job.status !== 'running') return { ok: false, status: 409, reason: `This job already ${job.status === 'completed' ? 'finished' : 'stopped'}.` };
+      const stop = cancellers.get(id);
+      if (!stop) return { ok: false, status: 409, reason: job.providerJob ? 'This job was already sent to a paid provider and keeps running there; it cannot be cancelled (it may still be charged).' : 'This job cannot be stopped while it runs; only jobs on this computer can.' };
+      stop();
+      return { ok: true, generation: repo.generations.get(id) };
+    },
     enqueue(id) {
       queue.push(id);
       pump();

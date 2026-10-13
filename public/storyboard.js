@@ -55,7 +55,7 @@ function watch() {
   if (!joiningNow && Date.now() > ui.pollUntil && !ui.detail?.shots.some((s) => jobActive(s.frameJob) || jobActive(s.clipJob))) return;
   ui.timer = setTimeout(guard(async () => {
     if (!ui.detail || $('#storyboard-view').classList.contains('hidden')) return;
-    const snapshot = (d) => JSON.stringify([d.sequence.join, d.sequence.production, d.sequence.enhance, d.sequence.outputPath, d.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.imagePath, s.videoPath, s.review?.status, s.review?.checkedAt, s.details?.dialogue?.map((l) => l.assetId)])]);
+    const snapshot = (d) => JSON.stringify([d.sequence.join, d.sequence.production, d.sequence.enhance, d.sequence.outputPath, d.shots.map((s) => [s.frameJob?.status, s.clipJob?.status, s.frameJob?.progress?.done, s.clipJob?.progress?.done, s.imagePath, s.videoPath, s.review?.status, s.review?.checkedAt, s.details?.dialogue?.map((l) => l.assetId)])]);
     const before = snapshot(ui.detail);
     const next = await call(`/api/storyboards/${ui.detail.sequence.id}`, 'GET');
     const after = snapshot(next);
@@ -295,9 +295,26 @@ async function work(key, fn) {
   }
 }
 
+// Queued jobs, and running jobs on this computer, can be stopped; paid jobs keep running once sent.
+const canCancel = (job) => job.status === 'queued' || (job.status === 'running' && ['local', 'mock'].includes(job.provider));
+async function cancelJob(job) {
+  try {
+    await call(`/api/generations/${job.id}/cancel`);
+    toast('Cancelled.');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+  ui.pollUntil = Date.now() + 5000;
+  watch();
+}
+
 function jobBadge(job, label) {
   if (!job || job.status === 'completed') return null;
-  return h('span.badge', { dataset: { tone: jobActive(job) ? 'busy' : 'error' }, title: job.error ?? '' }, `${label}: ${statusText[job.status] ?? job.status}`);
+  const percent = job.progress?.total ? ` ${Math.round(job.progress.fraction * 100)}%${job.progress.etaSeconds != null ? ` · ${clock(job.progress.etaSeconds)} left` : ''}` : '';
+  const badge = h('span.badge', { dataset: { tone: jobActive(job) ? 'busy' : job.error === 'Cancelled.' || job.error === 'Cancelled before it started.' ? '' : 'error' }, title: job.error ?? '' },
+    `${label}: ${statusText[job.status] ?? job.status}${job.status === 'running' ? percent : ''}`);
+  if (!jobActive(job) || !canCancel(job)) return badge;
+  return h('span', {}, badge, ' ', h('button.button.ghost.small', { title: 'Stop this job', onclick: () => cancelJob(job) }, 'Cancel'));
 }
 
 // A shot's continuity details: who and where, the action, the words, how it starts and ends, what must not change.

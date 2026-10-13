@@ -54,9 +54,67 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `interpolate_video` | Rebuild in-between frames with RIFE on the GPU so a video plays at a chosen frame rate (e.g. 12 → 24 fps, or 24 → 60). RIFE is installed from the app (Storyboard → Picture quality → Smooth). |
 | `join_storyboard` | Join the clips into one MP4 in the background and wait up to 8 minutes for it (needs ffmpeg on the computer running Lumina). |
 | `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. `fixedLayout: true` makes a fixed-layout EPUB for a picture book. |
+| `film_next_step` | Guided film making: looks at a storyboard and proposes the one next stage (plan, frames, approve frames, animate, review, voices, fix, join, done) with a plain question and `choices`, each an exact tool call to make once the user agrees. Includes preview images. Free; never changes anything itself. |
+| `film_checklist` | Text checklist of what is left per shot (frame, clip, review, voices, dialogue overrun) plus the cost estimate for what is missing. Free. |
+| `preview_shot` | One shot as a person would see it: summary, frame, a six-frame contact sheet of its clip and each recorded dialogue line as audio. Free, read-only. |
+| `preview_storyboard` | Status of every shot plus one numbered contact sheet: `kind` `frames` (default) or `clips` (middle frame of each clip). Free, read-only. |
+| `watch_jobs` | Queued and running jobs of a project with percent done and time left. `waitSeconds` (up to 60) waits and returns when a job starts, finishes or advances. Free, read-only. |
+| `cancel_job` | Cancel a queued job (any provider) or a running local-model job. A paid job already sent to a provider cannot be stopped and is still billed. |
+| `plan_storyboard` | Have the storyboard's writer model plan its shots (a small writer cost; refused under a strict budget, where you write the list and use `import_shot_plan`). `replace: true` discards existing shots. |
+| `adjust_shot_look` | Colour-grade one shot (`brightness`, `contrast`, `saturation`, `warmth`, or `reset: true`). Free; applied when the film is joined. |
+| `move_shot` | Move a shot to another position (1 = first); the others shift. Rejoin afterwards. |
+| `trim_shot` | Skip the start of a shot's clip (`trimStart`, 0-10 s) and/or change its length (`duration`, 1-30 whole seconds). The clip is not regenerated. Free. |
+| `set_character_voice` | Set a character's speech model and voice. New dialogue uses it; lines already recorded keep the old voice. `revoice: true` queues the character's unrecorded lines now (a little per line). |
 
 Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft
 the bible and pages, show me the text, then illustrate page 1."*
+
+## Interactive filmmaking in chat
+
+The interactive tools let a chat client walk you through a film one decision at a time, show what was made, and
+change it afterwards. Previews are free and read-only. Anything that spends money still follows your budget and
+approval settings.
+
+Example conversation (the tool calls are what Claude makes for you):
+
+1. *"Continue my storyboard 'Harbor Night'."* Claude calls `film_next_step`. It answers that 3 shots have no frame
+   yet and asks: "Make the still frames now? Estimated cost of everything still missing: $0.12." You say yes, and
+   Claude makes the call listed in the first choice (`generate_storyboard_shots` with `kind: "frames"`).
+2. *"How is it going?"* Claude calls `watch_jobs` with `waitSeconds: 30` and reports the running jobs with percent
+   done and time left, then that nothing is running once they finish.
+3. Claude calls `film_next_step` again. It now shows the frames as a contact sheet and asks whether to approve
+   them. You approve (`review_shot`), then animate (`generate_storyboard_shots` with `kind: "clips"`), and
+   `watch_jobs` follows the clips.
+4. *"Show me shot 2."* Claude calls `preview_shot`: the summary, the frame and a six-frame contact sheet of the clip.
+5. *"Make shot 2 darker."* Claude calls `adjust_shot_look` with `brightness: -0.1`. The reply shows the saved grade
+   and notes that it appears when the film is joined.
+6. *"Looks good, put it together."* Claude calls `join_storyboard`. `film_next_step` then reports the film is done.
+
+Notes:
+
+- `film_next_step` proposes one stage at a time. Its `choices` are suggestions; nothing runs until Claude makes the
+  call after you agree. `film_checklist` gives the whole list at once instead.
+- A colour grade is a shot setting, `details.grade`: `brightness` -0.3 to 0.3, `contrast` 0.5 to 1.5, `saturation`
+  0 to 2, `warmth` -1 to 1 (neutral is 0, 1, 1, 0). It is applied only when the film is joined, so rejoin to see
+  it. Values you send are merged into the shot's current grade.
+- `move_shot` and `trim_shot` also need a rejoin to show up in the film.
+- `cancel_job` works on queued jobs for any provider. A running job can be stopped only if it runs on this
+  computer (local or mock providers). A paid job already sent to a provider cannot be stopped.
+- `set_character_voice` does not change recordings that already exist. To re-record a line, change its text
+  slightly with `update_shot`, then run `voice_dialogue`.
+
+### HTTP routes behind these tools
+
+The tools use the same local API as the app. New or changed routes:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/generations/:id` | Now includes `progress` while the job is running. |
+| `GET /api/projects/:id/active-jobs` | Queued and running jobs of a project, with progress for running ones. |
+| `POST /api/generations/:id/cancel` | Cancel a queued job (any provider) or a running job on this computer (local/mock providers). Otherwise it answers 409, including for a paid job already sent to its provider. |
+| `GET /api/shots/:id` | One shot with its details. |
+| `GET /api/storyboards/:id/contact-sheet?kind=frames` or `clips` | One JPEG with every shot's frame, or the middle frame of each clip. 404 when none exist yet. |
+| `GET /api/shots/:id/contact-sheet` | One JPEG with six timestamped frames of the shot's clip. |
 
 ## Set up
 

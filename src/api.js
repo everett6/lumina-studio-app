@@ -15,7 +15,7 @@ import { userMessage } from './providers/http.js';
 import { cleanSequenceSettings, maxShots, maxTargetSeconds } from './sequences.js';
 import { createSearch } from './search.js';
 import { currentRequest, requestContext } from './context.js';
-import { hasFfmpeg, inspectVideo, stillMotions } from './video.js';
+import { contactSheet, hasFfmpeg, inspectVideo, probe, stillMotions } from './video.js';
 
 const staticTypes = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -182,9 +182,23 @@ export function createApiServer(ctx) {
   });
 
   route('POST', '/api/generate', async (req) => ({ status: 202, body: { generation: generations.submit(await readBody(req, 64 * 1024)) } }));
+  const withProgress = (g) => (g.status === 'running' ? { ...g, progress: jobs.progress(g.id) } : g);
   route('GET', `/api/generations/${uuid}`, (req, [id]) => {
     const found = repo.generations.get(id) ?? (() => { throw new RequestError(404, 'Generation not found.'); })();
-    return { generation: found };
+    return { generation: withProgress(found) };
+  });
+  // What is queued or running in a project right now, with progress (for "watch my jobs" in chat).
+  route('GET', `/api/projects/${uuid}/active-jobs`, (req, [id]) => {
+    if (!repo.projects.get(id)) throw new RequestError(404, 'Project not found.');
+    const jobsNow = repo.generations.listByProject(id, 500).filter((g) => g.status === 'queued' || g.status === 'running').reverse()
+      .map((g) => ({ id: g.id, status: g.status, operation: g.operation, provider: g.provider, model: g.model, prompt: g.prompt?.slice(0, 200) ?? '',
+        bookTarget: g.bookTarget ?? null, createdAt: g.createdAt, progress: g.status === 'running' ? jobs.progress(g.id) : null }));
+    return { jobs: jobsNow };
+  });
+  route('POST', `/api/generations/${uuid}/cancel`, (req, [id]) => {
+    const result = jobs.cancel(id);
+    if (!result.ok) throw new RequestError(result.status, result.reason);
+    return { generation: result.generation };
   });
   route('POST', `/api/generations/${uuid}/wait`, async (req, [id]) => {
     const { timeoutMs } = await readBody(req, 1024);
@@ -560,6 +574,44 @@ export function createApiServer(ctx) {
     const shot = sequences.needShot(id);
     repo.shots.move(id, (await readBody(req, 1024)).direction === 'up' ? -1 : 1);
     return sequences.detail(shot.sequenceId);
+  });
+  route('GET', `/api/shots/${uuid}`, (req, [id]) => {
+    const shot = sequences.needShot(id);
+    const detail = sequences.detail(shot.sequenceId);
+    return { shot: detail.shots.find((s) => s.id === id), sequenceId: shot.sequenceId };
+  });
+  // Contact sheets: one JPEG to show in chat. A storyboard's frames (or each clip's middle frame), or six moments of
+  // one shot's clip.
+  const sheetResponse = (res, bytes) => {
+    res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': bytes.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.end(bytes);
+  };
+  const assetFile = (assetId) => {
+    const found = assetId ? repo.assets.get(assetId) : null;
+    return found ? assetStore.path(found) : null;
+  };
+  route('GET', `/api/storyboards/${uuid}/contact-sheet`, async (req, [id], url, res) => {
+    sequences.needSequence(id);
+    const clips = url.searchParams.get('kind') === 'clips';
+    const tiles = [];
+    for (const shot of sequences.detail(id).shots) {
+      const file = assetFile(clips ? shot.videoAssetId : shot.imageAssetId);
+      if (!file) continue;
+      const time = clips ? Math.max(0, ((await probe(file).catch(() => null))?.duration ?? 0) / 2) : null;
+      tiles.push({ file, time, label: `#${shot.position}` });
+    }
+    if (!tiles.length) throw new RequestError(404, clips ? 'No shot has a clip yet.' : 'No shot has a frame yet.');
+    sheetResponse(res, await contactSheet(tiles, { columns: tiles.length > 9 ? 5 : 4, width: tiles.length > 12 ? 256 : 320 }));
+  });
+  route('GET', `/api/shots/${uuid}/contact-sheet`, async (req, [id], url, res) => {
+    const shot = sequences.needShot(id);
+    const file = assetFile(shot.videoAssetId);
+    if (!file) throw new RequestError(404, 'This shot has no clip yet.');
+    const info = await probe(file).catch(() => null);
+    if (!info?.duration) throw new RequestError(422, 'The clip could not be read.');
+    const last = Math.max(0, info.duration - 1 / (info.fps || 24));
+    const tiles = Array.from({ length: 6 }, (_, i) => ({ file, time: last * i / 5, label: `${(last * i / 5).toFixed(1)}s` }));
+    sheetResponse(res, await contactSheet(tiles, { columns: 3, width: 384 }));
   });
   route('POST', `/api/shots/${uuid}/frame`, async (req, [id]) => ({ status: 202, body: sequences.generateFrame(id, await readBody(req, 4096)) }));
   route('POST', `/api/shots/${uuid}/animate`, async (req, [id]) => ({ status: 202, body: sequences.animate(id, await readBody(req, 4096)) }));

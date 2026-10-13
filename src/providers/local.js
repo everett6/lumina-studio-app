@@ -217,11 +217,20 @@ export async function lipSync({ video, audio, mode, box, mouths, out }) {
 }
 process.once('exit', () => Object.values(workers).forEach((w) => { w.stop().catch(() => {}); }));
 // One GPU job at a time across both models; the other model's worker is stopped first so the GPU is free for it.
-function gpu(name, payload, onProgress, { exclusive = true } = {}) {
+// A cancelled job never starts, or, while it runs, its worker is stopped (the model reloads on the next job).
+function gpu(name, payload, onProgress, { exclusive = true, signal = null } = {}) {
   return gpuQueue.run(async () => {
+    if (signal?.aborted) throw new ProviderError('provider', 'Cancelled.');
     // Await release of the previous model's VRAM before starting another allocation.
     if (exclusive) await Promise.all(Object.entries(workers).filter(([other]) => other !== name).map(([, w]) => w.stop()));
-    return workers[name].request(payload, onProgress);
+    if (signal?.aborted) throw new ProviderError('provider', 'Cancelled.'); // cancelled while other models were unloading
+    const halt = () => { workers[name].stop().catch(() => {}); };
+    signal?.addEventListener('abort', halt, { once: true });
+    try {
+      return await workers[name].request(payload, onProgress);
+    } finally {
+      signal?.removeEventListener('abort', halt);
+    }
   });
 }
 
@@ -253,7 +262,10 @@ const animeSizeFor = (size) => {
   if (!w || !h) return animeSizes['16:9'];
   return w > h * 1.2 ? animeSizes['16:9'] : h > w * 1.2 ? animeSizes['9:16'] : animeSizes['1:1'];
 };
-const log = (label) => (step, total) => { if (step === total || step % 10 === 0) console.info(`[local] ${label} step ${step}/${total}`); };
+const log = (label, onProgress) => (step, total) => {
+  onProgress?.(step, total);
+  if (step === total || step % 10 === 0) console.info(`[local] ${label} step ${step}/${total}`);
+};
 
 export default {
   id: 'local',
@@ -294,30 +306,31 @@ export default {
     return { ok: true, verified: true };
   },
   // A still frame: Animagine XL for anime frames, otherwise Wan generating a single frame.
-  async run({ prompt, size, seed, model }) {
+  cancellable: true,
+  async run({ prompt, size, seed, model, onProgress, signal }) {
     const anime = model === 'animagine-xl-4';
     if (anime && !animeModelInstalled()) throw new ProviderError('provider', `Animagine XL 4.0 is not downloaded yet: hf download ${animeRepo} (7 GB).`);
     if (!anime && !modelInstalled()) throw new ProviderError('provider', `Wan 2.2 is not downloaded yet: hf download ${repoId} (34 GB).`);
     const [width, height] = anime ? animeSizeFor(size) : sizeFor(size);
     return inTemp(async (dir) => {
       const out = path.join(dir, 'frame.png');
-      if (anime) await gpu('anime', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 28, out }, log('anime frame'));
-      else await gpu('wan', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 40, out }, log('frame'));
+      if (anime) await gpu('anime', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 28, out }, log('anime frame', onProgress), { signal });
+      else await gpu('wan', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 40, out }, log('frame', onProgress), { signal });
       return { bytes: await readFile(out), usage: { local: true, cost: 0 } };
     });
   },
   // Speech: Kokoro preset voices, or Chatterbox acting the line in that voice. Returns WAV.
-  async speak({ model, text, voice, style }) {
+  async speak({ model, text, voice, style, signal }) {
     const engine = model === 'chatterbox' ? 'chatterbox' : 'kokoro';
     if (!voiceInstalled(engine)) throw new ProviderError('provider', voiceUnavailableNote(engine));
     return inTemp(async (dir) => {
       const out = path.join(dir, 'line.wav');
-      await gpu('voice', { task: 'speech', engine, text, voice, style, out }, null, { exclusive: engine === 'chatterbox' });
+      await gpu('voice', { task: 'speech', engine, text, voice, style, out }, null, { exclusive: engine === 'chatterbox', signal });
       return { bytes: await readFile(out), usage: { local: true, characters: text.length, cost: 0 } };
     });
   },
   // A clip: image-to-video from the start frame when given, otherwise text-to-video.
-  async video({ prompt, image, duration, aspect, seed }) {
+  async video({ prompt, image, duration, aspect, seed, onProgress, signal }) {
     const [width, height] = sizeFor(null, aspect);
     const seconds = Math.min(5, Math.max(1, Math.round(Number(duration) || 5)));
     return inTemp(async (dir) => {
@@ -328,7 +341,7 @@ export default {
       }
       const out = path.join(dir, 'clip.mp4');
       if (!modelInstalled()) throw new ProviderError('provider', `Wan 2.2 is not downloaded yet: hf download ${repoId} (34 GB).`);
-      await gpu('wan', { task: 'video', prompt, image: imagePath, width, height, frames: seconds * fps + 1, fps, seed: seed ?? 0, steps: 50, out }, log('clip'));
+      await gpu('wan', { task: 'video', prompt, image: imagePath, width, height, frames: seconds * fps + 1, fps, seed: seed ?? 0, steps: 50, out }, log('clip', onProgress), { signal });
       return { bytes: await readFile(out), usage: { local: true, cost: 0 } };
     });
   },

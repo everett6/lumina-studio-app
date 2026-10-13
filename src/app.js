@@ -51,7 +51,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const books = createBookService({ repo, directors, keys, generations, providers, assetStore });
   const enhancer = createEnhancer({ binDir: path.join(dataRoot, 'bin'), workDir: path.join(dataRoot, 'tmp'), log });
   const faces = createFaceChecker({ binDir: path.join(dataRoot, 'bin'), log });
-  const sequences = createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, budget, faces, log });
+  const sequences = createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, budget, faces, log, progressOf: (id) => jobs.progress(id) });
   jobs.events.on('update', books.onGenerationUpdate);
   jobs.events.on('update', sequences.onGenerationUpdate);
   const tokenFile = path.join(dataDir, 'api-token');

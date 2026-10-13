@@ -318,3 +318,38 @@ export async function inspectVideo(file, times = null) {
   }
   return { metadata: info, frames, note: 'Sampled frames support visual review. They cannot prove motion accuracy, audio sync or absence of drift between samples.' };
 }
+
+// A font for labels on contact sheets, when the system has one (labels are skipped otherwise).
+let labelFont;
+async function findLabelFont() {
+  if (labelFont !== undefined) return labelFont;
+  labelFont = await new Promise((resolve) => execFile('fc-match', ['-f', '%{file}', 'DejaVu Sans:bold'], { timeout: 5000 },
+    (error, stdout) => resolve(!error && /\.(ttf|otf)$/i.test(stdout.trim()) ? stdout.trim() : null)));
+  return labelFont;
+}
+
+// One JPEG grid of pictures for chat previews: each tile is an image, or a video frame at `time`, with a short label.
+export async function contactSheet(tiles, { columns = 4, width = 384 } = {}) {
+  if (!tiles.length) throw Object.assign(new Error('Nothing to show yet.'), { status: 404 });
+  const height = Math.round(width * 9 / 16 / 2) * 2;
+  const font = await findLabelFont();
+  const dir = await mkdtemp(path.join(tmpdir(), 'lumina-sheet-'));
+  try {
+    await Promise.all(tiles.map(async (tile, index) => {
+      const label = String(tile.label ?? '').replace(/[^\w .#/-]/g, '').slice(0, 40);
+      const text = font && label ? `,drawtext=fontfile=${font}:text='${label}':x=8:y=8:fontsize=${Math.round(height / 8)}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=6` : '';
+      const seek = tile.time != null ? ['-ss', String(Math.max(0, tile.time))] : [];
+      await run('ffmpeg', ['-v', 'error', '-y', ...seek, '-i', tile.file, '-frames:v', '1', '-threads', '1',
+        '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=0x111111${text}`,
+        path.join(dir, `tile_${String(index).padStart(3, '0')}.png`)], 30_000);
+    }));
+    const cols = Math.min(columns, tiles.length);
+    const rows = Math.ceil(tiles.length / cols);
+    const out = path.join(dir, 'sheet.jpg');
+    await run('ffmpeg', ['-v', 'error', '-y', '-framerate', '1', '-i', path.join(dir, 'tile_%03d.png'),
+      '-vf', `tile=${cols}x${rows}:padding=4:margin=4:color=0x111111`, '-frames:v', '1', '-q:v', '4', out], 60_000);
+    return await readFile(out);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}

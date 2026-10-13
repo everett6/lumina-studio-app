@@ -61,9 +61,16 @@ export default {
   async validateKey() {
     return { ok: true, verified: true };
   },
-  async run({ prompt, size, images }) {
+  // Renders on this computer, so a running job can be stopped; frames report progress in four steps.
+  cancellable: true,
+  async run({ prompt, size, images, onProgress, signal }) {
     if (prompt.includes('[fail]')) throw new ProviderError('policy', 'Mock failure requested');
-    await sleep(Number(process.env.LUMINA_MOCK_DELAY_MS ?? 300));
+    const delay = Number(process.env.LUMINA_MOCK_DELAY_MS ?? 300);
+    for (let step = 1; step <= 4; step += 1) {
+      await sleep(delay / 4);
+      if (signal?.aborted) throw new ProviderError('provider', 'Cancelled.');
+      onProgress?.(step, 4);
+    }
     const seed = createHash('sha256').update(`${prompt}|${images.length}`).digest();
     const [w, h] = size.split('x').map((n) => Math.round(Number(n) / 4));
     return { bytes: gradient(seed, w, h), usage: { mock: true } };

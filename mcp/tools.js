@@ -4,6 +4,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { nextStep, shotFacts } from './wizard.js';
 
 const maxInlineImageBytes = 3 * 1024 * 1024;
 
@@ -737,6 +738,237 @@ export function registerLuminaTools(server, client) {
       Number(response.headers.get('x-lumina-missing-narration') ?? 0) ? `${response.headers.get('x-lumina-missing-narration')} item(s) without narration were skipped.` : '',
     ].filter(Boolean);
     return ok(text({ savedOnUsersComputer: target, format, notes: notes.length ? notes : undefined }));
+  }));
+
+  // ---------- Interactive tools: previews, step-by-step wizard, progress, edit-by-chat ----------
+  const maxInlineAudioBytes = 2 * 1024 * 1024;
+  const audioTypes = { wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', ogg: 'audio/ogg', flac: 'audio/flac' };
+
+  // The whole storyboard a shot belongs to (read-only).
+  const storyboardOfShot = async (shotId) => client.call('GET', `/api/storyboards/${(await client.call('GET', `/api/shots/${shotId}`)).sequenceId}`);
+  const shotIn = (detail, shotId) => detail.shots.find((s) => s.id === shotId);
+
+  async function mediaFrom(route, kind, label) {
+    const response = await client.fetchRaw(route);
+    if (!response.ok) return { note: `${label}: not available (HTTP ${response.status}).` };
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const limit = kind === 'audio' ? maxInlineAudioBytes : maxInlineImageBytes;
+    if (bytes.length > limit) return { note: `${label}: skipped, ${(bytes.length / 1048576).toFixed(1)} MB is too large to show inline.` };
+    const header = response.headers.get('content-type')?.split(';')[0];
+    const mimeType = header && header !== 'application/octet-stream' ? header : (kind === 'audio' ? audioTypes[route.split('?')[0].split('.').pop().toLowerCase()] ?? 'audio/wav' : 'image/png');
+    return { content: { type: kind, mimeType, data: bytes.toString('base64') } };
+  }
+  async function mediaParts(items) {
+    const parts = [];
+    for (const [route, kind, label] of items) {
+      const { content, note } = await mediaFrom(route, kind, label).catch((error) => ({ note: `${label}: ${error.message}` }));
+      parts.push(content ?? text(note));
+    }
+    return parts;
+  }
+
+  const shotLine = (s) => {
+    const spoken = s.details?.dialogue ?? [];
+    const failed = (s.review?.checks ?? []).filter((c) => !c.ok).map((c) => c.detail);
+    return {
+      shot: s.position, id: s.id, description: s.description, method: s.details?.method ?? 'video', seconds: s.duration,
+      frame: s.imageAssetId ? 'yes' : (s.frameJob ? s.frameJob.status : 'no'), clip: s.videoAssetId ? 'yes' : (s.clipJob ? s.clipJob.status : 'no'),
+      review: s.review?.status ?? 'pending', frameApproved: s.imageAssetId ? s.review?.frameApproved === s.imageAssetId : false,
+      failedChecks: failed.length ? failed : undefined,
+      dialogue: spoken.length ? spoken.map((l) => ({ speaker: l.speaker, text: l.text, recorded: Boolean(l.assetId), seconds: l.seconds ?? undefined })) : undefined,
+      themes: s.details?.themes?.length ? s.details.themes : undefined,
+    };
+  };
+
+  server.registerTool('preview_shot', {
+    title: 'Preview a shot (images and audio)',
+    description: 'See one shot the way a person would: a text summary (description, method, length, review status, failed checks, dialogue lines with recorded yes/no, themes), its frame image, a contact sheet of six timestamped frames sampled across its clip, and each recorded dialogue line as audio. Free and read-only. Use it before asking the user to accept, redo or trim a shot. Files over the inline size limits are skipped with a note.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { shotId: z.string() },
+  }, safe(async ({ shotId }) => {
+    const detail = await storyboardOfShot(shotId);
+    const shot = shotIn(detail, shotId);
+    if (!shot) throw new Error('Shot not found.');
+    const items = [];
+    if (shot.imagePath) items.push([shot.imagePath, 'image', 'Frame']);
+    if (shot.videoPath) items.push([`/api/shots/${shotId}/contact-sheet`, 'image', 'Clip contact sheet']);
+    for (const [i, line] of (shot.details?.dialogue ?? []).entries()) if (line.audioPath) items.push([line.audioPath, 'audio', `Dialogue line ${i + 1}`]);
+    return ok(text(shotLine(shot)), ...(await mediaParts(items)));
+  }));
+
+  server.registerTool('preview_storyboard', {
+    title: 'Preview every shot at once',
+    description: 'Status of every shot (frame, clip, review, dialogue recorded) plus one contact sheet image with all shots numbered: kind "frames" (default) shows each shot\'s still, "clips" shows the middle frame of each clip. Free and read-only. Use it to show the user the whole film at a glance.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { storyboardId: z.string(), kind: z.enum(['frames', 'clips']).optional() },
+  }, safe(async ({ storyboardId, kind = 'frames' }) => {
+    const detail = await client.call('GET', `/api/storyboards/${storyboardId}`);
+    return ok(text({ title: detail.sequence.title, kind, shots: detail.shots.map(shotLine) }),
+      ...(await mediaParts([[`/api/storyboards/${storyboardId}/contact-sheet?kind=${kind}`, 'image', `Contact sheet (${kind})`]])));
+  }));
+
+  server.registerTool('plan_storyboard', {
+    title: 'Plan the shots with the writer model',
+    description: 'Have the storyboard\'s writer model plan its shots (costs a little on the writer\'s provider; refused under a strict budget, where you should write the shot list yourself and use import_shot_plan). replace: true discards existing shots, so ask the user first.',
+    inputSchema: { storyboardId: z.string(), replace: z.boolean().optional() },
+  }, safe(async ({ storyboardId, replace }) => ok(text(storyboardSummary(await client.call('POST', `/api/storyboards/${storyboardId}/plan`, { replace }))))));
+
+  server.registerTool('film_next_step', {
+    title: 'Film wizard: what to do next',
+    description: 'Step-by-step film making. Looks at the storyboard and proposes the ONE next stage (plan, frames, approve frames, animate, review, voices, fix, join, done) with a plain-language question for the user and `choices`, each an exact tool call (tool + arguments) you can make once the user agrees. Includes preview images of the shots involved. It never changes anything or spends money itself. Loop: call film_next_step, show the question and images to the user, make the chosen call, repeat.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => {
+    const detail = await client.call('GET', `/api/storyboards/${storyboardId}`);
+    const estimate = await client.call('GET', `/api/storyboards/${storyboardId}/estimate`).catch(() => null);
+    const step = nextStep(detail, estimate);
+    const { preview, ...rest } = step;
+    const items = [];
+    if (preview?.sheet) items.push([`/api/storyboards/${storyboardId}/contact-sheet?kind=${preview.sheet}`, 'image', 'Contact sheet']);
+    else for (const id of preview?.shotIds ?? []) {
+      const path_ = shotIn(detail, id)?.imagePath;
+      if (path_) items.push([path_, 'image', 'Frame']);
+    }
+    return ok(text(rest), ...(items.length ? await mediaParts(items) : []));
+  }));
+
+  const jobView = (j) => ({
+    id: j.id, status: j.status, operation: j.operation, provider: j.provider, model: j.model, prompt: j.prompt?.slice(0, 120), target: j.bookTarget ?? undefined,
+    percent: j.progress ? Math.round((j.progress.fraction ?? (j.progress.total ? j.progress.done / j.progress.total : 0)) * 100) : undefined,
+    etaSeconds: j.progress?.etaSeconds ?? undefined,
+  });
+  const jobsKey = (jobs) => JSON.stringify(jobs.map((j) => [j.id, j.status, j.progress?.done ?? null]).sort());
+
+  server.registerTool('watch_jobs', {
+    title: 'Watch running jobs',
+    description: 'List the queued and running generation jobs of a project with percent done and time left. With waitSeconds (up to 60) it waits, checking every 2 seconds, and returns as soon as a job starts, finishes or advances, or when the time is up. Free and read-only. Use it instead of repeatedly polling get_generation.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { projectId: z.string(), waitSeconds: z.number().min(0).max(60).optional() },
+  }, safe(async ({ projectId, waitSeconds = 0 }) => {
+    const fetchJobs = async () => (await client.call('GET', `/api/projects/${projectId}/active-jobs`)).jobs;
+    let jobs = await fetchJobs();
+    const first = jobsKey(jobs);
+    const deadline = Date.now() + waitSeconds * 1000;
+    while (Date.now() + 2000 <= deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      jobs = await fetchJobs();
+      if (jobsKey(jobs) !== first) break;
+    }
+    return ok(text({ active: jobs.length, jobs: jobs.map(jobView), note: jobs.length ? undefined : 'Nothing is running.' }));
+  }));
+
+  server.registerTool('cancel_job', {
+    title: 'Cancel a job',
+    description: 'Cancel a queued job (any provider) or a running local-model job. A paid job already submitted to a provider cannot be stopped: it is reported as not cancellable and will still be billed.',
+    inputSchema: { generationId: z.string() },
+  }, safe(async ({ generationId }) => {
+    try {
+      const { generation } = await client.call('POST', `/api/generations/${generationId}/cancel`, {});
+      return ok(text({ cancelled: true, ...summarizeGeneration(generation) }));
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      return ok(text({ cancelled: false, reason: error.message, note: 'A paid job already sent to the provider cannot be cancelled and will still be billed.' }));
+    }
+  }));
+
+  server.registerTool('film_checklist', {
+    title: 'What is left to finish the film',
+    description: 'A text checklist of what remains per shot (frame, clip, review, voices, dialogue overrun) plus the cost estimate for what is missing. Free and read-only. Use film_next_step for a guided single step instead.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => {
+    const detail = await client.call('GET', `/api/storyboards/${storyboardId}`);
+    const estimate = await client.call('GET', `/api/storyboards/${storyboardId}/estimate`).catch(() => null);
+    const facts = detail.shots.map(shotFacts);
+    const requireApproval = Boolean(detail.sequence.settings?.requireApproval);
+    const shots = facts.map((f) => ({
+      shot: f.position, id: f.id,
+      todo: [
+        !f.hasFrame && 'make frame', f.hasFrame && requireApproval && !f.frameApproved && 'approve frame',
+        !f.hasClip && (f.method === 'still' ? 'render still clip (free)' : 'animate clip'),
+        f.hasClip && f.review !== 'accepted' && requireApproval && 'accept clip',
+        f.linesRecorded < f.linesTotal && `record ${f.linesTotal - f.linesRecorded} dialogue line(s)`,
+        f.overrun && 'dialogue runs past the shot: lengthen it or shorten the line',
+      ].filter(Boolean),
+    }));
+    const left = shots.filter((s) => s.todo.length);
+    return ok(text({
+      title: detail.sequence.title, joined: Boolean(detail.sequence.outputAssetId), shotsFinished: shots.length - left.length, shotsTotal: shots.length,
+      missingThemes: detail.sequence.themeCoverage?.missing?.length ? detail.sequence.themeCoverage.missing : undefined,
+      remaining: left, readyToJoin: shots.length > 0 && !left.length && !detail.sequence.outputAssetId,
+      estimate: estimate ? { totalUsd: estimate.totalUsd, remainingUsd: estimate.remainingUsd, fits: estimate.fits, unpriced: estimate.unpriced } : undefined,
+    }));
+  }));
+
+  server.registerTool('adjust_shot_look', {
+    title: 'Adjust a shot\'s colour (brightness, contrast, saturation, warmth)',
+    description: 'Colour-grade one shot; it is applied when the film is joined (free). Values you give are merged into the shot\'s current grade. Examples: "darker" = brightness -0.1; "brighter" = brightness 0.1; "moodier" = saturation 0.8 and contrast 1.1; "warmer" = warmth 0.4; "cooler" = warmth -0.4; "washed out" = saturation 0.6. Neutral is brightness 0, contrast 1, saturation 1, warmth 0. reset: true clears the grade. Rejoin the film (join_storyboard) to see it.',
+    inputSchema: {
+      shotId: z.string(), brightness: z.number().min(-0.3).max(0.3).optional(), contrast: z.number().min(0.5).max(1.5).optional(),
+      saturation: z.number().min(0).max(2).optional(), warmth: z.number().min(-1).max(1).optional(), reset: z.boolean().optional(),
+    },
+  }, safe(async ({ shotId, reset, ...values }) => {
+    const given = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined));
+    if (!reset && !Object.keys(given).length) throw new Error('Give at least one of brightness, contrast, saturation, warmth, or reset: true.');
+    let grade = null;
+    if (!reset) {
+      const current = shotIn(await storyboardOfShot(shotId), shotId)?.details?.grade;
+      grade = { brightness: 0, contrast: 1, saturation: 1, warmth: 0, ...(current ?? {}), ...given };
+    }
+    const detail = await client.call('PATCH', `/api/shots/${shotId}`, { details: { grade } });
+    return ok(text({ shotId, grade: shotIn(detail, shotId)?.details?.grade ?? grade, note: 'Applied when the film is joined; run join_storyboard to see it.' }));
+  }));
+
+  server.registerTool('move_shot', {
+    title: 'Move a shot to another position',
+    description: 'Reorder the film: move a shot so it ends up at toPosition (1 = first). Other shots shift. Returns the new order. Rejoin the film afterwards.',
+    inputSchema: { shotId: z.string(), toPosition: z.number().int().min(1) },
+  }, safe(async ({ shotId, toPosition }) => {
+    let detail = await storyboardOfShot(shotId);
+    const index = () => detail.shots.findIndex((s) => s.id === shotId);
+    const target = Math.min(toPosition, detail.shots.length) - 1;
+    for (let guard = detail.shots.length * 2; index() !== target && guard > 0; guard--) {
+      detail = await client.call('POST', `/api/shots/${shotId}/move`, { direction: index() > target ? 'up' : 'down' });
+    }
+    return ok(text({ movedTo: index() + 1, order: detail.shots.map((s, i) => ({ position: i + 1, id: s.id, description: s.description.slice(0, 60) })) }));
+  }));
+
+  server.registerTool('trim_shot', {
+    title: 'Trim or resize a shot',
+    description: 'Cut the start off a shot\'s clip (trimStart, 0-10 seconds skipped from the beginning) and/or change its length (duration, 1-30 whole seconds). The clip itself is not regenerated; a longer duration than the clip may need a new take. Free.',
+    inputSchema: { shotId: z.string(), trimStart: z.number().min(0).max(10).optional(), duration: z.number().int().min(1).max(30).optional() },
+  }, safe(async ({ shotId, trimStart, duration }) => {
+    if (trimStart === undefined && duration === undefined) throw new Error('Give trimStart and/or duration.');
+    const detail = await client.call('PATCH', `/api/shots/${shotId}`, { ...(duration !== undefined ? { duration } : {}), ...(trimStart !== undefined ? { details: { trimStart } } : {}) });
+    const shot = shotIn(detail, shotId);
+    return ok(text({ shotId, position: shot?.position, duration: shot?.duration, trimStart: shot?.details?.trimStart }));
+  }));
+
+  server.registerTool('set_character_voice', {
+    title: 'Set a character\'s voice',
+    description: 'Choose the speech model and voice for a character (voices from list_models). New dialogue uses it. Lines already recorded keep the OLD voice: Lumina cannot clear a recording through the API, so to re-record a line, edit its text slightly (update_shot with the changed dialogue) and then voice_dialogue. With revoice: true, every line by this character that has no recording yet is queued now in the new voice (costs a little per line); the result lists which recorded lines were left alone.',
+    inputSchema: {
+      characterId: z.string(), provider: z.string(), model: z.string(), voice: z.string().optional(),
+      revoice: z.boolean().optional().describe('Also record this character\'s unrecorded lines now'),
+    },
+  }, safe(async ({ characterId, provider, model, voice, revoice = false }) => {
+    const { character } = await client.call('PATCH', `/api/characters/${characterId}`, { voice: { provider, model, ...(voice ? { voice } : {}) } });
+    const result = { character: character.name, voice: character.voice, queued: 0, keptOldVoice: [] };
+    if (revoice) {
+      for (const project of (await client.call('GET', '/api/projects')).projects) {
+        for (const board of (await client.call('GET', `/api/projects/${project.id}/storyboards`)).storyboards) {
+          const detail = await client.call('GET', `/api/storyboards/${board.id}`);
+          for (const shot of detail.shots) {
+            const mine = (shot.details?.dialogue ?? []).filter((l) => l.speaker === characterId);
+            if (!mine.length) continue;
+            for (const line of mine.filter((l) => l.assetId)) result.keptOldVoice.push({ storyboard: detail.sequence.title, shot: shot.position, shotId: shot.id, text: line.text.slice(0, 80) });
+            if (mine.some((l) => !l.assetId)) result.queued += (await client.call('POST', `/api/shots/${shot.id}/dialogue`, {})).queued.length;
+          }
+        }
+      }
+      result.note = result.keptOldVoice.length ? 'Recorded lines listed in keptOldVoice still have the old voice. To re-record one, change its text slightly with update_shot, then call voice_dialogue for that shot.' : undefined;
+    }
+    return ok(text(result));
   }));
 
   // Tool schemas are generated with a "$schema" keyword; some clients (ChatGPT's connector validator among the
