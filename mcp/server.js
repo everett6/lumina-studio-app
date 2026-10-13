@@ -82,6 +82,16 @@ registerLuminaTools(server, {
     const { url, token } = connection();
     return fetch(`${url}${route}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(660_000) });
   },
+  // Raw upload of a local file (local connections only: the MCP server and Lumina share this computer).
+  async upload(route, bytes, label) {
+    await ensureRunning();
+    const { url, token } = connection();
+    const response = await fetch(`${url}${route}`, { method: 'POST', body: bytes, signal: AbortSignal.timeout(660_000),
+      headers: { authorization: `Bearer ${token}`, 'x-lumina-client': 'mcp', 'x-lumina-label': label } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw Object.assign(new Error(data.error || `Lumina returned HTTP ${response.status}`), { status: response.status });
+    return data;
+  },
   exportDir: () => path.join(connection().root, 'exports'),
   localFile: (assetPath) => path.join(connection().root, 'storage', 'assets', path.basename(assetPath)),
   allowOutputPath: true,

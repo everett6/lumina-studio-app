@@ -46,6 +46,8 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `generate_storyboard_shots` | Queue frames or clips for every shot at once (they run in the background); follow with `get_storyboard`. |
 | `produce_film` | Make every missing frame, clip, still shot and voice line and finish the film in the background. With approval on it stops twice for review. **Spends money; call `estimate_film_cost` first.** |
 | `enhance_video` | Upscale any video to 2× or to 1080p/1440p/4K: fast GPU scaling, Real-ESRGAN anime-video or x4plus. |
+| `import_video` | Add an MP4 from this computer to a project's library (local connections only). |
+| `interpolate_video` | Rebuild in-between frames with RIFE on the GPU so a video plays at a chosen frame rate (e.g. 12 → 24 fps, or 24 → 60). RIFE is installed from the app (Storyboard → Picture quality → Smooth). |
 | `join_storyboard` | Join the clips into one MP4 in the background and wait up to 8 minutes for it (needs ffmpeg on the computer running Lumina). |
 | `export_book` | Save PDF, EPUB, Word, Markdown or an audiobook and return its path. `fixedLayout: true` makes a fixed-layout EPUB for a picture book. |
 
@@ -89,6 +91,26 @@ Add this to `claude_desktop_config.json`:
   }
 }
 ```
+
+### Codex (GPT-6 Astra as the orchestrator)
+
+Any MCP client can drive Lumina; with Codex, GPT-6 Astra plans the work and calls Lumina's tools:
+
+```bash
+codex mcp add lumina-studio -- node /path/to/lumina-studio/mcp/server.js
+codex -m gpt-6-astra
+```
+
+Codex asks before each MCP tool call. To let a non-interactive run (`codex exec`) call Lumina's tools without
+asking, approve them for that run only:
+
+```bash
+codex exec -m gpt-6-astra -c 'mcp_servers.lumina-studio.default_tools_approval_mode="approve"' \
+  "Import ~/clips/fight.mp4 into a new Lumina project and interpolate it to 60 fps."
+```
+
+Tested 2026-10-12: GPT-6 Astra created a project, imported a 6 fps anime clip and rebuilt it to 24 fps with
+`interpolate_video`; the result was identical to the same calls made by Claude.
 
 Node.js 22.13 or newer is required. Run `npm install` in the repository first so the MCP SDK is present.
 

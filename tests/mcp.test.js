@@ -23,7 +23,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
       'create_book', 'list_books', 'get_book', 'update_book', 'draft_bible', 'plan_pages', 'edit_page', 'revise_page', 'generate_illustration',
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
       'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
-      'update_character', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'budget_status', 'decide_approval', 'refresh_models']) {
+      'update_character', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'interpolate_video']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -55,6 +55,17 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     const run = parse(await client.callTool({ name: 'run_canvas', arguments: { canvasId: placed.canvasId } }));
     assert.equal(run.status, 'completed');
     assert.equal(run.nodes[placed.nodeId].assetId, summary.assetId);
+
+    // A local video comes in through import_video; interpolating it needs RIFE, which tests never download.
+    const clipFile = path.join(tempRoot(), 'clip.mp4');
+    spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=12:duration=1', '-pix_fmt', 'yuv420p', '-y', clipFile]);
+    const imported = parse(await client.callTool({ name: 'import_video', arguments: { projectId: project.id, filePath: clipFile } }));
+    assert.ok(imported.assetId && existsSync(imported.file));
+    const notText = await client.callTool({ name: 'import_video', arguments: { projectId: project.id, filePath: path.join(testsDir, 'mcp.test.js') } });
+    assert.ok(notText.isError);
+    const smooth = await client.callTool({ name: 'interpolate_video', arguments: { assetId: imported.assetId, fps: 24 } });
+    assert.ok(smooth.isError);
+    assert.match(smooth.content[0].text, /RIFE|not installed/);
 
     // Characters, image tools, storyboard and manuscript import.
     const hero = parse(await client.callTool({ name: 'create_character', arguments: { name: 'Pip', description: 'small red fox, green scarf', referenceAssetIds: [summary.assetId] } }));

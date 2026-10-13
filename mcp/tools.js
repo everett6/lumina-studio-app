@@ -633,6 +633,28 @@ export function registerLuminaTools(server, client) {
     return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode, height })));
   }));
 
+  server.registerTool('interpolate_video', {
+    title: 'Interpolate a video (smoother motion)',
+    description: 'Make the in-between frames of a video with RIFE v4.6 on the GPU of the computer running Lumina, so it plays at `fps` with the same length (e.g. 12 → 24 fps rebuilds every other frame; 24 → 60 for smooth motion). Saves a new video in the library and returns its asset id (and file path on a local connection). Clips containing a cut are refused. RIFE must be installed from the app first (Storyboard → Picture quality → Smooth).',
+    inputSchema: { assetId: z.string(), fps: z.number().int().min(2).max(120) },
+  }, safe(async ({ assetId, fps }) => {
+    const result = await client.call('POST', `/api/assets/${assetId}/interpolate`, { fps });
+    return ok(text({ assetId: result.asset.id, fps: result.fps, seconds: result.duration, size: `${result.width}x${result.height}`, file: client.localFile ? client.localFile(result.asset.path) : undefined }));
+  }));
+
+  if (client.upload) {
+    server.registerTool('import_video', {
+      title: 'Import a video file',
+      description: 'Add an MP4 file from this computer to a project\'s library (up to 300 MB), so other tools (interpolate_video, enhance_video) can work on it. Local connections only.',
+      inputSchema: { projectId: z.string(), filePath: z.string().describe('Absolute path of an .mp4 file'), label: z.string().max(120).optional() },
+    }, safe(async ({ projectId, filePath, label }) => {
+      const { readFile } = await import('node:fs/promises');
+      const bytes = await readFile(path.resolve(filePath));
+      const result = await client.upload(`/api/projects/${projectId}/video`, bytes, label ?? path.basename(filePath));
+      return ok(text({ assetId: result.asset.id, label: result.asset.label, file: client.localFile ? client.localFile(result.asset.path) : undefined }));
+    }));
+  }
+
   server.registerTool('join_storyboard', {
     title: 'Join storyboard clips',
     description: 'Join the storyboard\'s clips, in shot order, into one MP4 saved in the project library. Needs ffmpeg on the computer running Lumina. Shots without a clip are skipped. Long films take a few minutes; if it is still running when this returns, call get_storyboard later.',

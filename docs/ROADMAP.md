@@ -72,6 +72,15 @@
 - Timeline preview with dialogue placement and overruns, music and ambience beds.
 - Fix: "mute the clip's own sound" is now applied when joining.
 
+## Done (v0.8.2): local GPU and a cleaner studio
+
+- Local GPU provider: Wan 2.2 TI2V-5B in FP8 through diffusers (frames and image-to-video clips, no API, free).
+- Out of GPU memory: the job is retried with the model in main memory (group offloading), instead of failing.
+- Films join at the clips' own frame rate (24 fps for cinema models), so no repeated frames.
+- Storyboard redesign: the film player first (opens on the first frame, not a black fade-in), an always-visible
+  picture quality bar (720p / 1080p / 1440p / 4K, AI or fast upscaler, motion, colour), then story and shots.
+- Larger, more readable type and controls throughout; Create shows the typed prompt (click for the full one).
+
 ## Next
 
 1. **Verify with real accounts.** Adapters are tested against faked HTTP only. Run one low-cost call per provider
