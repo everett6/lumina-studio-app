@@ -110,7 +110,7 @@ codex exec -m gpt-6-astra -c 'mcp_servers.lumina-studio.default_tools_approval_m
 ```
 
 Tested 2026-10-12: GPT-6 Astra created a project, imported a 6 fps anime clip and rebuilt it to 24 fps with
-`interpolate_video`; the result was identical to the same calls made by Claude.
+`interpolate_video`; GPT-6 Sol and GPT-6 Luna did the same task, and all results were identical frame for frame to the same calls made by Claude.
 
 Node.js 22.13 or newer is required. Run `npm install` in the repository first so the MCP SDK is present.
 
