@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { colourStats, curveFilter, matchCurve } from '../src/grade.js';
-import { probe, stitchClips } from '../src/video.js';
+import { filmFps, probe, stitchClips } from '../src/video.js';
 
 const has = (command) => spawnSync(command, ['-version'], { stdio: 'ignore' }).status === 0;
 const media = has('ffmpeg') && has('ffprobe');
@@ -43,4 +43,11 @@ test('colour matching: a shot with a colour cast is pulled onto its scene\'s ref
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('film frame rate: the clips\' own rate, snapped to a standard one, so frames are not duplicated', () => {
+  assert.equal(filmFps([24, 24, 23.976, 30]), 24);
+  assert.equal(filmFps([30, 29.97, 24]), 30);
+  assert.equal(filmFps([12]), 24, 'odd test rates snap to the nearest standard rate');
+  assert.equal(filmFps([]), 24);
 });

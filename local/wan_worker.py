@@ -8,6 +8,7 @@ Reads one JSON request per line on stdin and answers with JSON lines on stdout:
 The model is loaded once (weights stored in FP8, computed in BF16) and kept until the app stops the worker.
 Weights are read from the local Hugging Face cache only; this worker never downloads anything.
 """
+import gc
 import json
 import os
 import subprocess
@@ -151,12 +152,17 @@ for line in sys.stdin:
     if not line:
         continue
     request = json.loads(line)
+    failed = False
     try:
         run(request)
     except torch.cuda.OutOfMemoryError:
-        release()
+        failed = True
         send({"id": request.get("id"), "error": "The GPU ran out of memory. Close other programs using the GPU and try again."})
     except Exception as error:  # report every failure to the app instead of dying
+        failed = True
         traceback.print_exc()
-        release()
         send({"id": request.get("id"), "error": f"{type(error).__name__}: {error}"})
+    if failed:
+        # Outside the handler, so the error no longer holds the GPU tensors it was raised with.
+        gc.collect()
+        release()

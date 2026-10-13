@@ -535,7 +535,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         }
         // 3. The picture: exact lengths, crossfades, near-lossless.
         state.step = 'Joining the shots';
-        const joined = await stitchClips(items.map(({ shot, ...item }) => item), { transition: settings.transition, finish: 'none', size, deliver: false });
+        const joined = await stitchClips(items.map(({ shot, ...item }) => item), { transition: settings.transition, finish: 'none', size, deliver: false, fps: settings.interpolateFps === 30 ? 30 : null });
         const picture = path.join(dir, 'picture.mp4');
         await import('node:fs/promises').then((fs) => fs.writeFile(picture, joined.bytes));
         progress('Mixing the sound');

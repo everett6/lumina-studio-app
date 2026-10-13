@@ -112,11 +112,11 @@ export async function lastFrame(file) {
 }
 
 // A still frame made into a shot on this computer, for free: a slow camera move over the image (Ken Burns style),
-// 30 fps, with a silent stereo track so it joins like any generated clip. The image is enlarged first so the
+// 24 fps by default, with a silent stereo track so it joins like any generated clip. The image is enlarged first so the
 // move stays smooth. motion: push-in, pull-out, pan-left, pan-right, rise, static.
 export const stillMotions = ['push-in', 'pull-out', 'pan-left', 'pan-right', 'rise', 'static'];
-export async function renderStill(imageFile, { duration, motion = 'push-in', width = 1920, height = 1080 }) {
-  const frames = Math.max(1, Math.round(duration * 30));
+export async function renderStill(imageFile, { duration, motion = 'push-in', width = 1920, height = 1080, fps = 24 }) {
+  const frames = Math.max(1, Math.round(duration * fps));
   const t = `(on/${Math.max(1, frames - 1)})`; // 0 → 1 over the shot
   const zoom = { 'push-in': `1+0.12*${t}`, 'pull-out': `1.12-0.12*${t}`, 'pan-left': '1.12', 'pan-right': '1.12', rise: '1.12', static: '1' }[motion] ?? '1';
   const x = { 'pan-left': `(iw-iw/zoom)*(1-${t})`, 'pan-right': `(iw-iw/zoom)*${t}` }[motion] ?? '(iw-iw/zoom)/2';
@@ -125,9 +125,9 @@ export async function renderStill(imageFile, { duration, motion = 'push-in', wid
   const dir = await mkdtemp(path.join(tmpdir(), 'lumina-still-'));
   const out = path.join(dir, 'still.mp4');
   try {
-    await runVideo(['-v', 'error', '-loop', '1', '-framerate', '30', '-i', imageFile, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+    await runVideo(['-v', 'error', '-loop', '1', '-framerate', String(fps), '-i', imageFile, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
       '-filter_complex', `[0:v]scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width * 2}:${height * 2},`
-        + `zoompan=z='${zoom}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=30,setsar=1,format=yuv420p[v]`,
+        + `zoompan=z='${zoom}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=${fps},setsar=1,format=yuv420p[v]`,
       '-map', '[v]', '-map', '1:a', '-t', duration.toFixed(3), ...encode, '-video_track_timescale', '15360', ...audioArgs, '-movflags', '+faststart', '-y', out], 600_000);
     return await readFile(out);
   } finally {
@@ -147,7 +147,18 @@ export async function renderStill(imageFile, { duration, motion = 'push-in', wid
 // length is exactly the sum of the durations.
 // Working pieces are near-lossless (the 'mezzanine' profile) and the film gets exactly one delivery encode at
 // the end; `deliver: false` skips it and returns the near-lossless join (for a later soundtrack mix + delivery).
-export async function stitchClips(clips, { onProgress, transition = 'cut', finish = 'none', fadeSeconds = 0.5, size = null, deliver = true } = {}) {
+// The film's frame rate: the rate most of its clips were made at (most video models make 24 fps, the cinema rate),
+// snapped to a standard rate, so no clip has frames duplicated or dropped unless it has to.
+export function filmFps(rates) {
+  const standard = [24, 25, 30, 50, 60];
+  const snapped = rates.filter((r) => Number.isFinite(r) && r > 0).map((r) => standard.reduce((best, s) => (Math.abs(s - r) < Math.abs(best - r) ? s : best)));
+  if (!snapped.length) return 24;
+  const counts = new Map();
+  for (const r of snapped) counts.set(r, (counts.get(r) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+}
+
+export async function stitchClips(clips, { onProgress, transition = 'cut', finish = 'none', fadeSeconds = 0.5, size = null, deliver = true, fps = null } = {}) {
   if (!clips.length) throw new Error('There are no clips to join.');
   // Items: { file, duration, trimStart, vf } — `vf` is an optional filter (e.g. a colour match) applied first.
   const items = clips.map((clip) => (typeof clip === 'string' ? { file: clip } : clip));
@@ -156,6 +167,7 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
   for (const file of files) infos.push(await probe(file));
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
   const [width, height] = size ? [even(size.width), even(size.height)] : [even(infos[0].width), even(infos[0].height)];
+  const rate = fps ?? filmFps(infos.map((info) => info.fps));
   const { args: encode } = await videoEncoder('mezzanine');
   const length = (index) => items[index].duration ?? Math.max(0.1, infos[index].duration - (items[index].trimStart ?? 0));
   const dissolve = transition === 'crossfade' && files.length > 1 && items.every((_, index) => length(index) > fadeSeconds * 2 + 0.3);
@@ -177,7 +189,7 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
       const hold = target != null ? `,tpad=stop_mode=clone:stop_duration=${Math.ceil(target + 1)}` : '';
       await runVideo(['-v', 'error', ...(item.trimStart ? ['-ss', Number(item.trimStart).toFixed(3)] : []), '-i', file, ...audioInput,
         '-map', '0:v:0', '-map', ownSound ? '0:a:0' : '1:a:0',
-        '-vf', `${item.vf ? `${item.vf},` : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${hold},format=yuv420p`,
+        '-vf', `${item.vf ? `${item.vf},` : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${rate}${hold},format=yuv420p`,
         '-af', target != null ? `${audioFormat},apad` : audioFormat, ...encode, '-video_track_timescale', '15360', ...audioArgs,
         ...(target != null ? ['-t', target.toFixed(3)] : ['-shortest']), '-y', part], 600_000);
       parts.push({ file: part, duration: (await probe(part)).duration });
@@ -201,7 +213,7 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
         if (index === parts.length - 1) break;
         const blend = path.join(dir, `blend-${String(index).padStart(4, '0')}.mp4`);
         await runVideo(['-v', 'error', '-ss', (part.duration - fade).toFixed(3), '-i', part.file, '-t', fade.toFixed(3), '-i', parts[index + 1].file,
-          '-filter_complex', `[0:v]setpts=PTS-STARTPTS,fps=30[a];[1:v]setpts=PTS-STARTPTS,fps=30[b];[a][b]xfade=transition=fade:duration=${fade}:offset=0,format=yuv420p[v];`
+          '-filter_complex', `[0:v]setpts=PTS-STARTPTS,fps=${rate}[a];[1:v]setpts=PTS-STARTPTS,fps=${rate}[b];[a][b]xfade=transition=fade:duration=${fade}:offset=0,format=yuv420p[v];`
             + `[0:a]asetpts=PTS-STARTPTS[x];[1:a]asetpts=PTS-STARTPTS[y];[x][y]acrossfade=d=${fade}[au]`,
           '-map', '[v]', '-map', '[au]', '-t', fade.toFixed(3), ...encode, '-video_track_timescale', '15360', ...audioArgs, '-y', blend], 600_000);
         pieces.push(blend);
