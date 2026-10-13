@@ -55,7 +55,8 @@
       "node_modules/onnxruntime-web/dist/ort.node.min.mjs",
       "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs",
       "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm",
-      "local/**"
+      "local/**",
+      "!local/__pycache__/**"
     ],
     "directories": {
       "output": "dist",
