@@ -40,6 +40,9 @@ const table = {
   // Pretend prices for the offline test provider, so budget limits can be exercised without spending anything.
   // Runs on this computer: no charge.
   'local|wan2.2-ti2v-5b': { usd: 0, per: 'image', free: true },
+  'local|animagine-xl-4': { usd: 0, per: 'image', free: true },
+  'local|kokoro-82m': { usd: 0, per: 'character', free: true },
+  'local|chatterbox': { usd: 0, per: 'character', free: true },
   'mock|mock-image': { usd: 0.01, per: 'image', pretend: true },
   'mock|mock-video': { usd: 0.01, per: 'second', pretend: true },
   'mock|mock-voice': { usd: 0.001, per: 'image', pretend: true },
