@@ -192,12 +192,15 @@ for line in sys.stdin:
         failed = out_of_memory = False
         try:
             run(request)
-        except torch.cuda.OutOfMemoryError:
-            failed = out_of_memory = True
         except Exception as error:  # report every failure to the app instead of dying
             failed = True
-            traceback.print_exc()
-            send({"id": request.get("id"), "error": f"{type(error).__name__}: {error}"})
+            # Some supported PyTorch versions report CUDA OOM as a plain RuntimeError.
+            out_of_memory = isinstance(error, torch.cuda.OutOfMemoryError) or (
+                isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
+            )
+            if not out_of_memory:
+                traceback.print_exc()
+                send({"id": request.get("id"), "error": f"{type(error).__name__}: {error}"})
         if not failed:
             break
         # Outside the handler, so the error no longer holds the GPU tensors it was raised with.

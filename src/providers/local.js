@@ -32,8 +32,15 @@ export function modelInstalled(dir = hubDir()) {
     return ['transformer/diffusion_pytorch_model.safetensors.index.json', 'text_encoder/model.safetensors.index.json'].every((index) => {
       const file = path.join(root, index);
       if (!existsSync(file)) return false;
-      const shards = new Set(Object.values(JSON.parse(readFileSync(file, 'utf8')).weight_map));
-      return [...shards].every((shard) => existsSync(path.join(path.dirname(file), shard)));
+      try {
+        const weightMap = JSON.parse(readFileSync(file, 'utf8')).weight_map;
+        if (!weightMap || typeof weightMap !== 'object') return false;
+        const shards = new Set(Object.values(weightMap));
+        return shards.size > 0 && [...shards].every((shard) => typeof shard === 'string' && existsSync(path.join(path.dirname(file), shard)));
+      } catch {
+        // A snapshot can be visible while Hugging Face is still writing its index.
+        return false;
+      }
     }) && existsSync(path.join(root, 'vae', 'diffusion_pytorch_model.safetensors'));
   });
 }

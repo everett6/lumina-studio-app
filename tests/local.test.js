@@ -12,6 +12,8 @@ test('local GPU provider: ready only when every model file is in the cache; list
   assert.equal(modelInstalled(hub), false);
   put('model_index.json');
   put('vae/diffusion_pytorch_model.safetensors', 'x');
+  put('transformer/diffusion_pytorch_model.safetensors.index.json', '{');
+  assert.equal(modelInstalled(hub), false, 'an index still being written is not a server error');
   put('transformer/diffusion_pytorch_model.safetensors.index.json', JSON.stringify({ weight_map: { a: 'diffusion_pytorch_model-00001-of-00002.safetensors', b: 'diffusion_pytorch_model-00002-of-00002.safetensors' } }));
   put('text_encoder/model.safetensors.index.json', JSON.stringify({ weight_map: { a: 'model-00001-of-00001.safetensors' } }));
   put('transformer/diffusion_pytorch_model-00001-of-00002.safetensors', 'x');
