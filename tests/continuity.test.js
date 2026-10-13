@@ -248,3 +248,27 @@ test('soundtrack: an uploaded music bed plays under the film', { skip: !media &&
     await t.close();
   }
 });
+
+test('themes: the writer is told to show each theme on screen, shots are tagged, prompts carry the theme, gaps are reported', async () => {
+  const t = await startTestApp();
+  try {
+    const project = (await t.call('POST', '/api/projects', { name: 'Themes' })).body.project;
+    const themes = ['Chaos agent: a grinning trickster who breaks every plan with fire', 'Transcendentalist doctrine: a monk alone in wild nature at dawn'];
+    const id = (await t.call('POST', `/api/projects/${project.id}/storyboards`, {
+      title: 'T', idea: 'A trickster and a monk', writer: 'mock:mock-director',
+      settings: { shotCount: 4, themes, imageProvider: 'mock', imageModel: 'mock-image', videoProvider: 'mock', videoModel: 'mock-video' },
+    })).body.sequence.id;
+    const planned = (await t.call('POST', `/api/storyboards/${id}/plan`, {})).body;
+    assert.deepEqual(planned.sequence.settings.themes, themes);
+    assert.deepEqual(planned.shots.map((s) => s.details.themes), [['Chaos agent'], [], ['Chaos agent'], []]);
+    assert.deepEqual(planned.sequence.themeCoverage, { where: { 'Chaos agent': [1, 3], 'Transcendentalist doctrine': [] }, missing: ['Transcendentalist doctrine'] });
+    const frame = await t.call('POST', `/api/shots/${planned.shots[0].id}/frame`, {});
+    assert.match(frame.body.generation.prompt, /Theme on screen: Chaos agent \(a grinning trickster who breaks every plan with fire\)/);
+    await t.call('POST', `/api/generations/${frame.body.generation.id}/wait`, { timeoutMs: 20_000 });
+    // Tagging a shot by hand closes the gap.
+    const tagged = (await t.call('PATCH', `/api/shots/${planned.shots[1].id}`, { details: { themes: ['Transcendentalist doctrine'] } })).body;
+    assert.deepEqual(tagged.sequence.themeCoverage.missing, []);
+  } finally {
+    await t.close();
+  }
+});

@@ -38,6 +38,8 @@ export function mockCompletion({ task, prompt }) {
     const place = /Locations \(use these exact names[^\n]*\n- ([^:\n]+):/.exec(prompt)?.[1];
     const budget = prompt.includes('Budget: at most');
     const cameras = ['dolly-in', 'orbit-left', 'crane-up', 'not-a-camera'];
+    // Themes: the first one is tagged on every other shot (the others are left out, so coverage gaps can be tested).
+    const firstTheme = /Themes the audience must clearly SEE[^\n]*\n- ([^:\n]+)/.exec(prompt)?.[1]?.trim();
     return JSON.stringify({
       // With a cast and sets in the prompt, shots name them and the first one has a line of dialogue; with a
       // video budget, the last shot is a free still shot.
@@ -47,6 +49,7 @@ export function mockCompletion({ task, prompt }) {
         ...(place ? { location: place } : {}),
         scene: i < 2 ? '1 – The lake' : '2 – The den', action: 'walks to the water', startState: 'at the reeds', endState: 'at the water',
         method: budget && i === count - 1 ? 'still' : 'video', motion: 'push-in',
+        ...(firstTheme ? { themes: i % 2 === 0 ? [firstTheme.toLowerCase()] : [] } : {}),
       })),
     });
   }

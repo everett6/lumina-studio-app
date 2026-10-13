@@ -98,6 +98,10 @@ export function videoEncoder(profile = 'final') {
 
 const audioArgs = ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'];
 const audioFormat = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo';
+// Working pieces of a film keep uncompressed sound (in Matroska), so joining them is sample-exact: AAC pieces joined
+// by copying would each bring their encoder delay (~21 ms) to every cut. The sound is encoded once, after the join.
+const pieceAudio = ['-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2'];
+const cutFade = 0.008; // seconds of fade at each hard cut: removes the click where two waveforms meet
 
 // The last frame of a clip as PNG bytes: the start frame for the next shot when shots are chained.
 export async function lastFrame(file) {
@@ -179,7 +183,7 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
     const parts = [];
     for (const [index, file] of files.entries()) {
       const info = infos[index];
-      const part = path.join(dir, `part-${String(index).padStart(4, '0')}.mp4`);
+      const part = path.join(dir, `part-${String(index).padStart(4, '0')}.mkv`);
       const item = items[index];
       // With a set duration, the piece is that long (plus the crossfade overlap it lends to the next shot).
       const target = item.duration != null ? item.duration + (dissolve && index < files.length - 1 ? fadeSeconds : 0) : null;
@@ -187,11 +191,15 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
       const ownSound = info.hasAudio && !item.mute;
       const audioInput = ownSound ? [] : ['-f', 'lavfi', '-t', String(Math.max(0.1, target ?? info.duration)), '-i', 'anullsrc=r=48000:cl=stereo'];
       const hold = target != null ? `,tpad=stop_mode=clone:stop_duration=${Math.ceil(target + 1)}` : '';
+      // Hard cuts: every piece is a whole number of frames, and its sound fades over a few milliseconds at each end.
+      const seconds = target ?? Math.max(0.1, info.duration - (item.trimStart ?? 0));
+      const frames = Math.max(1, Math.round(seconds * rate));
+      const edges = dissolve ? '' : `,afade=t=in:d=${cutFade},afade=t=out:st=${Math.max(0, frames / rate - cutFade).toFixed(4)}:d=${cutFade}`;
       await runVideo(['-v', 'error', ...(item.trimStart ? ['-ss', Number(item.trimStart).toFixed(3)] : []), '-i', file, ...audioInput,
         '-map', '0:v:0', '-map', ownSound ? '0:a:0' : '1:a:0',
         '-vf', `${item.vf ? `${item.vf},` : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${rate}${hold},format=yuv420p`,
-        '-af', target != null ? `${audioFormat},apad` : audioFormat, ...encode, '-video_track_timescale', '15360', ...audioArgs,
-        ...(target != null ? ['-t', target.toFixed(3)] : ['-shortest']), '-y', part], 600_000);
+        '-af', `${audioFormat}${target != null ? ',apad' : ''}${edges}`, ...encode, ...pieceAudio,
+        '-frames:v', String(frames), '-t', (frames / rate).toFixed(4), '-y', part], 600_000);
       parts.push({ file: part, duration: (await probe(part)).duration });
       step();
     }
@@ -205,17 +213,17 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
       for (const [index, part] of parts.entries()) {
         const start = index > 0 ? fade : 0;
         const end = part.duration - (index < parts.length - 1 ? fade : 0);
-        const body = path.join(dir, `body-${String(index).padStart(4, '0')}.mp4`);
+        const body = path.join(dir, `body-${String(index).padStart(4, '0')}.mkv`);
         await runVideo(['-v', 'error', '-i', part.file, '-ss', start.toFixed(3), '-t', (end - start).toFixed(3),
-          ...encode, '-video_track_timescale', '15360', ...audioArgs, '-y', body], 600_000);
+          ...encode, ...pieceAudio, '-y', body], 600_000);
         pieces.push(body);
         step();
         if (index === parts.length - 1) break;
-        const blend = path.join(dir, `blend-${String(index).padStart(4, '0')}.mp4`);
+        const blend = path.join(dir, `blend-${String(index).padStart(4, '0')}.mkv`);
         await runVideo(['-v', 'error', '-ss', (part.duration - fade).toFixed(3), '-i', part.file, '-t', fade.toFixed(3), '-i', parts[index + 1].file,
           '-filter_complex', `[0:v]setpts=PTS-STARTPTS,fps=${rate}[a];[1:v]setpts=PTS-STARTPTS,fps=${rate}[b];[a][b]xfade=transition=fade:duration=${fade}:offset=0,format=yuv420p[v];`
             + `[0:a]asetpts=PTS-STARTPTS[x];[1:a]asetpts=PTS-STARTPTS[y];[x][y]acrossfade=d=${fade}[au]`,
-          '-map', '[v]', '-map', '[au]', '-t', fade.toFixed(3), ...encode, '-video_track_timescale', '15360', ...audioArgs, '-y', blend], 600_000);
+          '-map', '[v]', '-map', '[au]', '-t', fade.toFixed(3), ...encode, ...pieceAudio, '-y', blend], 600_000);
         pieces.push(blend);
         step();
       }
@@ -226,7 +234,9 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
     let out = path.join(dir, 'joined.mp4');
     // With set durations the film is exactly their sum (the audio's last AAC frame would add ~21 ms).
     const exact = items.every((item) => item.duration != null) ? items.reduce((sum, item) => sum + item.duration, 0) : null;
-    await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', ...(exact ? ['-t', exact.toFixed(3)] : []), '-movflags', '+faststart', '-y', out], 600_000);
+    // Pictures are copied as they are; the joined sound is encoded once.
+    await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c:v', 'copy', ...audioArgs, ...(exact ? ['-t', exact.toFixed(3)] : []),
+      '-video_track_timescale', '15360', '-movflags', '+faststart', '-y', out], 600_000);
     step();
 
     if (deliver) {
@@ -242,7 +252,8 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
   }
 }
 
-// The one delivery encode of a film (the 'final' quality profile). finish 'cinematic' also applies a gentle
+// The one delivery encode of a film (the 'final' quality profile). finish 'anime' cleans flat colour, lifts colour and
+// sharpens line art (see below). finish 'cinematic' also applies a gentle
 // grade, 2.39:1 letterbox bars (landscape only), fine film grain and fades from and to black; grain is added only
 // here, after any upscaling, so it is never enlarged or smeared. Without a finish the sound is copied untouched.
 export async function deliverFilm(input, output, { finish = 'none' } = {}) {
@@ -258,6 +269,15 @@ export async function deliverFilm(input, output, { finish = 'none' } = {}) {
     if (info.width > info.height && bar >= 4) filters.push(`drawbox=x=0:y=0:w=iw:h=${bar}:color=black:t=fill`, `drawbox=x=0:y=ih-${bar}:w=iw:h=${bar}:color=black:t=fill`);
     filters.push('noise=alls=4:allf=t', 'fade=t=in:st=0:d=1', `fade=t=out:st=${fadeOut}:d=1.5`);
     audio = ['-af', `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOut}:d=1.5`, ...audioArgs];
+  }
+  if (finish === 'anime') {
+    // Anime finish: clean flat colour areas (light temporal denoise), richer but not garish colour (vibrance lifts
+    // muted colours more than strong ones, so skin stays natural), crisp line art (contrast-adaptive sharpening adds
+    // no halos), then smooth any banding in gradients. Short fades in and out; no grain or bars.
+    const fadeOut = Math.max(0, info.duration - 1).toFixed(3);
+    filters.push('hqdn3d=1.2:1.2:2.5:2.5', 'vibrance=intensity=0.18', 'cas=strength=0.55', 'gradfun=strength=0.9:radius=12',
+      'fade=t=in:st=0:d=0.6', `fade=t=out:st=${fadeOut}:d=1`);
+    audio = ['-af', `afade=t=in:st=0:d=0.6,afade=t=out:st=${fadeOut}:d=1`, ...audioArgs];
   }
   filters.push('format=yuv420p');
   await runVideo(['-v', 'error', '-i', input, '-map', '0:v:0', ...(info.hasAudio ? ['-map', '0:a:0'] : []), '-vf', filters.join(','),

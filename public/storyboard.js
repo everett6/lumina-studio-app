@@ -312,6 +312,13 @@ function shotDetails(shot) {
   const location = h('select', { 'aria-label': 'Location', disabled: locked, onchange: () => save({ locationId: location.value || null }) },
     h('option', { value: '' }, places().length ? 'No saved location' : 'Add a location on the Characters tab'), ...places().map((c) => h('option', { value: c.id }, c.name)));
   location.value = d.locationId ?? '';
+  const filmThemes = (ui.detail.sequence.settings.themes ?? []).map((t) => (t.indexOf(':') > 0 ? t.slice(0, t.indexOf(':')).trim() : t.trim()));
+  const shown = new Set(d.themes ?? []);
+  const themeChips = filmThemes.length ? h('div.applied-presets', {}, h('span.field-label', {}, 'THEMES IN THIS SHOT'),
+    ...filmThemes.map((name) => h(`button.character-chip${shown.has(name) ? '.selected' : ''}`, { 'aria-pressed': String(shown.has(name)), disabled: locked, onclick: () => {
+      if (shown.has(name)) shown.delete(name); else shown.add(name);
+      save({ themes: [...shown] });
+    } }, name))) : null;
   const cast = new Set(d.characterIds);
   const castChips = h('div.applied-presets', {}, h('span.field-label', {}, 'IN THIS SHOT'),
     ...people().map((c) => h(`button.character-chip${cast.has(c.id) ? '.selected' : ''}`, { 'aria-pressed': String(cast.has(c.id)), disabled: locked, onclick: () => {
@@ -359,7 +366,7 @@ function shotDetails(shot) {
       text('Starts with', 'startState', 500, 'Situation at the first frame'),
       text('Ends with', 'endState', 500, 'Situation at the last frame'),
       text('Must not change', 'forbidden', 500, 'e.g. the red scarf, the scar on her left cheek')),
-    castChips,
+    castChips, themeChips,
     h('div.sb-dialogue', {}, h('span.field-label', {}, 'DIALOGUE'), ...rows.map(lineRow),
       locked ? null : h('button.text-button', { onclick: () => { rows.push({ speaker: speakers[1]?.[0] ?? 'narrator', text: '', start: null }); render(); } }, '+ Add a line')),
     h('div.key-row', {},
@@ -461,7 +468,7 @@ function filmFields(settings) {
     select('Clip length', 'clipLength', [['0', 'Writer decides'], ...lengths.map((d) => [String(d), `${d} s every shot`])], settings.clipLength ?? 0, Number),
     select('Look', 'look', [['live-action', 'Live-action film'], ['anime', 'Anime feature film'], ['as-written', 'As written (any style)']], settings.look ?? 'live-action'),
     select('Transitions', 'transition', [['cut', 'Hard cuts'], ['crossfade', 'Crossfades (0.5 s)']], settings.transition ?? 'cut'),
-    select('Finish', 'finish', [['none', 'None'], ['cinematic', 'Cinematic (2.39:1 bars, grain, fades)']], settings.finish ?? 'none'),
+    select('Finish', 'finish', [['none', 'None'], ['cinematic', 'Cinematic (2.39:1 bars, grain, fades)'], ['anime', 'Anime (clean colour, crisp lines, fades)']], settings.finish ?? 'none'),
   ];
 }
 
@@ -496,6 +503,14 @@ function filmPanels(sequence) {
   const bible = h('textarea', { rows: 3, maxLength: 1500, value: settings.lookBible ?? '', 'aria-label': 'Look bible',
     placeholder: 'Sent with every frame and clip. e.g. “Muted teal-and-amber palette, 35 mm anamorphic lens, soft rim light, light film grain, late-1970s Tokyo.”',
     onchange: () => saveSettings({ lookBible: bible.value }) });
+  const themes = h('textarea', { rows: 3, maxLength: 2500, value: (settings.themes ?? []).join('\n'), 'aria-label': 'Themes',
+    placeholder: 'One per line, "Name: how it shows on screen". e.g.\nChaos agent: a grinning trickster who breaks every plan with fire and laughter\nTranscendentalist doctrine: a monk who finds truth alone in wild nature, lit by dawn',
+    onchange: () => saveSettings({ themes: themes.value.split('\n').map((t) => t.trim()).filter(Boolean) }) });
+  const coverage = sequence.themeCoverage;
+  const themeNote = settings.themes?.length && Object.keys(coverage?.where ?? {}).length
+    ? h(coverage.missing.length ? 'p.error-text' : 'p.muted.small-note', {}, Object.entries(coverage.where).map(([name, at]) => `${name}: ${at.length ? `shots ${at.join(', ')}` : 'not shown in any shot'}`).join(' · ')
+      + (coverage.missing.length ? ' — re-plan, or tag shots in their continuity details.' : ''))
+    : null;
   const seed = h('input', { type: 'number', min: 0, value: settings.seed ?? '', placeholder: 'None', 'aria-label': 'Seed', onchange: () => saveSettings({ seed: seed.value === '' ? null : Number(seed.value) }) });
   const screenplay = h('textarea', { rows: 8, maxLength: 60000, value: sequence.screenplay ?? '', 'aria-label': 'Screenplay',
     placeholder: 'Optional. Paste a screenplay: the writer follows its scenes in order and keeps the dialogue word for word.', onchange: () => saveFields({ screenplay: screenplay.value }) });
@@ -524,6 +539,7 @@ function filmPanels(sequence) {
     h('details.panel-details', { open: !sequence.outputAssetId }, h('summary', {}, 'Look and continuity — keep every face, set and colour the same'),
       h('div.sb-grid', {},
         h('label.sb-wide', {}, h('span.field-label', {}, 'LOOK BIBLE (EVERY SHOT)'), bible),
+        h('label.sb-wide', {}, h('span.field-label', {}, 'THEMES THE AUDIENCE MUST SEE'), themes, themeNote),
         h('label', {}, h('span.field-label', {}, 'SEED (SAME FOR EVERY SHOT)'), seed),
         h('label', {}, h('span.field-label', {}, 'PAID VIDEO LIMIT (SECONDS)'), budgetSeconds),
         check('Approve frames and clips before they are used', 'requireApproval', 'Production stops for you to approve every frame (before video is paid for) and every clip (before the film is joined).')),

@@ -60,11 +60,14 @@ export function cleanSequenceSettings(input = {}, base = {}) {
     clipLength: Math.min(30, Math.max(0, Math.round(Number(input.clipLength ?? base.clipLength ?? 0)) || 0)),
     look: pick('look', (v) => v in looks, legacyLook),
     lookBible: typeof input.lookBible === 'string' ? input.lookBible.slice(0, 1500) : base.lookBible ?? '',
+    // Themes the audience must clearly see, e.g. "Chaos agent: a grinning trickster who breaks every plan". The writer
+    // gives each one people, actions and a recurring image on screen, and tags the shots that carry it.
+    themes: Array.isArray(input.themes) ? input.themes.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().slice(0, 300)).slice(0, 8) : base.themes ?? [],
     // One seed for every frame and clip (where the model accepts one). New storyboards get a random one.
     seed: input.seed === null ? null : Number.isInteger(Number(input.seed ?? base.seed)) && (input.seed ?? base.seed) !== undefined
       ? Math.abs(Math.trunc(Number(input.seed ?? base.seed))) % 2147483647 : Math.floor(Math.random() * 2147483646) + 1,
     transition: pick('transition', (v) => ['cut', 'crossfade'].includes(v), 'cut'),
-    finish: pick('finish', (v) => ['none', 'cinematic'].includes(v), 'none'),
+    finish: pick('finish', (v) => ['none', 'cinematic', 'anime'].includes(v), 'none'),
     // Delivery: frame height of the finished film; clips smaller than it are upscaled once each, from the original.
     outputHeight: pick('outputHeight', (v) => [720, 1080, 1440, 2160].includes(v), 1080),
     upscale: pick('upscale', (v) => ['none', 'fast', 'anime', 'ai'].includes(v), 'none'),
@@ -83,6 +86,39 @@ export function cleanSequenceSettings(input = {}, base = {}) {
 
 // Everything a shot must keep: who and where, what happens, what is said, how it starts and ends, what must not
 // change. `locked` freezes the story fields (description, dialogue, states) until a deliberate revision.
+// Themes are written as "Name: how it shows on screen" (the part after the colon is optional).
+const themeParts = (theme) => {
+  const at = theme.indexOf(':');
+  return at > 0 ? [theme.slice(0, at).trim(), theme.slice(at + 1).trim()] : [theme.trim(), ''];
+};
+// The writer's theme label matched back to one of the film's themes (by name, ignoring case).
+function themeName(themes = [], label) {
+  const wanted = String(label ?? '').trim().toLowerCase();
+  return themes.map((t) => themeParts(t)[0]).find((name) => name.toLowerCase() === wanted || (wanted && wanted.startsWith(name.toLowerCase()))) ?? null;
+}
+// What a theme looks like, for the prompts of the shots that carry it.
+function themeVisual(themes = [], name) {
+  const theme = themes.find((t) => themeParts(t)[0] === name);
+  if (!theme) return '';
+  const [label, look] = themeParts(theme);
+  return `Theme on screen: ${label}${look ? ` (${look})` : ''}; make it unmistakable in the image.`;
+}
+function themeBrief(themes = [], count) {
+  if (!themes.length) return '';
+  const each = Math.max(2, Math.round(count / (themes.length + 1)));
+  return `Themes the audience must clearly SEE, not only hear about:\n${themes.map((t) => `- ${t}`).join('\n')}\n`
+    + `For each theme: give it a person, place or object that embodies it, a recurring image or motif that comes back, and actions that show it; `
+    + `show each theme in at least ${Math.min(each, count)} shots spread across the film (beginning, middle and end), and let the climax bring them into open conflict. `
+    + 'List the themes each shot shows in its "themes" field, using the names before the colon.';
+}
+
+// Where each theme appears: shot positions per theme name, and the names that never appear.
+export function themeCoverage(themes = [], shots = []) {
+  const names = themes.map((t) => themeParts(t)[0]);
+  const where = Object.fromEntries(names.map((name) => [name, shots.filter((shot) => shot.details?.themes?.includes(name)).map((shot) => shot.position)]));
+  return { where, missing: names.filter((name) => !where[name].length) };
+}
+
 export function cleanShotDetails(input = {}, base = {}) {
   const str = (key, max) => (typeof input[key] === 'string' ? input[key].slice(0, max) : base[key] ?? '');
   const ids = (key, max) => (Array.isArray(input[key]) ? [...new Set(input[key].filter((id) => typeof id === 'string'))].slice(0, max) : base[key] ?? []);
@@ -102,6 +138,7 @@ export function cleanShotDetails(input = {}, base = {}) {
   return {
     scene: str('scene', 80), locationId: typeof input.locationId === 'string' || input.locationId === null ? input.locationId : base.locationId ?? null,
     characterIds: ids('characterIds', 6), action: str('action', 1000), dialogue,
+    themes: Array.isArray(input.themes) ? [...new Set(input.themes.filter((t) => typeof t === 'string').map((t) => t.trim().slice(0, 60)).filter(Boolean))].slice(0, 4) : base.themes ?? [],
     startState: str('startState', 500), endState: str('endState', 500), forbidden: str('forbidden', 500),
     method: ['video', 'still'].includes(input.method) ? input.method : base.method ?? 'video',
     motion: stillMotions.includes(input.motion) ? input.motion : base.motion ?? 'push-in',
@@ -145,7 +182,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     let clock = 0;
     return {
       sequence: { ...sequence, outputPath: asset(sequence.outputAssetId)?.path ?? null, join: joining.get(id) ?? null, production: producing.get(id) ?? null,
-        enhance: sequence.outputAssetId ? enhancer?.status(sequence.outputAssetId) ?? null : null },
+        enhance: sequence.outputAssetId ? enhancer?.status(sequence.outputAssetId) ?? null : null, themeCoverage: themeCoverage(sequence.settings.themes, shots) },
       shots: shots.map((shot) => {
         const startsAt = clock;
         clock += shot.duration ?? 0;
@@ -216,13 +253,14 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       targetSeconds ? `The whole film should run about ${targetSeconds} seconds (${(targetSeconds / 60).toFixed(1)} minutes), so the shot durations must add up to roughly ${targetSeconds}. Tell the story with a clear beginning, middle and end across all ${count} shots.` : '',
       looks[look] ? `Look: ${looks[look]} Write every description in that look.` : '',
       sequence.settings.lookBible ? `Look bible (applies to every shot): ${sequence.settings.lookBible}` : '',
+      themeBrief(sequence.settings.themes, count),
       continuity === 'chain' ? 'Continuity: every clip will start from the exact last frame of the clip before it, so each shot must continue directly from where the previous one ends. Only move to a new place or time where the story needs a cut, and say so at the start of that shot.' : '',
       continuity === 'keyframes' ? 'Continuity: within a scene, each clip will run from its own opening frame to the next shot\'s opening frame, so make each shot end where the next one begins.' : '',
       fixed ? `Every shot lasts ${fixed} seconds; give each one enough action to fill that time.` : '',
       videoSecondsBudget ? `Budget: at most ${videoSecondsBudget} seconds in total may be "video" shots (generated motion). Use "still" shots (a slow camera move over one frame) for establishing views, quiet reactions, narration and anything where motion adds little.` : '',
       `Frame: ${sequence.settings.aspect}.`,
       `Camera moves for video shots (by id): ${cameraPresets.map((p) => `${p.id} (${p.blurb})`).join('; ')}. Still-shot moves: ${stillMotions.join(', ')}.`,
-      `Return JSON: {"shots":[{"scene":"short scene label, e.g. 3 – Rooftop at night","location":"a location name from the list, or a short description","characters":["names in shot"],"description":"what we see and what happens, one or two sentences that stand alone as an image prompt","action":"the one required action","dialogue":[{"speaker":"a character name or Narrator","line":"exact words"}],"startState":"situation at the start of the shot","endState":"situation at the end","method":"video or still","camera":"camera id (video shots)","motion":"still-shot move (still shots)","duration":5}]} with exactly ${count} shots. Durations are whole seconds${allowed ? `, each one of: ${allowed.join(', ')}` : `, between ${low} and ${high}`}. Keep each shot's dialogue short enough to be spoken within its duration.`,
+      `Return JSON: {"shots":[{"scene":"short scene label, e.g. 3 – Rooftop at night","location":"a location name from the list, or a short description","characters":["names in shot"],"description":"what we see and what happens, one or two sentences that stand alone as an image prompt","action":"the one required action","dialogue":[{"speaker":"a character name or Narrator","line":"exact words"}],"startState":"situation at the start of the shot","endState":"situation at the end","themes":["names of the themes this shot shows on screen, from the list; [] if none"],"method":"video or still","camera":"camera id (video shots)","motion":"still-shot move (still shots)","duration":5}]} with exactly ${count} shots. Durations are whole seconds${allowed ? `, each one of: ${allowed.join(', ')}` : `, between ${low} and ${high}`}. Keep each shot's dialogue short enough to be spoken within its duration.`,
     ].filter(Boolean).join('\n\n');
     let text;
     try {
@@ -247,6 +285,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
           scene: String(shot?.scene ?? ''), locationId: location?.kind === 'location' ? location.id : null, characterIds: people.map((c) => c.id),
           action: String(shot?.action ?? ''), dialogue, startState: String(shot?.startState ?? ''), endState: String(shot?.endState ?? ''),
           method: shot?.method === 'still' ? 'still' : 'video', motion: shot?.motion,
+          themes: (Array.isArray(shot?.themes) ? shot.themes : []).map((t) => themeName(sequence.settings.themes, t)).filter(Boolean),
           ...(location || !shot?.location ? {} : { forbidden: '' }),
         }),
       };
@@ -259,7 +298,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   // Shot edits. Locked shots keep their story (description, dialogue, start/end state) until unlocked on purpose.
   function updateShot(shotId, body) {
     const shot = needShot(shotId);
-    const story = ['description', 'scene', 'locationId', 'characterIds', 'action', 'dialogue', 'startState', 'endState', 'forbidden', 'method'];
+    const story = ['description', 'scene', 'locationId', 'characterIds', 'action', 'dialogue', 'startState', 'endState', 'forbidden', 'method', 'themes'];
     const touchesStory = 'description' in body || story.some((key) => body.details && key in body.details);
     if (shot.details.locked && touchesStory && body.details?.locked !== false) {
       throw new RequestError(409, `Shot ${shot.position} is locked (approved screenplay). Unlock it first to revise it.`);
@@ -315,6 +354,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       sequence.settings.lookBible,
       kind === 'clip' ? 'Keep every person exactly as in the start frame: same face, hair, clothes and colours; same set and lighting.' : '',
       d.forbidden ? `Must not change: ${d.forbidden}` : '',
+      ...d.themes.map((name) => themeVisual(sequence.settings.themes, name)).filter(Boolean),
       consistency,
     ].filter(Boolean).join('\n').slice(0, 3900);
   }
