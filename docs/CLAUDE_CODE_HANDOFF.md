@@ -110,3 +110,11 @@ Final full suite with the actual packaged AppImage configured: **98 tests, 96 pa
 ### Published v0.9.2 checkpoint
 
 Commit **2abf82b** pushed to public main. Release https://github.com/everett6/lumina-studio-app/releases/tag/v0.9.2 published with AppImage, .deb and checksums. GitHub asset SHA256 digests match the locally built artifacts. Installed `~/Applications/Lumina-Studio.AppImage` updated atomically; existing running user instances not interrupted. Runtime upgrade/new tools require restart. The 50-step pilot has reached inference step 50 but decode/save completion is still pending at this checkpoint; do not count it as passed.
+
+### Production inference checkpoint
+
+The bounded full-step Wan pilot completed successfully: 49 frames, 50 inference steps, 1280×704, 24 fps, 2.041667-second output. Wall time 435266 ms (~7.25 minutes); worker reported inference 413.1 seconds. No out-of-memory notice/error appeared in the captured log. The worker exited before GPU finishing started. This is one real workstation run, not a universal memory guarantee.
+
+Started dependent finishing: fresh local Kokoro line (“Evening falls.”), speech-fit validation, per-shot RIFE to 30 fps, native 1280×720 assembly, audio mix, completed-film anime upscale to 1920×1080, final encode and five visual review samples. Status will be written to `/tmp/lumina-overnight/production-pilot/finish-status.json`; do not assume success before checking it. No paid cloud requests.
+
+New follow-up found while planning audio validation: `lineTimes` reports dialogue overrun, but sequence stitching currently ignores that value. Next change should refuse or pause finishing when measured dialogue exceeds the shot, instead of silently truncating it; preserve all recorded audio and have MCP revise the line or extend the shot. Add a regression before changing this behavior.
