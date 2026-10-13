@@ -38,6 +38,8 @@ const table = {
   'openrouter|minimax/hailuo-3': { usd: 0.13, per: 'second' },
   'openrouter|bytedance/seedance-2.0': { text: 'Billed per video token; the cost depends on length and resolution' },
   // Pretend prices for the offline test provider, so budget limits can be exercised without spending anything.
+  // Runs on this computer: no charge.
+  'local|wan2.2-ti2v-5b': { usd: 0, per: 'image', free: true },
   'mock|mock-image': { usd: 0.01, per: 'image', pretend: true },
   'mock|mock-video': { usd: 0.01, per: 'second', pretend: true },
   'mock|mock-voice': { usd: 0.001, per: 'image', pretend: true },

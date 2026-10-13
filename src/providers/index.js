@@ -4,9 +4,10 @@ import gemini from './gemini.js';
 import replicate from './replicate.js';
 import mock from './mock.js';
 import openrouter from './openrouter.js';
+import local from './local.js';
 
 export function createProviders({ enableMock = process.env.LUMINA_MOCK === '1' } = {}) {
-  const list = [openrouter, openai, fal, gemini, replicate, ...(enableMock ? [mock] : [])];
+  const list = [openrouter, local, openai, fal, gemini, replicate, ...(enableMock ? [mock] : [])];
   const byId = new Map(list.map((provider) => [provider.id, provider]));
   return {
     list,

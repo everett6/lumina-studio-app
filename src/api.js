@@ -83,7 +83,7 @@ export function createApiServer(ctx) {
     return {
       providers: providers.list.map((p) => ({
         id: p.id, label: p.label, keyUrl: p.keyUrl ?? null, keyless: Boolean(p.keyless),
-        ready: Boolean(p.keyless || keyStatus[p.id]?.configured), models: p.models.map(({ liveSkus, livePrice, ...m }) => ({ ...m, defaultResolution: defaultResolution(m), price: catalogPrice(p.id, { ...m, liveSkus, livePrice }) })),
+        ready: Boolean(p.keyless ? (p.available?.() ?? true) : keyStatus[p.id]?.configured), note: p.keyless && p.available && !p.available() ? p.unavailableNote : undefined, models: p.models.map(({ liveSkus, livePrice, ...m }) => ({ ...m, defaultResolution: defaultResolution(m), price: catalogPrice(p.id, { ...m, liveSkus, livePrice }) })),
       })),
       directors: directors.list.map((d) => ({
         id: d.id, label: d.label, models: d.models, ready: Boolean(d.keyless || keyStatus[d.keyProvider]?.configured),

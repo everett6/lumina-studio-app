@@ -109,7 +109,7 @@ function modelPicker(kind, operation, label) {
     const [provider, model] = select.value.split('|');
     saveSettings({ [`${kind}Provider`]: provider ?? '', [`${kind}Model`]: model ?? '' });
   } }, h('option', { value: '' }, 'Choose…'),
-  ...options.map(({ provider, model, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${model.label}${provider.ready ? '' : ' (add key)'}`)));
+  ...options.map(({ provider, model, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${model.label}${provider.ready ? '' : provider.keyless ? ' (not installed)' : ' (add key)'}`)));
   select.value = options.some((o) => o.value === `${settings[`${kind}Provider`]}|${settings[`${kind}Model`]}`) ? `${settings[`${kind}Provider`]}|${settings[`${kind}Model`]}` : '';
   return h('label', {}, h('span.field-label', {}, label), select);
 }

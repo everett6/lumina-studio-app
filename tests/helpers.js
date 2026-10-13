@@ -6,6 +6,8 @@ import { encodePng } from '../src/png.js';
 
 process.env.LUMINA_MOCK_DELAY_MS = '20';
 process.env.LUMINA_OFFLINE = '1'; // tests never reach the network (no model-list refresh)
+// Tests never use a real local GPU model, even when one is installed on this computer: point at an empty model cache.
+process.env.HF_HUB_CACHE = mkdtempSync(path.join(tmpdir(), 'lumina-hf-empty-'));
 
 export const tinyPng = () => encodePng(4, 4, () => [200, 40, 40]);
 export const tinyPngDataUrl = () => `data:image/png;base64,${tinyPng().toString('base64')}`;

@@ -25,7 +25,7 @@ function renderModelOptions() {
   const previous = select.value;
   const options = modelsFor(operation);
   select.replaceChildren(...options.map(({ provider, model, value }) => h('option', { value, disabled: !provider.ready },
-    `${provider.label} · ${model.label}${provider.ready ? '' : ' (add key)'}`)));
+    `${provider.label} · ${model.label}${provider.ready ? '' : provider.keyless ? ' (not installed)' : ' (add key)'}`)));
   const ready = options.filter((o) => o.provider.ready);
   const saved = (() => { try { return localStorage.getItem(`lumina-model-${operation}`); } catch { return null; } })();
   select.value = [previous, saved].find((v) => ready.some((o) => o.value === v)) ?? ready[0]?.value ?? '';

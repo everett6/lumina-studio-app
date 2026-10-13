@@ -34,7 +34,7 @@ function writerSelect(selected) {
 
 function modelSelect(operation, storageKey) {
   const select = h('select', { 'aria-label': `${operation} model` },
-    ...modelsFor(operation).map(({ provider, model, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${model.label}${provider.ready ? '' : ' (add key)'}`)));
+    ...modelsFor(operation).map(({ provider, model, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${model.label}${provider.ready ? '' : provider.keyless ? ' (not installed)' : ' (add key)'}`)));
   let saved = null;
   try { saved = localStorage.getItem(storageKey); } catch { /* ignore */ }
   const ready = [...select.options].filter((o) => !o.disabled).map((o) => o.value);
@@ -173,7 +173,7 @@ function narrationSettings(narration, save) {
   const models = modelsFor('speech');
   const voice = h('select', { 'aria-label': 'Voice' });
   const model = h('select', { 'aria-label': 'Narration model' }, h('option', { value: '' }, 'Choose a voice model…'),
-    ...models.map(({ provider, model: m, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${m.label}${provider.ready ? '' : ' (add key)'}`)));
+    ...models.map(({ provider, model: m, value }) => h('option', { value, disabled: !provider.ready }, `${provider.label} · ${m.label}${provider.ready ? '' : provider.keyless ? ' (not installed)' : ' (add key)'}`)));
   model.value = narration.provider ? `${narration.provider}|${narration.model}` : '';
   const fillVoices = () => {
     const found = models.find((m) => m.value === model.value);
