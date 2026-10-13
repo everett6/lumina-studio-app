@@ -85,10 +85,13 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     origin, port: address.port, token, tokenFile, launchUrl: `${origin}/?token=${token}`, repo, jobs, generations, canvasRunner, keys,
     remote,
     async close() {
+      sequences.stopAllProductions();
       await remote.shutdown();
       await new Promise((resolve) => server.close(resolve));
       server.closeAllConnections?.();
+      await jobs.idle();
       await sequences.idle();
+      await jobs.idle();
       db.close();
     },
   };

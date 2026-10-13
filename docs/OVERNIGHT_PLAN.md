@@ -48,3 +48,5 @@ Reviewers read source only and return exact file/line findings. They do not read
 ## Current checkpoint
 
 First scheduled review launch occurred at 06:39 UTC. All three Sonnet 5.5 sessions failed authentication (expired Claude Code OAuth), with zero tokens/cost; workers exited. Parent implementation continues without replacing the requested reviewers. Credit enforcement, completed-film upscaling and source-timestamp interpolation fixes are implemented and regression-tested. Real local whole-film pilot and comparison artifacts passed the bounded checks documented in the handoff log. Packaging/live cloud/web-client verification remains pending.
+
+Second heartbeat: GPU contention and frame-clock defects fixed; shutdown/restart and mixed-rate/cut tests added. Version 0.9.1 packaged and smoke-tested in a temporary profile. Final regression/release verification in progress; live cloud/web-client and broader motion-quality acceptance remain pending.

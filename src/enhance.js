@@ -4,6 +4,7 @@ import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { probe, run, runCapture, runVideo, videoEncoder } from './video.js';
 import { fetchZipEntries, readZip } from './zip.js';
+import { withGpuLease } from './providers/local.js';
 
 // Align to source timestamps rather than stretching the last source frame to the end of the audio.
 export function interpolationTimeline(sourceFrames, sourceFps, targetFps) {
@@ -88,7 +89,7 @@ export function createEnhancer({ binDir, workDir, log = console }) {
 
   // Smoother motion: RIFE makes the in-between frames so the clip plays at `fps` (same length, same sound).
   // Returns null when the clip already runs at that rate or faster.
-  async function interpolate(file, { fps = 30, allowDownload = false, onProgress } = {}) {
+  async function interpolateInner(file, { fps = 30, allowDownload = false, onProgress } = {}) {
     const info = await probe(file);
     if (info.fps >= fps - 0.5) return null;
     const cuts = (await runCapture('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-vf', "select='gt(scene,0.4)',showinfo", '-an', '-f', 'null', '-'], 300_000)).stderr;
@@ -161,7 +162,7 @@ export function createEnhancer({ binDir, workDir, log = console }) {
 
   // Returns { bytes, width, height, duration } for the enhanced MP4. `target` fits the result inside a size
   // (e.g. 1920×1080); `profile` 'mezzanine' keeps it near-lossless for further processing.
-  async function enhanceVideo(file, { mode = 'fast', allowDownload = false, onProgress, preparedTool, target = null, profile = 'final', deflicker = true } = {}) {
+  async function enhanceVideoInner(file, { mode = 'fast', allowDownload = false, onProgress, preparedTool, target = null, profile = 'final', deflicker = true } = {}) {
     const info = await probe(file);
     const size = targetSize(info.width, info.height, target);
     if (size.width <= info.width) throw Object.assign(new Error(target ? 'This video is already at least that size.' : 'This video is already 4K; there is nothing to upscale.'), { status: 400 });
@@ -269,5 +270,7 @@ export function createEnhancer({ binDir, workDir, log = console }) {
     return { ai, rife, downloadMb: { ai: 47, rife: 20 } };
   }
 
+  const interpolate = (...args) => withGpuLease(() => interpolateInner(...args));
+  const enhanceVideo = (...args) => withGpuLease(() => enhanceVideoInner(...args));
   return { enhanceVideo, interpolate, aiTool, rifeTool, tools, start, status: (assetId) => jobs.get(assetId) ?? null, targetSize };
 }

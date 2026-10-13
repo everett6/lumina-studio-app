@@ -64,3 +64,20 @@ Append evidence and decisions as work progresses. Do not turn earlier “planned
 - This pilot uses local media, not a paid cloud render, and is too short to establish production-quality motion. No cloud credits spent. Real cloud/Wan interoperability is represented by adapter/mixed-provider regressions, not falsely claimed as a live cloud test.
 - Sonnet worker PIDs have exited. OAuth failure remains actionable; no duplicate launches or substitutions.
 - Next heartbeat: broader interpolation/occlusion and error/restart coverage, packaging smoke/release preparation, public README verification, and remaining live-client checks where accessible. Existing v0.9.0 installation remains unchanged until the new build passes.
+
+## Second heartbeat: GPU isolation, shutdown and exact frame clocks
+
+- Added a shared FIFO across local model generation and RIFE/Real-ESRGAN finishing. Idle Python workers release their weights before finishing starts. Model switching now awaits process exit, escalates SIGTERM to SIGKILL after five seconds, and fails closed after ten seconds if exit cannot be confirmed. Scope: one backend process; other programs/backends can still contend for VRAM.
+- Worker startup/stdin errors reject the request explicitly. Regression fixture proves delayed shutdown finishes before replacement begins. Queue failures do not block later tasks. Four targeted GPU/worker tests passed.
+- App close pauses production scheduling, drains queued generation, awaits finishing/check writes, and then closes SQLite. A five-job close/restart regression retains all completed images with working asset URLs. Sequence tracking no longer creates unhandled rejected cleanup promises.
+- New synthetic mixed-provider regression initially found 24 fps became 24.02085 fps because Matroska intermediates quantized timestamps to milliseconds. Fixed intermediates to MOV with a 120000-Hz video timebase and explicit frame-derived concat durations. Tests now check 24/25/30/50/60 fps, exact frame counts, hard-cut colors, audio and monotonic decode timestamps. No real cloud call was used.
+- `npm run doctor`: Wan, Animagine, Kokoro and Chatterbox installed; RTX 5070/Python runtime available; ffmpeg/ffprobe, RIFE and anime upscaler available. This is availability evidence, not proof every production workload fits memory.
+- Full regression after frame-clock fix: 94 tests, 92 passed, two skipped, zero failures. Subsequent missing-executable test passed in the four-test GPU/worker run; a final full release suite is in progress.
+- Built v0.9.1 `.deb` and AppImage. Final AppImage launched using a separate temporary profile and captured the rendered UI without logged startup errors. Artifacts: `/tmp/lumina-overnight/build-091-final.log`, `/tmp/lumina-overnight/smoke-091-final/window.png` and `electron.log`. Existing user data was not used for this smoke test.
+- Real installed RIFE re-run through the new queue: 1280×704 / 30 fps / 0.733008 s / 17 restored anchors; `/tmp/lumina-overnight/real/wan-queued-interpolation.mp4`.
+- README/MCP/architecture docs updated for 0.9.1 and corrected to show upscaling after the mixed native master. Reviewers remain stopped/auth blocked; no cap changes, top-ups, paid generation or lip-sync work.
+- Still pending acceptance: real signed-in ChatGPT/claude.ai, bounded live cloud render, broader production-quality occlusion/drift evaluation, and a self-contained packaged stdio MCP command (current Claude Code setup uses the repository MCP script). Do not describe these as tested.
+
+### v0.9.1 release gate
+
+Final full suite (`/tmp/lumina-night-091-release-tests.log`): **95 tests, 93 passed, two skipped, zero failures**. JavaScript checks, local Python AST checks and diff whitespace checks passed. Final packaged AppImage smoke passed with an empty startup log and a rendered window. Checksums prepared under `/tmp/lumina-overnight/release-091`. Publishing this bounded verified patch; live-account/production-quality acceptance remains explicitly pending.

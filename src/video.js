@@ -184,7 +184,7 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
     const parts = [];
     for (const [index, file] of files.entries()) {
       const info = infos[index];
-      const part = path.join(dir, `part-${String(index).padStart(4, '0')}.mkv`);
+      const part = path.join(dir, `part-${String(index).padStart(4, '0')}.mov`);
       const item = items[index];
       // With a set duration, the piece is that long (plus the crossfade overlap it lends to the next shot).
       const target = item.duration != null ? item.duration + (dissolve && index < files.length - 1 ? fadeSeconds : 0) : null;
@@ -200,8 +200,8 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
         '-map', '0:v:0', '-map', ownSound ? '0:a:0' : '1:a:0',
         '-vf', `${item.vf ? `${item.vf},` : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${rate}${hold},format=yuv420p`,
         '-af', `${audioFormat}${target != null ? ',apad' : ''}${edges}`, ...encode, ...pieceAudio,
-        '-frames:v', String(frames), '-t', (frames / rate).toFixed(4), '-y', part], 600_000);
-      parts.push({ file: part, duration: (await probe(part)).duration });
+        '-frames:v', String(frames), '-t', (frames / rate).toFixed(9), '-video_track_timescale', '120000', '-y', part], 600_000);
+      parts.push({ file: part, duration: frames / rate });
       step();
     }
 
@@ -214,30 +214,36 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
       for (const [index, part] of parts.entries()) {
         const start = index > 0 ? fade : 0;
         const end = part.duration - (index < parts.length - 1 ? fade : 0);
-        const body = path.join(dir, `body-${String(index).padStart(4, '0')}.mkv`);
+        const body = path.join(dir, `body-${String(index).padStart(4, '0')}.mov`);
         await runVideo(['-v', 'error', '-i', part.file, '-ss', start.toFixed(3), '-t', (end - start).toFixed(3),
-          ...encode, ...pieceAudio, '-y', body], 600_000);
+          ...encode, ...pieceAudio, '-video_track_timescale', '120000', '-y', body], 600_000);
         pieces.push(body);
         step();
         if (index === parts.length - 1) break;
-        const blend = path.join(dir, `blend-${String(index).padStart(4, '0')}.mkv`);
+        const blend = path.join(dir, `blend-${String(index).padStart(4, '0')}.mov`);
         await runVideo(['-v', 'error', '-ss', (part.duration - fade).toFixed(3), '-i', part.file, '-t', fade.toFixed(3), '-i', parts[index + 1].file,
           '-filter_complex', `[0:v]setpts=PTS-STARTPTS,fps=${rate}[a];[1:v]setpts=PTS-STARTPTS,fps=${rate}[b];[a][b]xfade=transition=fade:duration=${fade}:offset=0,format=yuv420p[v];`
             + `[0:a]asetpts=PTS-STARTPTS[x];[1:a]asetpts=PTS-STARTPTS[y];[x][y]acrossfade=d=${fade}[au]`,
-          '-map', '[v]', '-map', '[au]', '-t', fade.toFixed(3), ...encode, ...pieceAudio, '-y', blend], 600_000);
+          '-map', '[v]', '-map', '[au]', '-t', fade.toFixed(3), ...encode, ...pieceAudio, '-video_track_timescale', '120000', '-y', blend], 600_000);
         pieces.push(blend);
         step();
       }
     }
 
     const list = path.join(dir, 'list.txt');
-    await writeFile(list, pieces.map((piece) => `file '${piece.replace(/'/g, "'\\''")}'`).join('\n'));
+    const entries = [];
+    for (const piece of pieces) {
+      const info = await probe(piece);
+      const seconds = info.frames ? info.frames / info.fps : info.duration;
+      entries.push(`file '${piece.replace(/'/g, "'\\''")}'\nduration ${seconds.toFixed(9)}`);
+    }
+    await writeFile(list, entries.join('\n'));
     let out = path.join(dir, 'joined.mp4');
     // With set durations the film is exactly their sum (the audio's last AAC frame would add ~21 ms).
     const exact = items.every((item) => item.duration != null) ? items.reduce((sum, item) => sum + item.duration, 0) : null;
     // Pictures are copied as they are; the joined sound is encoded once.
     await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c:v', 'copy', ...audioArgs, ...(exact ? ['-t', exact.toFixed(3)] : []),
-      '-video_track_timescale', '15360', '-movflags', '+faststart', '-y', out], 600_000);
+      '-video_track_timescale', '120000', '-movflags', '+faststart', '-y', out], 600_000);
     step();
 
     if (deliver) {

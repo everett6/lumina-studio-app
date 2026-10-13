@@ -1,6 +1,6 @@
 # Lumina Studio
 
-**Version 0.9.0** adds an anime film production workflow. See [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md) for the strict $12 budget profile, local generation setup, MCP workflow, verification notes and shipping prerequisites.
+**Version 0.9.1** adds an anime film production workflow. See [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md) for the strict $12 budget profile, local generation setup, MCP workflow, verification notes and shipping prerequisites.
 
 Lumina Studio is an open-source, Linux-first creative workspace for AI images. Bring your own API keys for OpenAI,
 fal.ai, Google Gemini or Replicate. Generate and edit images, keep everything in local projects, build reusable
@@ -33,7 +33,7 @@ database and folder.
 | Projects and library | SQLite storage, reusable references, audio and video in the library, rename, export to a folder, delete. |
 | Canvas | Prompt, reference, director, generate, edit, video and output nodes. Drag to connect, pan and zoom, autosave, undo and redo, built-in templates and templates saved from your own canvases, run all or up to one node. |
 | Desktop app | Electron `.deb` and AppImage. Keys encrypted with your system keyring. |
-| Claude Code / Claude Desktop | Local stdio MCP server with 50 tools (images, video, voice, presets, characters and locations, image tools, storyboards, film review, cost estimates, budget, canvas, books). See [docs/MCP.md](docs/MCP.md). |
+| Claude Code / Claude Desktop | Local stdio MCP server with tools (images, video, voice, presets, characters and locations, image tools, storyboards, film review, cost estimates, budget, canvas, books). See [docs/MCP.md](docs/MCP.md). |
 | Host online / claude.ai / ChatGPT | **Settings → Host Lumina online**: one click opens a free Cloudflare quick tunnel and gives you a public `https://….trycloudflare.com` address. Create a **Lumina account** (username + password) in Settings first. Open the address in any browser and sign in to use Lumina as a website, and add `…/mcp` to claude.ai or ChatGPT as a connector (OAuth; you approve by signing in with the same account). Includes the `search` and `fetch` tools ChatGPT connectors require. Lumina downloads Cloudflare's `cloudflared` the first time if it isn't installed. Tested over a real tunnel with an MCP client and from the public internet; **not yet tried from claude.ai or ChatGPT themselves**. You can also bring your own tunnel for a permanent address. |
 
 Every flow in the table has been exercised with the built-in offline mock providers (image, voice, video, writer), in
@@ -52,13 +52,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.9.0_amd64.deb
+sudo apt install ./dist/lumina-studio_0.9.1_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.9.0.AppImage"
+chmod +x "dist/Lumina Studio-0.9.1.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
@@ -118,7 +118,7 @@ Paid generations can incur provider charges. Lumina estimates and reserves known
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, data model, jobs, providers, canvas, security.
 - [docs/MCP.md](docs/MCP.md): connecting local MCP clients and web clients through OAuth and a tunnel.
-- [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md): version 0.9.0 anime production workflow and verification limits.
+- [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md): version 0.9.1 anime production workflow and verification limits.
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next and known limits.
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -126,8 +126,10 @@ Paid generations can incur provider charges. Lumina estimates and reserves known
 
 MIT. See [LICENSE](LICENSE).
 
-### Overnight production safeguards (source updates)
+### Production safeguards
 
 MCP `openrouter_credit_status` reads the configured key's remaining allowance without changing its limit. New OpenRouter jobs require a fresh known allowance sufficient for unresolved reservations and the protected retry reserve. Account-wide credits remain unavailable without a management key. Already accepted video jobs are polled rather than resubmitted.
 
 Finishing now interpolates per shot, assembles and mixes at native master size, then upscales the completed film. Upscaling does not blend frames across cuts; unchanged mixed masters reuse their cached upscale. RIFE restores source anchors before encoding and aligns them to the nearest delivery frame. These safeguards do not guarantee artifact-free motion or identity consistency; review the result before buying another take.
+
+Local model generation and GPU finishing share a FIFO queue in each Lumina backend. Model changes wait for the previous worker to exit; quitting waits for queued generation and finishing writes before closing SQLite. Other applications or separate backend processes can still consume GPU memory.

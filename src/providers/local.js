@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProviderError } from './http.js';
+import { gpuQueue } from '../gpu.js';
 
 // Local GPU: open-weight models run on this computer with Hugging Face diffusers — no API, no key, no cost.
 // Wan 2.2 TI2V-5B (Apache 2.0) makes both the still frame (one-frame generation) and the clip (text-to-video, or
@@ -88,17 +89,27 @@ const kokoroVoices = ['af_heart', 'af_bella', 'af_nicole', 'af_aoede', 'af_kore'
   'bf_emma', 'bf_isabella', 'bf_alice', 'bf_lily', 'bm_george', 'bm_fable', 'bm_lewis', 'bm_daniel',
   'jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo'];
 
-function createWorker(workerFile, python = findPython) {
+export function createWorker(workerFile, python = findPython) {
   let child = null;
   let buffer = '';
   let idleTimer = null;
   const waiting = new Map(); // request id → { resolve, reject, onProgress }
   let counter = 0;
+  let stopping = null;
 
   function stop() {
     clearTimeout(idleTimer);
-    if (child) child.kill('SIGTERM');
-    child = null;
+    if (stopping) return stopping;
+    if (!child) return Promise.resolve();
+    const current = child;
+    stopping = new Promise((resolve, reject) => {
+      const forced = setTimeout(() => current.kill('SIGKILL'), 5000);
+      const failed = setTimeout(() => reject(new ProviderError('provider', 'The previous local model did not exit; GPU work is paused to avoid memory contention.')), 10000);
+      current.once('exit', () => { clearTimeout(forced); clearTimeout(failed); resolve(); });
+      current.kill('SIGTERM');
+    });
+    stopping.then(() => { stopping = null; }, () => {});
+    return stopping;
   }
 
   function start() {
@@ -106,6 +117,15 @@ function createWorker(workerFile, python = findPython) {
     const executable = python();
     if (!executable) throw new ProviderError('provider', 'No Python with PyTorch (CUDA) and diffusers was found. Set LUMINA_PYTHON to one.');
     child = spawn(executable, [workerFile], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONUNBUFFERED: '1' } });
+    buffer = '';
+    child.on('error', (error) => {
+      for (const job of waiting.values()) job.reject(new ProviderError('provider', `The local worker could not start: ${error.message}`));
+      waiting.clear(); child = null;
+    });
+    child.stdin.on('error', (error) => {
+      for (const job of waiting.values()) job.reject(new ProviderError('provider', `The local worker input closed: ${error.message}`));
+      waiting.clear();
+    });
     let stderr = '';
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-4000); });
     child.stdout.on('data', (chunk) => {
@@ -135,6 +155,7 @@ function createWorker(workerFile, python = findPython) {
   // The worker stays loaded until it has been idle for a while. Callers go through `gpu` (one job at a time).
   async function request(payload, onProgress) {
     clearTimeout(idleTimer);
+    if (stopping) await stopping;
     start();
     const id = `job-${++counter}`;
     const result = new Promise((resolve, reject) => waiting.set(id, { resolve, reject, onProgress }));
@@ -142,7 +163,7 @@ function createWorker(workerFile, python = findPython) {
     try {
       return await result;
     } finally {
-      idleTimer = setTimeout(stop, idleMs);
+      idleTimer = setTimeout(() => { stop().catch((error) => console.error('Local model shutdown failed', { detail: error.message })); }, idleMs);
       idleTimer.unref?.();
     }
   }
@@ -176,18 +197,22 @@ export async function lipSync({ video, audio, mode, box, mouths, out }) {
   await gpu('lipsync', { task: 'lipsync', mode: flaps ? 'flaps' : 'musetalk', video, audio, box, mouths, out }, null, { exclusive: !flaps });
   return out;
 }
-process.once('exit', () => Object.values(workers).forEach((w) => w.stop()));
+process.once('exit', () => Object.values(workers).forEach((w) => { w.stop().catch(() => {}); }));
 // One GPU job at a time across both models; the other model's worker is stopped first so the GPU is free for it.
-let queue = Promise.resolve();
 function gpu(name, payload, onProgress, { exclusive = true } = {}) {
-  const run = () => {
-    // Kokoro runs on the CPU: it can share the machine with a loaded video model.
-    if (exclusive) for (const [other, w] of Object.entries(workers)) if (other !== name) w.stop();
+  return gpuQueue.run(async () => {
+    // Await release of the previous model's VRAM before starting another allocation.
+    if (exclusive) await Promise.all(Object.entries(workers).filter(([other]) => other !== name).map(([, w]) => w.stop()));
     return workers[name].request(payload, onProgress);
-  };
-  const next = queue.then(run, run);
-  queue = next.catch(() => {});
-  return next;
+  });
+}
+
+// RIFE/Real-ESRGAN use the same GPU as Wan/Animagine. Idle Python workers must also release their weights.
+export function withGpuLease(task) {
+  return gpuQueue.run(async () => {
+    await Promise.all(Object.values(workers).map((worker) => worker.stop()));
+    return task();
+  });
 }
 
 async function inTemp(fn) {

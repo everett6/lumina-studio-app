@@ -162,10 +162,10 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   const pending = new Set(); // background checks and probes, awaited on shutdown
   const track = (promise) => {
     pending.add(promise);
-    promise.finally(() => pending.delete(promise));
+    promise.then(() => pending.delete(promise), () => pending.delete(promise));
     return promise;
   };
-  const idle = () => Promise.allSettled([...pending]);
+  const idle = async () => { while (pending.size) await Promise.allSettled([...pending]); };
   const producing = new Map(); // storyboard id -> { state, step, error }
   const needSequence = (id) => repo.sequences.get(id) ?? (() => { throw new RequestError(404, 'Storyboard not found.'); })();
   // Shots added by hand (or made before details existed) get every detail field filled in on read.
@@ -781,6 +781,10 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     return detail(id);
   }
 
+  function stopAllProductions() {
+    for (const production of producing.values()) if (production.state === 'running') Object.assign(production, { state: 'paused', step: 'App closing; queued jobs will finish' });
+  }
+
   function stopProduction(id) {
     const production = producing.get(id);
     if (production?.state === 'running') Object.assign(production, { state: 'paused', step: 'Stopped (jobs already started will finish)' });
@@ -941,7 +945,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       Object.assign(production, { state: 'paused', error: `Shot ${shot.position} ${what} failed: ${generation.userError ?? 'unknown error'}. Fix it, then press Produce film to continue.` });
       return;
     }
-    if (generation.status === 'completed') advance(shot.sequenceId).catch((error) => log.error?.('Production step failed', { detail: error.message }));
+    if (generation.status === 'completed') track(advance(shot.sequenceId).catch((error) => log.error?.('Production step failed', { detail: error.message })));
   }
 
   // Signature of what a shot's film depends on (for reports): its clip, frame and recorded lines.
@@ -949,6 +953,6 @@ export function createSequenceService({ repo, directors, keys, generations, asse
 
   return {
     detail, create, update, plan, importPlan, updateShot, review, approveFrame, generateFrame, animate, renderStillShot, runChecks, makeDialogue, lipSyncShot,
-    stitch, produce, stopProduction, onGenerationUpdate, idle, needShot, needSequence, outputSize, shotFingerprint,
+    stitch, produce, stopProduction, stopAllProductions, onGenerationUpdate, idle, needShot, needSequence, outputSize, shotFingerprint,
   };
 }

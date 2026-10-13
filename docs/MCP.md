@@ -117,7 +117,7 @@ Tested 2026-10-12: GPT-6 Astra created a project, imported a 6 fps anime clip an
 
 Node.js 22.13 or newer is required. Run `npm install` in the repository first so the MCP SDK is present.
 
-## Version 0.9.0 anime production
+## Version 0.9.1 anime production
 
 For a strict $12 profile, turn on **Settings → Budget → Use $12 anime budget**. This profile checks known prices,
 rejects requests without a known unit price, counts existing spending, sets a $2 per-request limit, requires approval
@@ -213,7 +213,7 @@ schemas without the `$schema` keyword, and advertises `offline_access`; ChatGPT'
 site root, an immediate token refresh, initialize, tools/list) was replayed against Lumina and succeeds. ChatGPT itself
 has not been re-tried since.
 
-Version 0.9.0 release limitation: no actual signed-in ChatGPT connection or paid Seedance render was tested. The
+Version 0.9.1 release limitation: no actual signed-in ChatGPT connection or paid Seedance render was tested. The
 OAuth and tunnel checks above used an MCP client and simulated ChatGPT's request sequence; they do not confirm the
 ChatGPT product's signed-in end-to-end behavior. No paid cloud job was submitted. Those acceptance checks still
 require the relevant account and provider setup. If a connection fails, the Lumina log shows the request.

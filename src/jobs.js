@@ -22,6 +22,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       execute(id).finally(() => {
         active -= 1;
         pump();
+        if (active === 0 && queue.length === 0) events.emit('idle');
       });
     }
   }
@@ -150,6 +151,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         events.on('update', onUpdate);
       });
     },
+    idle: () => active === 0 && queue.length === 0 ? Promise.resolve() : new Promise((resolve) => events.once('idle', resolve)),
     stats: () => ({ active, queued: queue.length }),
   };
 }

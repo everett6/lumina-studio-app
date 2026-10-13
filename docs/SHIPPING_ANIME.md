@@ -1,4 +1,4 @@
-# Anime production in Lumina 0.9.0
+# Anime production in Lumina 0.9.1
 
 ## The $12 workflow
 
@@ -7,8 +7,9 @@
 3. Write the screenplay in Claude/ChatGPT, then use `create_storyboard` with `plan:false` and `import_shot_plan`. No additional paid writer call is needed. Paid planning/refinement is blocked in strict-budget mode.
 4. Use local Animagine frames, local Kokoro voices, and local Wan 2.2 clips as the baseline. Assign Seedance or another priced cloud model only to selected shots, via `details.model: "openrouter|<id from list_models>"`. Refresh live models/prices before choosing. Unknown/token-only prices are blocked in strict mode. If Seedance has no usable published unit price, use Wan locally or another priced model rather than guessing.
 5. Set `look:"anime"`, a fixed look bible and character references, `narratorVoice`, `outputHeight:1080`, `upscale:"anime"`, and optionally `interpolateFps:30`. Use short still shots for quiet scenes and Wan for motion. Local does not incur an API bill, but needs electricity, GPU time and model storage.
-6. Call `production_readiness` and `estimate_film_cost`. Resolve all blockers. Approve the estimate and frames; call `produce_film`, poll `get_storyboard`, review clips, then resume production. Missing voices and tools stop production. Requested interpolation failures stop finishing instead of silently delivering unsmoothed video. In strict mode, paid clips proceed one at a time and pause for acceptance before another is submitted.
-7. Retrieve the final asset from the project library. Listen and watch the whole film before publishing. Lip sync is excluded from this release.
+6. Call `openrouter_credit_status` before cloud work. Null means unavailable, not unlimited. New OpenRouter jobs fail closed unless fresh key allowance covers unresolved reservations and protected retry money; accepted jobs continue polling without resubmission. Full account credit totals require a management key and are not fabricated.
+7. Call `production_readiness` and `estimate_film_cost`. Resolve all blockers. Approve the estimate and frames; call `produce_film`, poll `get_storyboard`, review clips, then resume production. Missing voices and tools stop production. Requested interpolation failures stop finishing instead of silently delivering unsmoothed video. In strict mode, paid clips proceed one at a time and pause for acceptance before another is submitted.
+8. Retrieve the final asset from the project library. Listen and watch the whole film before publishing. Lip sync is excluded from this release.
 
 ## MCP request and film stages
 
@@ -32,11 +33,11 @@ flowchart TD
   Cloud --> QC
   QC --> Accept[Review and accept clips]
   Accept --> RIFE[RIFE interpolation when requested]
-  RIFE --> Upscale[Real-ESRGAN anime upscaling]
-  Upscale --> Edit[Exact shot timeline + scene colour match]
+  RIFE --> Edit[Native master-size timeline + scene colour match]
   Voice --> Mix[Dialogue + music + ambience mix]
   Edit --> Mix
-  Mix --> Encode[Anime finish + final MP4 encode]
+  Mix --> Upscale[Completed-film Real-ESRGAN anime upscale]
+  Upscale --> Encode[Anime finish + final MP4 encode]
   Encode --> Asset[Saved film + MCP status / file path]
   Queue <--> DB[(SQLite jobs, ledger, shots, asset lineage)]
 ```
@@ -58,3 +59,11 @@ The `.deb` declares ffmpeg and Vulkan runtime dependencies. AppImage users must 
 Start with a 10–20 second pilot, then increase length. A five-minute film is an assembly of many short shots; it is not one 300-second model request. Delivery resolution and frame rate do not guarantee character consistency or animation quality. Review faces, motion, dialogue timing and themes before accepting shots.
 
 Run `npm run doctor` to report installed models, driver/Python availability, ffmpeg, RIFE and the upscaler without generating or spending.
+
+### 0.9.1 production checks
+
+Read-only key allowance enforcement, source-timestamp interpolation anchors, contiguous frame checks, completed-film upscaling after audio mixing, and final duration/audio checks are included. GPU finishing and local generation share one FIFO per backend; previous model workers must actually exit before another GPU allocation begins. Unchanged mixed masters reuse their upscaled output.
+
+A real local 1.5-second edit (Wan pilot + still-motion clip, Kokoro soundtrack) was assembled at 640×360, then upscaled with the installed Real-ESRGAN anime model to 1920×1080/30 fps. It has 45 video frames, monotonic decode timestamps, 1.509-second container duration, and audio peak -6.7 dB. One restored source anchor measured 42.82 dB PSNR after encoding. These measurements do not verify in-between motion against ground truth, full-quality Wan output, or live cloud generation.
+
+The scheduled Sonnet 5.5 reviews could not authenticate because Claude Code's OAuth session expired. No substitute model was used. Source review and tests continue; log details are in [CLAUDE_CODE_HANDOFF.md](CLAUDE_CODE_HANDOFF.md).
