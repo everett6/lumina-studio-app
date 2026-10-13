@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { stitchClips, probe, run } from '../src/video.js';
+import { deliveryFades, deliverFilm, stitchClips, probe, run } from '../src/video.js';
 const ffmpeg = spawnSync('ffmpeg', ['-version'], {stdio:'ignore'}).status === 0;
 
 test('mixed provider shapes/rates normalize to an exact timeline with cut boundaries and sound intact', {skip:!ffmpeg,timeout:60000}, async () => {
@@ -26,6 +26,14 @@ test('mixed provider shapes/rates normalize to an exact timeline with cut bounda
     const before=frames.stdout.subarray(14*3,15*3),after=frames.stdout.subarray(15*3,16*3);
     assert.ok(before[0]>200 && before[2]<25,`red outgoing frame ${before}`);
     assert.ok(after[2]>200 && after[0]<25,`blue incoming frame ${after}`);
+    if (rate === 24) {
+      const finished=path.join(root,'anime-finish.mp4');
+      await deliverFilm(output,finished,{finish:'anime'});
+      const colors=spawnSync('ffmpeg',['-v','error','-i',finished,'-vf','scale=1:1','-f','rawvideo','-pix_fmt','rgb24','-'],{maxBuffer:10000});
+      assert.equal(colors.status,0);
+      assert.ok(colors.stdout[14*3]>200 && colors.stdout[14*3+2]<25,'outgoing cut stays red after finish');
+      assert.ok(colors.stdout[15*3+2]>200 && colors.stdout[15*3]<25,'incoming cut stays blue after finish');
+    }
     const packets=JSON.parse(await run('ffprobe',['-v','error','-show_packets','-show_entries','packet=stream_index,dts_time','-of','json',output],10000));
     const previous=new Map();
     for (const p of packets.packets) {
@@ -35,4 +43,12 @@ test('mixed provider shapes/rates normalize to an exact timeline with cut bounda
     }
     }
   } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+
+test('delivery fades occupy at most twenty percent of short films and retain long-film defaults', () => {
+  assert.deepEqual(deliveryFades(2,'anime'),{in:0.2,out:0.2});
+  assert.deepEqual(deliveryFades(30,'cinematic'),{in:1,out:1.5});
+  assert.deepEqual(deliveryFades(30,'anime'),{in:0.6,out:1});
+  assert.throws(()=>deliveryFades(0,'anime'));
 });

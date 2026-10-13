@@ -278,3 +278,24 @@ test('themes: the writer is told to show each theme on screen, shots are tagged,
     await t.close();
   }
 });
+
+test('recorded dialogue that exceeds the shot pauses finishing without truncating or deleting audio', {skip:!media,timeout:60000}, async () => {
+  const t = await startTestApp();
+  try {
+    const {id}=await filmSetup(t,{shotCount:1,upscale:'none'});
+    const shot=(await t.call('POST',`/api/storyboards/${id}/plan`,{})).body.shots[0];
+    await t.call('PATCH',`/api/shots/${shot.id}`,{duration:4,details:{dialogue:[{speaker:'narrator',text:'This recorded speech is deliberately much longer than the four second shot and must never be silently cut.'}]}});
+    const voice=await t.call('POST',`/api/shots/${shot.id}/dialogue`,{});
+    for(const g of voice.body.queued) await t.call('POST',`/api/generations/${g.id || g}/wait`,{timeoutMs:10000});
+    const voiced=await waitFor(t,id,(d)=>d.shots[0].details.dialogue[0].assetId);
+    const audioId=voiced.shots[0].details.dialogue[0].assetId;
+    await wait(t,await t.call('POST',`/api/shots/${shot.id}/frame`,{}));
+    await wait(t,await t.call('POST',`/api/shots/${shot.id}/animate`,{}));
+    const result=await t.call('POST',`/api/storyboards/${id}/stitch`,{wait:true});
+    assert.equal(result.status,502,JSON.stringify(result.body));
+    assert.match(result.body.error,/dialogue.*exceed|speech.*fit/i);
+    assert.ok(t.app.repo.assets.get(audioId),'recorded audio retained');
+    assert.ok(t.app.repo.shots.get(shot.id).videoAssetId,'source clip retained');
+    assert.equal(t.app.repo.sequences.get(id).outputAssetId,null);
+  } finally { await t.close(); }
+});

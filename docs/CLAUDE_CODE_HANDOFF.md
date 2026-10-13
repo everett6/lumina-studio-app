@@ -118,3 +118,16 @@ The bounded full-step Wan pilot completed successfully: 49 frames, 50 inference 
 Started dependent finishing: fresh local Kokoro line (“Evening falls.”), speech-fit validation, per-shot RIFE to 30 fps, native 1280×720 assembly, audio mix, completed-film anime upscale to 1920×1080, final encode and five visual review samples. Status will be written to `/tmp/lumina-overnight/production-pilot/finish-status.json`; do not assume success before checking it. No paid cloud requests.
 
 New follow-up found while planning audio validation: `lineTimes` reports dialogue overrun, but sequence stitching currently ignores that value. Next change should refuse or pause finishing when measured dialogue exceeds the shot, instead of silently truncating it; preserve all recorded audio and have MCP revise the line or extend the shot. Add a regression before changing this behavior.
+
+### Full production pilot completed; audio truncation fixed
+
+- Dependent finishing completed in 26120 ms: real fresh Kokoro line 1.066667 seconds at offset 0.4, RIFE, native master/mix, completed-film Real-ESRGAN anime upscale and finish. Output `/tmp/lumina-overnight/production-pilot/anime-pilot.mp4`: 1920×1080, 30 fps, 60 frames, 2.005 seconds; audio peak -3.1 dB / mean -22.0 dB. Both streams have monotonic decode timestamps. Review samples are saved beside the film; sampled blue coat/silhouette/rooftop/sky look coherent, but no face/occlusion/long-film guarantee follows.
+- Audio overrun regression failed before the fix: a 5.5-second recorded line produced a four-second film with HTTP 200, silently clipping speech. Fixed stitching to measure actual audio lengths (avoids asynchronous cached-duration races), reject missing recordings and pause on measured overrun. Unrecorded lines remain unrendered; recorded assets and source clips remain intact.
+- `node --test tests/continuity.test.js`: nine passed after the fix. Full source suite: 99 tests, 96 passed, three skipped, zero failures; the extra skipped case is the fresh-package test when no binary override is set (already verified separately for v0.9.2). JavaScript/diff checks passed. Preparing v0.9.3 build and actual packaged release tests.
+
+### Final finishing/lifecycle checks for v0.9.3 candidate
+
+- Reduced anime/cinematic fades on short films to at most 10% of duration at each edge; longer-film defaults remain unchanged. The first two-second pilot spent most of its duration in fades, so it was re-encoded from its preserved upscaled master with shorter fades. Optimized copy: `/tmp/lumina-overnight/production-pilot/anime-pilot-optimized.mp4` (original retained).
+- Replaced whole-film temporal anime denoising with light spatial smoothing, avoiding another potential source of cross-cut blending. Mixed-rate regression checks outgoing/incoming cut colors after the anime finish.
+- Reproduced another lifecycle defect: closing during a background upscale lost the enhanced asset before SQLite closed. Enhancement preparation, processing and asset-save callbacks are now tracked and awaited on close; local workers release via the shared GPU queue before database closure. Regression verifies saved asset after restart.
+- Targeted lifecycle/media tests passed (four tests). A final build and full packaged suite are required before publishing these additional fixes.

@@ -166,6 +166,7 @@ export function createBookService({ repo, directors, keys, generations, provider
       key, model, system: json ? system + jsonOnly : system, prompt, task, maxTokens, effort,
     }).catch((error) => {
       if (error instanceof RequestError) throw error;
+      if (error.category === 'budget_limit') throw new RequestError(402, error.message);
       throw new RequestError(502, `Writer failed: ${error.detail || error.message}`);
     });
   }

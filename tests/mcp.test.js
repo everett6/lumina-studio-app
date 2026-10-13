@@ -43,6 +43,12 @@ test('MCP tools drive a running Lumina app end to end', async () => {
     assert.equal(image.mimeType, 'image/png');
     assert.ok(Buffer.from(image.data, 'base64').subarray(1, 4).toString() === 'PNG');
 
+    const background = parse(await client.callTool({ name: 'generate_video', arguments: { projectId: project.id, prompt: 'waves', provider: 'mock', model: 'mock-video', duration: 4, seed: 1234, wait: false } }));
+    assert.equal(background.seed, 1234);
+    assert.match(background.note, /Poll get_generation/);
+    await t.call('POST', `/api/generations/${background.id}/wait`, { timeoutMs: 10000 });
+    assert.equal(parse(await client.callTool({ name: 'get_generation', arguments: { generationId: background.id, includeImage: false } })).status, 'completed');
+
     const presets = parse(await client.callTool({ name: 'list_presets', arguments: { mode: 'image' } }));
     assert.ok(presets.some((p) => p.id === 'noir') && !presets.some((p) => p.group === 'camera'));
     const styled = parse(await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'a lighthouse', provider: 'mock', model: 'mock-image', presets: ['noir'] } }));
@@ -54,7 +60,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
 
     const placed = parse(await client.callTool({ name: 'add_to_canvas', arguments: { projectId: project.id, assetId: summary.assetId } }));
     const listed = parse(await client.callTool({ name: 'list_assets', arguments: { projectId: project.id } }));
-    assert.equal(listed.assets.length, 3);
+    assert.equal(listed.assets.length, 4);
     assert.equal(listed.canvases[0].id, placed.canvasId);
 
     const run = parse(await client.callTool({ name: 'run_canvas', arguments: { canvasId: placed.canvasId } }));

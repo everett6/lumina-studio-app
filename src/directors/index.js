@@ -108,12 +108,19 @@ const mock = {
   },
 };
 
-for (const writer of [openai, anthropic, openrouter, nemotron, mock]) {
-  writer.refine = async ({ key, model, idea }) => checkedPrompt(await writer.complete({ key, model, system: directorInstructions, prompt: idea, maxTokens: 2000, task: 'refine' }));
-}
-
-export function createDirectors({ enableMock = process.env.LUMINA_MOCK === '1' } = {}) {
-  const list = [openrouter, openai, anthropic, nemotron, ...(enableMock ? [mock] : [])];
+export function createDirectors({ enableMock = process.env.LUMINA_MOCK === '1', budget = null } = {}) {
+  const list = [openrouter, openai, anthropic, nemotron, ...(enableMock ? [mock] : [])].map((original) => {
+    const writer = { ...original };
+    writer.complete = async (args) => {
+      const settings = budget?.settings();
+      if (!writer.keyless && settings?.enabled) {
+        throw new ProviderError('budget_limit', 'Budget mode blocks unpriced writer calls (storyboard planning, books, canvas and prompt refinement). Write or import the text through MCP, or use a local writer.', { status: 402 });
+      }
+      return original.complete(args);
+    };
+    writer.refine = async ({ key, model, idea }) => checkedPrompt(await writer.complete({ key, model, system: directorInstructions, prompt: idea, maxTokens: 2000, task: 'refine' }));
+    return writer;
+  });
   const byId = new Map(list.map((director) => [director.id, director]));
   return { list, get: (id) => byId.get(id) };
 }

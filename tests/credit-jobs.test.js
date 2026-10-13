@@ -12,17 +12,18 @@ test('credit guard releases refused jobs, retains unknown billing and resumes ac
     const project = repo.projects.create({ name: 'credit regression' });
     const budget = createBudget({ repo });
     budget.update({ enabled: true, retryReserveUsd: 0.5 });
-    let remaining = 0.2, calls = 0, checks = 0;
+    let remaining = 0.2, calls = 0, checks = 0, refinements = 0;
     const credits = createCreditMonitor({ keys: { get: () => 'fake' }, get: async () => {
       checks++; return { data: { limit_remaining: remaining } };
     } });
     const runner = createJobRunner({ repo, budget, credits, keys: { get: () => 'fake' },
-      providers: { get: () => ({ id: 'openrouter', resumable: true, video: async ({ resumeJob }) => {
+      providers: { get: () => ({ id: 'openrouter', resumable: true, video: async ({ resumeJob, prompt }) => {
+        if (resumeJob) assert.equal(prompt, 'cached approved prompt');
         calls++; return { bytes: tinyPng(), usage: { cost: resumeJob ? 0.8 : 1 } };
-      } }) }, directors: {}, assetStore: { save: async () => ({ id: 'asset' }) }, log: quietLog });
-    function make(status = 'queued', providerJob = null) {
+      } }) }, directors: { get: () => ({ refine: async () => { refinements++; throw Error('must not pay for refinement again'); } }) }, assetStore: { save: async () => ({ id: 'asset' }) }, log: quietLog });
+    function make(status = 'queued', providerJob = null, director = null) {
       const job = repo.generations.create({ projectId: project.id, provider: 'openrouter', model: 'test-video',
-        operation: 'video', prompt: 'test', params: { duration: 1 } });
+        operation: 'video', prompt: 'test', director, params: { duration: 1 } });
       repo.spend.reserve({ generationId: job.id, projectId: project.id, provider: 'openrouter', model: job.model, operation: 'video', estimatedUsd: 1 });
       repo.generations.update(job.id, { status, providerJob });
       return job.id;
@@ -36,11 +37,12 @@ test('credit guard releases refused jobs, retains unknown billing and resumes ac
     assert.equal((await runner.waitFor(good)).status, 'completed'); assert.equal(calls, 1); assert.equal(checks, 2);
     // Once accepted, poll the existing request even when available allowance reaches zero.
     remaining = 0;
-    const accepted = make('running', { id: 'existing' });
+    const accepted = make('running', { id: 'existing' }, 'openrouter:test');
+    repo.generations.update(accepted, { finalPrompt: 'cached approved prompt' });
     const unknown = make('running');
     runner.recover();
     assert.equal((await runner.waitFor(accepted)).status, 'completed');
-    assert.equal(calls, 2); assert.equal(checks, 2);
+    assert.equal(calls, 2); assert.equal(checks, 2); assert.equal(refinements, 0);
     assert.equal(repo.spend.get(unknown).status, 'unknown');
     assert.equal(repo.spend.outstanding('openrouter').usd, 1);
   } finally { await t.close(); }

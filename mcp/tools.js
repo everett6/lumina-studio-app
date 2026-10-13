@@ -42,7 +42,7 @@ export function registerLuminaTools(server, client) {
   function summarizeGeneration(g) {
     return {
       id: g.id, status: g.status, operation: g.operation, provider: g.provider, model: g.model, prompt: g.prompt,
-      presets: g.params?.presets, finalPrompt: g.finalPrompt, assetId: g.assetId, error: g.userError ?? undefined, createdAt: g.createdAt,
+      seed: g.params?.seed, presets: g.params?.presets, finalPrompt: g.finalPrompt, assetId: g.assetId, error: g.userError ?? undefined, createdAt: g.createdAt,
     };
   }
 
@@ -141,7 +141,7 @@ export function registerLuminaTools(server, client) {
   const characterView = ({ id, name, kind, description, referenceAssetIds, voice, locked }) => ({ id, name, kind, description, referenceAssetIds, voice, locked });
   server.registerTool('create_character', {
     title: 'Create character or location',
-    description: 'Save a reusable character, product or location: a name, a description of what must stay the same, and reference image asset ids from list_assets. Used in every shot it appears in, so people and sets look identical across a film.',
+    description: 'Save a reusable character, product or location: a name, a description of what must stay the same, and reference image asset ids from list_assets. Used in each shot to guide consistent appearances; generated results still need review.',
     inputSchema: { name: z.string().min(1).max(80), ...characterSchema },
   }, safe(async (args) => ok(text(characterView((await client.call('POST', '/api/characters', args)).character)))));
 
@@ -176,6 +176,7 @@ export function registerLuminaTools(server, client) {
       model: z.string().optional().describe('Model id from list_models'),
       size: z.enum(['1024x1024', '1536x1024', '1024x1536']).optional(),
       quality: z.enum(['low', 'medium', 'high']).optional(),
+      seed: z.number().int().min(0).max(2147483646).optional().describe('Repeatable seed when the provider supports it; not an identity guarantee'),
       inputAssetIds: z.array(z.string()).max(4).optional().describe('Asset ids to edit or use as references'),
       director: z.string().optional().describe('Optional creative director, e.g. "anthropic:claude-opus-5-5"'),
       presets: presetsArg,
@@ -434,10 +435,11 @@ export function registerLuminaTools(server, client) {
   server.registerTool('generate_video', {
     title: 'Generate video',
     description: 'Generate a short video clip from a prompt, optionally animating an image (inputAssetId). Slow (minutes) and more expensive than images — confirm with the user first.',
-    inputSchema: { projectId: z.string(), prompt: z.string().min(1).max(4000), inputAssetId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), duration: z.number().int().optional(), aspect: z.string().optional(), presets: presetsArg, characterIds: charactersArg },
-  }, safe(async ({ projectId, prompt, inputAssetId, provider, model, duration, aspect, presets, characterIds }) => {
+    inputSchema: { projectId: z.string(), prompt: z.string().min(1).max(4000), inputAssetId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), duration: z.number().int().optional(), aspect: z.string().optional(), seed: z.number().int().min(0).max(2147483646).optional(), wait: z.boolean().optional().describe('Use false for long jobs; poll get_generation'), presets: presetsArg, characterIds: charactersArg },
+  }, safe(async ({ projectId, prompt, inputAssetId, provider, model, duration, aspect, seed, wait = true, presets, characterIds }) => {
     const choice = await pickModel('video', provider, model);
-    const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'video', prompt, inputAssetIds: inputAssetId ? [inputAssetId] : [], duration, aspect, presets, characterIds, ...choice });
+    const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'video', prompt, inputAssetIds: inputAssetId ? [inputAssetId] : [], duration, aspect, seed, presets, characterIds, ...choice });
+    if (!wait) return ok(text({ ...summarizeGeneration(generation), note: 'Queued. Poll get_generation; do not submit another paid take while this one runs.' }));
     return waitAndShow(generation);
   }));
 
@@ -654,7 +656,7 @@ export function registerLuminaTools(server, client) {
 
   server.registerTool('enhance_video', {
     title: 'Enhance (upscale) a video',
-    description: 'Make a 2x larger, sharper copy of a video (up to 4K) on the computer running Lumina: mode "fast" uses GPU scaling (seconds to minutes); mode "ai" uses Real-ESRGAN on the GPU (much slower, adds detail; must be installed from the app first); mode "anime" uses Real-ESRGAN\'s anime-video model (clean lines, no smearing). height picks an exact target (1080, 1440 or 2160). Runs in the background; returns the job status. Call again with the same assetId to check.',
+    description: 'Make a 2x larger, sharper copy of a video (up to 4K) on the computer running Lumina: mode "fast" uses GPU scaling (seconds to minutes); mode "ai" uses Real-ESRGAN on the GPU (much slower, adds detail; must be installed from the app first); mode "anime" uses Real-ESRGAN\'s anime-video model (trained for animation; review for altered details). height picks an exact target (1080, 1440 or 2160). Runs in the background; returns the job status. Call again with the same assetId to check.',
     inputSchema: { assetId: z.string(), mode: z.enum(['fast', 'ai', 'anime']).optional(), height: z.union([z.literal(1080), z.literal(1440), z.literal(2160)]).optional(), checkOnly: z.boolean().optional() },
   }, safe(async ({ assetId, mode = 'fast', height, checkOnly = false }) => {
     if (checkOnly) return ok(text(await client.call('GET', `/api/assets/${assetId}/enhance`)));
@@ -680,7 +682,7 @@ export function registerLuminaTools(server, client) {
 
   server.registerTool('interpolate_video', {
     title: 'Interpolate a video (smoother motion)',
-    description: 'Make the in-between frames of a video with RIFE v4.6 on the GPU of the computer running Lumina, so it plays at `fps` with the same length (e.g. 12 → 24 fps rebuilds every other frame; 24 → 60 for smooth motion). Saves a new video in the library and returns its asset id (and file path on a local connection). Clips containing a cut are refused. RIFE must be installed from the app first (Storyboard → Picture quality → Smooth).',
+    description: 'Make the in-between frames of a video with RIFE v4.6 on the GPU of the computer running Lumina, so it plays at `fps` within one target frame of the original duration (e.g. 12 → 24 fps rebuilds every other frame; 24 → 60 for smooth motion). Saves a new video in the library and returns its asset id (and file path on a local connection). Clips containing a cut are refused. RIFE must be installed from the app first (Storyboard → Picture quality → Smooth).',
     inputSchema: { assetId: z.string(), fps: z.number().int().min(2).max(120) },
   }, safe(async ({ assetId, fps }) => {
     const result = await client.call('POST', `/api/assets/${assetId}/interpolate`, { fps });

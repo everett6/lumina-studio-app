@@ -273,6 +273,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     try {
       text = await director.complete({ key, model, system, prompt, task: 'shots', maxTokens: Math.max(8000, count * 700) });
     } catch (error) {
+      if (error.category === 'budget_limit') throw new RequestError(402, error.message);
       throw new RequestError(502, `Writer failed: ${error.detail || error.message}`);
     }
     const parsed = extractJson(text);
@@ -686,9 +687,15 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         let clockSeconds = 0;
         const lines = [];
         for (const item of items) {
-          const shotLines = item.shot.details.dialogue ?? [];
-          const lengths = shotLines.map((line) => line.seconds ?? 0);
-          const { times } = lineTimes(shotLines, item.duration ?? 0, lengths);
+          const shotLines = (item.shot.details.dialogue ?? []).filter((line) => line.assetId);
+          const lengths = [];
+          for (const line of shotLines) {
+            const recording = asset(line.assetId);
+            if (!recording) throw new Error(`Shot ${item.shot.position} has a deleted dialogue recording.`);
+            lengths.push(await mediaSeconds(assetStore.path(recording)));
+          }
+          const { times, overrun } = lineTimes(shotLines, item.duration ?? 0, lengths);
+          if (overrun > 1 / 48000) throw new Error(`Shot ${item.shot.position}: recorded dialogue exceeds the shot by ${overrun.toFixed(2)} seconds. Shorten the speech or extend the shot before finishing; original audio is retained.`);
           shotLines.forEach((line, i) => {
             const audio = asset(line.assetId);
             if (audio) lines.push({ file: assetStore.path(audio), at: clockSeconds + times[i] });

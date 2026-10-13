@@ -98,7 +98,7 @@ export function videoEncoder(profile = 'final') {
 
 const audioArgs = ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'];
 const audioFormat = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo';
-// Working pieces of a film keep uncompressed sound (in Matroska), so joining them is sample-exact: AAC pieces joined
+// Working pieces of a film keep uncompressed sound (in MOV), so joining them is sample-exact: AAC pieces joined
 // by copying would each bring their encoder delay (~21 ms) to every cut. The sound is encoded once, after the join.
 const pieceAudio = ['-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2'];
 const cutFade = 0.008; // seconds of fade at each hard cut: removes the click where two waveforms meet
@@ -259,6 +259,13 @@ export async function stitchClips(clips, { onProgress, transition = 'cut', finis
   }
 }
 
+// Keep fades brief on short pilots instead of darkening most of their picture and speech.
+export function deliveryFades(duration, style) {
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error('A delivery needs a positive finite duration.');
+  const standard = style === 'cinematic' ? { in: 1, out: 1.5 } : { in: 0.6, out: 1 };
+  return { in: Math.min(standard.in, duration * 0.1), out: Math.min(standard.out, duration * 0.1) };
+}
+
 // The one delivery encode of a film (the 'final' quality profile). finish 'anime' cleans flat colour, lifts colour and
 // sharpens line art (see below). finish 'cinematic' also applies a gentle
 // grade, 2.39:1 letterbox bars (landscape only), fine film grain and fades from and to black; grain is added only
@@ -270,21 +277,23 @@ export async function deliverFilm(input, output, { finish = 'none' } = {}) {
   const filters = [];
   let audio = ['-c:a', 'copy'];
   if (finish === 'cinematic') {
-    const fadeOut = Math.max(0, info.duration - 1.5).toFixed(3);
+    const fade = deliveryFades(info.duration, finish);
+    const fadeOut = Math.max(0, info.duration - fade.out).toFixed(6);
     filters.push('eq=contrast=1.05:saturation=0.94:gamma=0.98');
     const bar = even((info.height - info.width / 2.39) / 2);
     if (info.width > info.height && bar >= 4) filters.push(`drawbox=x=0:y=0:w=iw:h=${bar}:color=black:t=fill`, `drawbox=x=0:y=ih-${bar}:w=iw:h=${bar}:color=black:t=fill`);
-    filters.push('noise=alls=4:allf=t', 'fade=t=in:st=0:d=1', `fade=t=out:st=${fadeOut}:d=1.5`);
-    audio = ['-af', `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOut}:d=1.5`, ...audioArgs];
+    filters.push('noise=alls=4:allf=t', `fade=t=in:st=0:d=${fade.in}`, `fade=t=out:st=${fadeOut}:d=${fade.out}`);
+    audio = ['-af', `afade=t=in:st=0:d=${fade.in},afade=t=out:st=${fadeOut}:d=${fade.out}`, ...audioArgs];
   }
   if (finish === 'anime') {
-    // Anime finish: clean flat colour areas (light temporal denoise), richer but not garish colour (vibrance lifts
+    // Anime finish: spatial smoothing only (temporal filters could blend across cuts), richer but not garish colour (vibrance lifts
     // muted colours more than strong ones, so skin stays natural), crisp line art (contrast-adaptive sharpening adds
     // no halos), then smooth any banding in gradients. Short fades in and out; no grain or bars.
-    const fadeOut = Math.max(0, info.duration - 1).toFixed(3);
-    filters.push('hqdn3d=1.2:1.2:2.5:2.5', 'vibrance=intensity=0.18', 'cas=strength=0.55', 'gradfun=strength=0.9:radius=12',
-      'fade=t=in:st=0:d=0.6', `fade=t=out:st=${fadeOut}:d=1`);
-    audio = ['-af', `afade=t=in:st=0:d=0.6,afade=t=out:st=${fadeOut}:d=1`, ...audioArgs];
+    const fade = deliveryFades(info.duration, finish);
+    const fadeOut = Math.max(0, info.duration - fade.out).toFixed(6);
+    filters.push('gblur=sigma=0.2', 'vibrance=intensity=0.18', 'cas=strength=0.55', 'gradfun=strength=0.9:radius=12',
+      `fade=t=in:st=0:d=${fade.in}`, `fade=t=out:st=${fadeOut}:d=${fade.out}`);
+    audio = ['-af', `afade=t=in:st=0:d=${fade.in},afade=t=out:st=${fadeOut}:d=${fade.out}`, ...audioArgs];
   }
   filters.push('format=yuv420p');
   await runVideo(['-v', 'error', '-i', input, '-map', '0:v:0', ...(info.hasAudio ? ['-map', '0:a:0'] : []), '-vf', filters.join(','),

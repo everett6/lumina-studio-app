@@ -26,7 +26,7 @@ function commandStatus(command) {
 export async function report(args = process.argv.slice(2)) {
   const dataDir = dataDirectory(args);
   let runtime;
-  try { runtime = localProvider.runtimeStatus(); }
+  try { runtime = await localProvider.runtimeStatus(); }
   catch (error) { runtime = { gpuAvailable: false, gpu: null, pythonAvailable: false, note: `Runtime probe failed: ${error.message}` }; }
 
   let enhancerTools;

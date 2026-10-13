@@ -3,7 +3,7 @@ import { providerPrompt, toolOperations } from './generation.js';
 import { userMessage } from './providers/http.js';
 
 // Errors that mean the provider turned the request away before doing any paid work.
-const refusedCategories = new Set(['missing_key', 'auth', 'invalid_request', 'rate_limit', 'policy', 'credit_limit']);
+const refusedCategories = new Set(['missing_key', 'auth', 'invalid_request', 'rate_limit', 'policy', 'credit_limit', 'budget_limit']);
 
 // Durable job runner. Generation rows are the queue: 'queued' rows survive restarts and resume. Long provider
 // jobs (video) save the provider's job id as soon as it is accepted, so after a restart Lumina keeps polling the
@@ -42,8 +42,8 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         await credits.preflight({ repo, generationId: id,
           reserveUsd: budget?.settings().enabled ? budget.settings().retryReserveUsd ?? 0 : 0 });
       }
-      let prompt = providerPrompt(job);
-      if (job.director && job.operation !== 'speech') {
+      let prompt = job.finalPrompt || providerPrompt(job);
+      if (job.director && job.operation !== 'speech' && !job.providerJob && !job.finalPrompt) {
         const [directorId, model] = job.director.split(':');
         const director = directors.get(directorId);
         if (!director) throw Object.assign(new Error('Director unavailable'), { category: 'invalid_request' });
@@ -102,7 +102,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         const outcome = !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
         const ledger = budget?.settle(job, { outcome, usage: error.usage });
         repo.generations.update(id, {
-          status: 'failed', errorCategory: category, userError: category === 'credit_limit' ? error.message : error.category ? userMessage(error) : error.message,
+          status: 'failed', errorCategory: category, userError: ['credit_limit', 'budget_limit'].includes(category) ? error.message : error.category ? userMessage(error) : error.message,
           completedAt: new Date().toISOString(), durationMs: Date.now() - started,
           billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : null,
         });

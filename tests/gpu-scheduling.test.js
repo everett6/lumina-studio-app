@@ -56,3 +56,19 @@ test('missing worker executable reports a provider error instead of an unhandled
   await assert.rejects(worker.request({}), /could not start|input closed/);
   await worker.stop();
 });
+
+test('Python discovery keeps timers and HTTP work responsive during dependency imports', async () => {
+  const {findPython}=await import('../src/providers/local.js');
+  const {chmodSync}=await import('node:fs');
+  const root=mkdtempSync(path.join(tmpdir(),'lumina-python-discovery-'));
+  const executable=path.join(root,'python');
+  writeFileSync(executable,'#!/usr/bin/env node\nsetTimeout(()=>process.exit(0),300);\n');chmodSync(executable,0o755);
+  const previous=process.env.LUMINA_PYTHON;process.env.LUMINA_PYTHON=executable;
+  try {
+    let completed=false;
+    const discovery=findPython().then(value=>{completed=true;return value;});
+    await delay(20);
+    assert.equal(completed,false,'dependency import must still be running');
+    assert.equal(await discovery,executable);
+  } finally {if(previous===undefined)delete process.env.LUMINA_PYTHON;else process.env.LUMINA_PYTHON=previous;rmSync(root,{recursive:true,force:true});}
+});

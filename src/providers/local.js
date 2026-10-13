@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProviderError } from './http.js';
 import { gpuQueue } from '../gpu.js';
+import { run } from '../video.js';
 
 // Local GPU: open-weight models run on this computer with Hugging Face diffusers — no API, no key, no cost.
 // Wan 2.2 TI2V-5B (Apache 2.0) makes both the still frame (one-frame generation) and the clip (text-to-video, or
@@ -58,14 +59,24 @@ export function animeModelInstalled(dir = hubDir()) {
 
 // A Python that has torch (with CUDA) and diffusers: LUMINA_PYTHON, then common conda locations, then PATH.
 let pythonFound;
-export function findPython() {
+let pythonFinding = null;
+export async function findPython() {
   if (pythonFound !== undefined) return pythonFound;
-  const home = os.homedir();
-  const candidates = [process.env.LUMINA_PYTHON, path.join(home, 'miniconda3', 'bin', 'python3'), path.join(home, 'anaconda3', 'bin', 'python3'),
-    path.join(home, 'miniforge3', 'bin', 'python3'), 'python3'].filter(Boolean);
-  pythonFound = candidates.find((python) => (python === 'python3' || existsSync(python))
-    && spawnSync(python, ['-c', 'import torch, diffusers; assert torch.cuda.is_available()'], { stdio: 'ignore', timeout: 60_000 }).status === 0) ?? null;
-  return pythonFound;
+  if (pythonFinding) return pythonFinding;
+  pythonFinding = (async () => {
+    const home = os.homedir();
+    const candidates = [process.env.LUMINA_PYTHON, path.join(home, 'miniconda3', 'bin', 'python3'), path.join(home, 'anaconda3', 'bin', 'python3'),
+      path.join(home, 'miniforge3', 'bin', 'python3'), 'python3'].filter(Boolean);
+    for (const python of candidates) {
+      if (python !== 'python3' && !existsSync(python)) continue;
+      try {
+        await run(python, ['-c', 'import torch, diffusers; assert torch.cuda.is_available()'], 60000);
+        pythonFound = python; return python;
+      } catch { /* try the next configured runtime without blocking the HTTP event loop */ }
+    }
+    pythonFound = null; return null;
+  })();
+  try { return await pythonFinding; } finally { pythonFinding = null; }
 }
 
 // The voice models live in their own Python environment (their packages would replace the video models' ones).
@@ -112,9 +123,10 @@ export function createWorker(workerFile, python = findPython) {
     return stopping;
   }
 
-  function start() {
+  async function start() {
     if (child) return;
-    const executable = python();
+    const executable = await python();
+    if (child) return;
     if (!executable) throw new ProviderError('provider', 'No Python with PyTorch (CUDA) and diffusers was found. Set LUMINA_PYTHON to one.');
     child = spawn(executable, [workerFile], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONUNBUFFERED: '1' } });
     buffer = '';
@@ -156,7 +168,7 @@ export function createWorker(workerFile, python = findPython) {
   async function request(payload, onProgress) {
     clearTimeout(idleTimer);
     if (stopping) await stopping;
-    start();
+    await start();
     const id = `job-${++counter}`;
     const result = new Promise((resolve, reject) => waiting.set(id, { resolve, reject, onProgress }));
     child.stdin.write(`${JSON.stringify({ id, ...payload })}\n`);
@@ -245,9 +257,11 @@ export default {
   available: () => modelInstalled() || animeModelInstalled() || voiceInstalled('kokoro'),
   unavailableNote: `Download the model first: hf download ${repoId} (34 GB), with Python, PyTorch (CUDA) and diffusers installed.`,
   modelAvailable: (id) => id === 'wan2.2-ti2v-5b' ? modelInstalled() : id === 'animagine-xl-4' ? animeModelInstalled() : id === 'kokoro-82m' ? voiceInstalled('kokoro') : id === 'chatterbox' ? voiceInstalled('chatterbox') : false,
-  runtimeStatus: () => {
-    const cuda = spawnSync('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], { encoding: 'utf8', timeout: 5000 });
-    return { gpuAvailable: cuda.status === 0, gpu: cuda.status === 0 ? cuda.stdout.trim() : null, pythonAvailable: cuda.status === 0 ? Boolean(findPython()) : false, note: cuda.status === 0 ? null : 'NVIDIA driver is unavailable; local Wan cannot render in this environment.' };
+  runtimeStatus: async () => {
+    let gpu;
+    try { gpu = (await run('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], 5000)).trim(); }
+    catch { return { gpuAvailable: false, gpu: null, pythonAvailable: false, note: 'NVIDIA driver is unavailable; local Wan cannot render in this environment.' }; }
+    return { gpuAvailable: true, gpu, pythonAvailable: Boolean(await findPython()), note: null };
   },
   models: [
     {

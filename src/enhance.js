@@ -236,6 +236,13 @@ export function createEnhancer({ binDir, workDir, log = console }) {
 
   // Background enhancement jobs, one per source video: { state, done, total, mode, error, assetId }.
   const jobs = new Map();
+  const pending = new Set();
+  function track(promise) {
+    pending.add(promise);
+    promise.then(() => pending.delete(promise), () => pending.delete(promise));
+    return promise;
+  }
+  async function idle() { while (pending.size) await Promise.allSettled([...pending]); }
   function start({ asset, assetStore, mode, allowDownload, onDone, target = null }) {
     if (jobs.get(asset.id)?.state === 'running') throw Object.assign(new Error('This video is already being enhanced.'), { status: 409 });
     for (const [id, old] of jobs) {
@@ -245,22 +252,22 @@ export function createEnhancer({ binDir, workDir, log = console }) {
     const job = { state: 'running', mode, done: 0, total: 1, error: null, assetId: null };
     jobs.set(asset.id, job);
     const ready = mode === 'ai' || mode === 'anime' ? aiTool({ allowDownload }) : Promise.resolve(null);
-    return ready.then((preparedTool) => {
-      (async () => {
+    return track(ready.then((preparedTool) => {
+      track((async () => {
         try {
           const result = await enhanceVideo(assetStore.path(asset), { mode, preparedTool, target, onProgress: (done, total) => Object.assign(job, { done, total }) });
           const saved = await assetStore.save({ bytes: result.bytes, projectId: asset.projectId, kind: 'video', label: `${asset.label ?? 'Video'} (enhanced ${result.width}×${result.height})`, parentAssetId: asset.id });
           Object.assign(job, { state: 'completed', assetId: saved.id, width: result.width, height: result.height });
-          onDone?.(saved);
+          await onDone?.(saved);
         } catch (error) {
           Object.assign(job, { state: 'failed', error: `Enhancing failed: ${error.message}` });
         }
-      })();
+      })());
       return job;
     }, (error) => {
       jobs.delete(asset.id);
       throw error;
-    });
+    }));
   }
 
   // Which optional tools are installed (nothing is downloaded here).
@@ -272,5 +279,5 @@ export function createEnhancer({ binDir, workDir, log = console }) {
 
   const interpolate = (...args) => withGpuLease(() => interpolateInner(...args));
   const enhanceVideo = (...args) => withGpuLease(() => enhanceVideoInner(...args));
-  return { enhanceVideo, interpolate, aiTool, rifeTool, tools, start, status: (assetId) => jobs.get(assetId) ?? null, targetSize };
+  return { enhanceVideo, interpolate, aiTool, rifeTool, tools, start, idle, status: (assetId) => jobs.get(assetId) ?? null, targetSize };
 }

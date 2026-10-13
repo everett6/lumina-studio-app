@@ -1,4 +1,4 @@
-# Anime production in Lumina 0.9.2
+# Anime production in Lumina 0.9.3
 
 ## The $12 workflow
 
@@ -77,3 +77,9 @@ Fresh installs enable strict $12 budget checks by default. Explicit saved settin
 `inspect_video` returns metadata plus up to six timestamped thumbnails, locally or through the remote MCP gateway. Use it to inspect originals and processed clips before accepting a shot or buying another take. Audio processing resamples to 48 kHz stereo, normalizes dialogue and limits the final mix; resampling does not recreate missing audio detail.
 
 A held-out test on an existing local generated Wan clip reconstructed 59 omitted observed frames (12→24 fps): RIFE aggregate PSNR 40.65 dB, repeat-frame baseline 36.78 dB. RIFE scored below the repeat baseline on 15 individual frames. This supports cautious use, not perfect interpolation. The reference is generated Wan motion, not physical ground truth or a drawn-anime benchmark. Saved comparison artifacts stay local. Original clips remain available.
+
+### Full-step local pilot and audio fit
+
+A real 49-frame/50-step Wan anime pilot at 1280×704/24 fps completed on the RTX 5070 in about 7.25 minutes, with no OOM notice in its captured log. Fresh Kokoro speech, RIFE, native-size assembly, soundtrack and completed-film anime upscale produced 1920×1080/30 fps, 60 frames, 2.005 seconds, with monotonic decode timestamps and audio peak -3.1 dB. The sampled coat/silhouette/background were visually coherent. This single short shot does not establish face consistency, challenging occlusion behavior, production-scale runtime, or live cloud interoperability.
+
+Finishing now measures recorded dialogue directly and pauses on overrun instead of truncating it. Audio and source clips remain available. Shorten/re-record speech or extend the shot before resuming. This fixes a reproduced 5.5-second line being silently cut into a four-second film.

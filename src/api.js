@@ -328,7 +328,7 @@ export function createApiServer(ctx) {
       await director.refine({ key, model: director.models.at(-1), idea: 'a red apple' });
       return { ok: true, verified: true };
     } catch (error) {
-      return { ok: false, message: userMessage(error) };
+      return { ok: false, message: error.category === 'budget_limit' ? error.message : userMessage(error) };
     }
   });
 
@@ -441,7 +441,7 @@ export function createApiServer(ctx) {
       const model = provider?.models.find((m) => m.id === modelId);
       return model && provider.ready && model.available !== false;
     };
-    const localRuntime = providers.get('local')?.runtimeStatus?.() ?? null;
+    const localRuntime = await (providers.get('local')?.runtimeStatus?.() ?? null);
     const costs = [];
     for (const shot of shots) {
       const items = [];

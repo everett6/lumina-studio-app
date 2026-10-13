@@ -38,10 +38,10 @@ function appCommand() {
   return options.find((option) => option && existsSync(option)) ?? null;
 }
 
-async function reachable() {
+async function reachable(timeoutMs = 10000) {
   try {
     const { url, token } = connection();
-    const response = await fetch(`${url}/api/health`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(2000) });
+    const response = await fetch(`${url}/api/health`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(timeoutMs) });
     return response.ok;
   } catch {
     return false;
@@ -56,9 +56,10 @@ async function ensureRunning() {
   const child = spawn(command, [], { detached: true, stdio: 'ignore', env: process.env });
   child.on('error', () => {});
   child.unref();
-  for (let i = 0; i < 60; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    if (await reachable()) return;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(500, deadline - Date.now())));
+    if (await reachable(Math.max(1, Math.min(10000, deadline - Date.now())))) return;
   }
   throw new Error(`Started Lumina Studio (${command}) but it did not respond within 30 seconds.`);
 }

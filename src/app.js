@@ -19,6 +19,7 @@ import { createRemoteGateway } from './remote.js';
 import { createRepo } from './repo.js';
 import { createSequenceService } from './sequences.js';
 import { createEnhancer } from './enhance.js';
+import { withGpuLease } from './providers/local.js';
 import { createFaceChecker } from './faces.js';
 
 export const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -39,9 +40,9 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const repo = createRepo(db);
   const assetStore = createAssetStore({ assetDir: path.join(dataRoot, 'storage', 'assets'), repo });
   const providers = createProviders({ enableMock });
-  const directors = createDirectors({ enableMock });
-  const keys = createKeyStore({ file: path.join(dataDir, 'keys.json'), cipher });
   const budget = createBudget({ repo });
+  const directors = createDirectors({ enableMock, budget });
+  const keys = createKeyStore({ file: path.join(dataDir, 'keys.json'), cipher });
   const credits = createCreditMonitor({ keys });
   const modelCatalog = createModelCatalog({ repo, provider: providers.get('openrouter'), log });
   const jobs = createJobRunner({ repo, assetStore, providers, directors, keys, budget, credits, log });
@@ -92,6 +93,8 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
       await jobs.idle();
       await sequences.idle();
       await jobs.idle();
+      await enhancer.idle();
+      await withGpuLease(async () => {});
       db.close();
     },
   };
