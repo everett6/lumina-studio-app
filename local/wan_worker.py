@@ -112,6 +112,30 @@ def write_video(frames, path, fps):
 
 
 offloaded = False
+streaming = False
+STREAM = os.environ.get("LUMINA_WAN_STREAM", "1") != "0"
+
+
+def use_streaming():
+    # The moe-prefetch idea applied to a diffusion transformer: only the block that is running (and the next one,
+    # copied ahead on a side CUDA stream while the current one computes) is on the GPU; the rest waits in main memory.
+    # At video sizes each block computes for far longer than its copy takes (~160 MB over PCIe in a few ms), so the
+    # stream hides the copies almost completely, and the ~5 GB the whole model would hold goes to the frames instead.
+    # Pinned memory is taken per copy (low_cpu_mem_usage), never for the whole model at once, so main memory stays
+    # about where it is without streaming. The text encoder and the VAE still take turns on the GPU as before.
+    global streaming
+    if streaming:
+        return
+    t2v = pipes["t2v"]
+    for pipe in pipes.values():
+        pipe.remove_all_hooks()
+        pipe._exclude_from_cpu_offload = ["transformer"]
+    t2v.transformer.to("cpu")
+    torch.cuda.empty_cache()
+    t2v.transformer.enable_group_offload(onload_device=torch.device("cuda"), offload_device=torch.device("cpu"),
+                                         offload_type="block_level", num_blocks_per_group=1, use_stream=True,
+                                         record_stream=True, low_cpu_mem_usage=True)
+    streaming = True
 
 
 def use_main_memory():
@@ -127,12 +151,15 @@ def use_main_memory():
     for pipe in pipes.values():
         pipe.remove_all_hooks()  # drop the whole-model offload hooks
     t2v = pipes["t2v"]
-    for module in (t2v.text_encoder, t2v.transformer, t2v.vae):
+    # A streamed transformer already lives in main memory; only the text encoder and the VAE still need moving.
+    parts = (t2v.text_encoder, t2v.vae) if streaming else (t2v.text_encoder, t2v.transformer, t2v.vae)
+    for module in parts:
         module.to(cpu)
     torch.cuda.empty_cache()
     # Layer by layer for all three (block-level grouping would load T5 whole: its blocks sit inside `encoder`).
     # Plain copies, no CUDA stream: measured on an RTX 5070, streaming was only 8% faster but held 1 GB more pinned RAM.
-    t2v.transformer.enable_group_offload(onload_device=gpu, offload_device=cpu, offload_type="leaf_level")
+    if not streaming:
+        t2v.transformer.enable_group_offload(onload_device=gpu, offload_device=cpu, offload_type="leaf_level")
     apply_group_offloading(t2v.text_encoder, onload_device=gpu, offload_device=cpu, offload_type="leaf_level")
     t2v.vae.enable_group_offload(onload_device=gpu, offload_device=cpu, offload_type="leaf_level")
     offloaded = True
@@ -145,7 +172,9 @@ def run(request):
     if low_vram:
         use_main_memory()
     else:
-        pipe.enable_model_cpu_offload()  # one part on the GPU at a time: text encoder, then transformer, then VAE
+        if STREAM and task == "video":
+            use_streaming()  # clips: the transformer streams block by block (see use_streaming)
+        pipe.enable_model_cpu_offload()  # one part on the GPU at a time: text encoder, (transformer), then VAE
     steps = int(request.get("steps") or 50)
     rid = request["id"]
 
@@ -175,7 +204,7 @@ def run(request):
 def release():
     # After a failure, put every part of the model back in main memory so the GPU is free again.
     if not offloaded:
-        for part in ("text_encoder", "transformer", "vae"):
+        for part in ("text_encoder", "vae") if streaming else ("text_encoder", "transformer", "vae"):
             module = getattr(pipes.get("t2v"), part, None)
             if module is not None:
                 module.to("cpu")
