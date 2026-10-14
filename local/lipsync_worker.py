@@ -326,6 +326,10 @@ def phonemize_chunks(text):
         ipa = phonemize(pieces, language=language, backend="espeak", strip=True, with_stress=False)
     except Exception:
         return None
+    # espeak switches language for text it cannot read (kanji become "(en)chinese letter(ja)"): those phonemes are
+    # not what the voice says, so listen to the sound instead.
+    if any("(" in item for item in ipa):
+        return None
     chunks = [ipa_segments(item) for item in ipa]
     return [c for c in chunks if c] or None
 

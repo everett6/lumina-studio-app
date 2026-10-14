@@ -331,6 +331,11 @@ export default {
   async speak({ model, text, voice, style, signal }) {
     const engine = model === 'chatterbox' ? 'chatterbox' : 'kokoro';
     if (!voiceInstalled(engine)) throw new ProviderError('provider', voiceUnavailableNote(engine));
+    // Kokoro reads Japanese through espeak, which cannot read kanji (it says "Chinese letter" for each one).
+    if (engine === 'kokoro' && /^j/.test(voice ?? '') && /[\u3400-\u9fff]/.test(text)) {
+      const note = 'Kokoro\'s Japanese voices cannot read kanji yet: write this line in kana (hiragana or katakana), e.g. 今夜 → こんや.';
+      throw new ProviderError('invalid_request', note, { detail: note });
+    }
     return inTemp(async (dir) => {
       const out = path.join(dir, 'line.wav');
       await gpu('voice', { task: 'speech', engine, text, voice, style, out }, null, { exclusive: engine === 'chatterbox', signal });
