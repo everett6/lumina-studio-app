@@ -496,6 +496,7 @@ export function registerLuminaTools(server, client) {
       colorMatch: z.enum(['scene', 'film', 'off']).optional().describe('Match every shot\'s colours to the first shot of its scene (default) or of the film, free and local'),
       narratorVoice: z.object({ provider: z.string(), model: z.string(), voice: z.string().optional() }).optional(),
       interpolateFps: z.union([z.literal(0), z.literal(30)]).optional(),
+      lipSync: z.boolean().optional().describe('Allow lip sync (mouth movement) on shots with recorded dialogue (default true). When false, lip_sync_shot is refused.'),
       requireApproval: z.boolean().optional().describe('Frames and clips must be accepted (review_shot) before video is paid for and before the film is joined'),
       videoSecondsBudget: z.number().int().min(0).max(900).optional().describe('Seconds of paid video the writer may plan; the rest become free still shots'),
       transition: z.enum(['cut', 'crossfade']).optional(), finish: z.enum(['none', 'cinematic', 'anime']).optional().describe('"cinematic": 2.39:1 bars, film grain, fades; "anime": cleaner flat colour, richer colour, crisp line art, short fades'),
@@ -670,6 +671,13 @@ export function registerLuminaTools(server, client) {
     if (checkOnly) return ok(text(await client.call('GET', `/api/assets/${assetId}/enhance`)));
     return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode, height })));
   }));
+
+  server.registerTool('bake_character', {
+    title: 'Bake a character (LoRA)',
+    description: 'Train a small LoRA of one character for the local anime image model, from its character sheet and design tags, on the computer running Lumina (free, about 15-25 minutes of GPU time; other GPU work waits). Afterwards every local anime frame with that character uses it, so the face, hair and outfit stay on-model. Make a character sheet first (make_character_sheet). action: "start", "status" (progress), or "remove".',
+    inputSchema: { characterId: z.string(), action: z.enum(['start', 'status', 'remove']).default('status') },
+  }, safe(async ({ characterId, action }) => ok(text(action === 'start' ? await client.call('POST', `/api/characters/${characterId}/bake`, {})
+    : action === 'remove' ? await client.call('DELETE', `/api/characters/${characterId}/bake`) : await client.call('GET', `/api/characters/${characterId}/bake`)))));
 
   server.registerTool('lip_sync_shot', {
     title: 'Lip sync a shot',

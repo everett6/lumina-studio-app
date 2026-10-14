@@ -62,6 +62,8 @@ export function cleanSequenceSettings(input = {}, base = {}) {
     continuity: pick('continuity', (v) => ['frames', 'keyframes', 'chain'].includes(v), 'frames'),
     clipLength: Math.min(30, Math.max(0, Math.round(Number(input.clipLength ?? base.clipLength ?? 0)) || 0)),
     look: pick('look', (v) => v in looks, legacyLook),
+    // Mouth movement on shots with recorded dialogue (anime flaps / live-action MuseTalk). On unless turned off.
+    lipSync: typeof input.lipSync === 'boolean' ? input.lipSync : typeof base.lipSync === 'boolean' ? base.lipSync : true,
     lookBible: typeof input.lookBible === 'string' ? input.lookBible.slice(0, 1500) : base.lookBible ?? '',
     // Themes the audience must clearly see, e.g. "Chaos agent: a grinning trickster who breaks every plan". The writer
     // gives each one people, actions and a recurring image on screen, and tags the shots that carry it.
@@ -290,7 +292,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       sequence.screenplay.trim() ? `Screenplay (canonical: keep its scenes in order and its dialogue word for word; never add events it does not have):\n${sequence.screenplay}` : `Idea: ${sequence.idea}`,
       characterLines(sequence),
       targetSeconds ? `The whole film should run about ${targetSeconds} seconds (${(targetSeconds / 60).toFixed(1)} minutes), so the shot durations must add up to roughly ${targetSeconds}. Tell the story with a clear beginning, middle and end across all ${count} shots.` : '',
-      looks[look] ? `Look: ${looks[look]} Write every description in that look.` : '',
+      looks[look] ? `Look: ${looks[look]} Write every description in that look.${look === 'anime' ? ' All dialogue and narration is written in English, whatever the setting.' : ''}` : '',
       sequence.settings.lookBible ? `Look bible (applies to every shot): ${sequence.settings.lookBible}` : '',
       themeBrief(sequence.settings.themes, count),
       continuity === 'chain' ? 'Continuity: every clip will start from the exact last frame of the clip before it, so each shot must continue directly from where the previous one ends. Only move to a new place or time where the story needs a cut, and say so at the start of that shot.' : '',
@@ -514,6 +516,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   async function lipSyncShot(shotId, { box = null } = {}) {
     const shot = needShot(shotId);
     const sequence = needSequence(shot.sequenceId);
+    if (sequence.settings.lipSync === false) throw new RequestError(409, 'Lip sync is turned off for this storyboard (Settings).');
     const synced = shot.details.lipsync;
     const source = asset(synced && synced.result === shot.videoAssetId ? synced.source : shot.videoAssetId);
     if (!source) throw new RequestError(400, 'Make this shot\'s clip first.');

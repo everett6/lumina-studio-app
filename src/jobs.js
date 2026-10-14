@@ -99,7 +99,9 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
           onSubmitted: (info) => repo.generations.update(id, { providerJob: { ...info, submittedAt: new Date().toISOString() } }),
         });
       } else {
-        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, onProgress, signal });
+        // Characters baked into a LoRA (src/bake.js) travel with the job; providers without LoRA support ignore them.
+        const loras = (params.characterIds ?? []).map((cid) => repo.settings.get(`bake:${cid}`, null)).filter(Boolean);
+        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, loras, onProgress, signal });
       }
       cancelled();
       cancellers.delete(id); // saving the result: too late to cancel

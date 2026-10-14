@@ -94,6 +94,27 @@ function card(character) {
       sheetButtons.forEach((b) => { b.disabled = false; });
     }
   })();
+  // Bake: a LoRA of this character for the local anime model, trained on this computer (~15-25 minutes).
+  const bakeLabel = h('span.muted', {}, '');
+  const bakeButton = h('button.button.secondary.small', { title: 'Teach the local anime model this exact character from its sheet (free, your GPU, about 15-25 minutes; other GPU work waits)' }, 'Bake character');
+  const showBake = (status) => {
+    const job = status.job;
+    if (job?.state === 'running') {
+      bakeButton.disabled = true;
+      bakeLabel.textContent = `Baking: ${job.stage === 'drawing' ? 'drawing pictures' : 'training'} ${job.total ? `${job.done}/${job.total}` : '…'}`;
+      setTimeout(() => api(`/api/characters/${character.id}/bake`).then(showBake).catch(() => {}), 4000);
+      return;
+    }
+    bakeButton.disabled = locked;
+    bakeButton.textContent = status.baked ? 'Re-bake character' : 'Bake character';
+    bakeLabel.textContent = job?.state === 'failed' ? `Baking failed: ${job.error}` : status.baked ? `Baked ✓ (${new Date(status.baked.bakedAt).toLocaleDateString()})` : '';
+  };
+  bakeButton.onclick = guard(async () => {
+    if (!character.references.length) throw new Error('Make a character sheet first; baking learns the character from it.');
+    showBake(await api(`/api/characters/${character.id}/bake`, { method: 'POST', body: {} }));
+    toast('Baking started. It runs on your GPU; you can keep working.');
+  });
+  if (character.kind === 'character') api(`/api/characters/${character.id}/bake`).then(showBake).catch(() => {});
   // A voice for this character's dialogue in storyboards.
   const voices = modelsFor('speech').flatMap(({ provider, model }) => (model.voices?.length ? model.voices : [null])
     .map((voice) => ({ value: JSON.stringify({ provider: provider.id, model: model.id, voice }), label: `${provider.label} · ${model.label}${voice ? ` · ${voice}` : ''}`, ready: provider.ready })));
@@ -122,6 +143,7 @@ function card(character) {
         character.kind === 'character' ? sheetButtons.push(
           h('button.button.secondary.small', { disabled: locked, title: 'Front, side and back views on one sheet', onclick: () => makeSheet(false) }, 'Make character sheet'),
           h('button.button.secondary.small', { disabled: locked, title: 'Smiling, angry, sad, surprised…', onclick: () => makeSheet(true) }, 'Expression sheet')) && sheetButtons : null,
+        character.kind === 'character' ? bakeButton : null, character.kind === 'character' ? bakeLabel : null,
         h('span.muted', {}, `${character.references.length}/${maxPhotos} reference photos`),
         h('button.text-button.danger', { onclick: guard(async () => {
           if (!confirm(`Delete "${character.name}"? Its photos stay in the library.`)) return;

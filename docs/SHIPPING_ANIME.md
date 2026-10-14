@@ -100,3 +100,5 @@ scripts/setup-voices.sh
 They get their own Python environment in `~/.local/share/lumina-studio/voice-env`, sharing your existing PyTorch, so the video models' packages are never replaced. Restart Lumina; the voices appear under **Local GPU** in every voice menu (characters, narrator, Create → Voice). If the environment lives elsewhere, set `LUMINA_VOICE_PYTHON` to its Python.
 
 Verified 2026-10-13 on the RTX 5070: a fresh environment built by the script spoke with both engines, and a two-shot storyboard with a Chatterbox character, a Kokoro character and a Kokoro narrator joined into an 11-second film whose Whisper transcript matched every line, in the right shot.
+
+Anime dialogue and voices are English only: the writer is told to write English, and the voice menus list only the American and British voices.

@@ -71,7 +71,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, publicDir, exportDir, info } = ctx;
+  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -424,6 +424,13 @@ export function createApiServer(ctx) {
     for (const ch of id) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619) >>> 0;
     return hash % 2147483646;
   };
+  // Bake a character into a LoRA for the local anime model (free, this computer's GPU, ~15-25 minutes).
+  route('GET', `/api/characters/${uuid}/bake`, (req, [id]) => bake.status(id));
+  route('POST', `/api/characters/${uuid}/bake`, async (req, [id]) => {
+    const body = await readBody(req, 1024);
+    return { status: 202, body: bake.start(id, { steps: Number.isFinite(Number(body.steps)) ? Number(body.steps) : undefined }) };
+  });
+  route('DELETE', `/api/characters/${uuid}/bake`, async (req, [id]) => bake.remove(id));
   route('POST', `/api/characters/${uuid}/sheet`, async (req, [id]) => {
     const body = await readBody(req, 16_384);
     const character = needCharacter(id);
@@ -589,7 +596,9 @@ export function createApiServer(ctx) {
   // Lip sync a shot's clip to its recorded dialogue (local and free). `box`: the mouth, as fractions of the frame.
   route('POST', `/api/shots/${uuid}/lipsync`, async (req, [id]) => {
     // Anime lip sync (drawn mouth shapes) is on; the live-action model (MuseTalk) is still experimental.
-    const anime = sequences.needSequence(sequences.needShot(id).sequenceId).settings.look === 'anime';
+    const settings = sequences.needSequence(sequences.needShot(id).sequenceId).settings;
+    if (settings.lipSync === false) throw new RequestError(409, 'Lip sync is turned off for this storyboard (Settings).');
+    const anime = settings.look === 'anime';
     if (!anime && process.env.LUMINA_EXPERIMENTAL_LIPSYNC !== '1') throw new RequestError(501, 'Lip sync works on anime storyboards (Look: anime). Live-action lip sync is still experimental.');
     const body = await readBody(req, 4096);
     try {

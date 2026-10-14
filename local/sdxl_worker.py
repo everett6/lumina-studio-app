@@ -2,7 +2,8 @@
 
 Same protocol as wan_worker.py: one JSON request per line on stdin, JSON lines on stdout.
   request:  {"id", "task": "image", "prompt", "negative"?, "width", "height", "steps"?, "guidance"?, "seed"?, "out",
-             "refs"?: [paths], "ref_scale"?: 0..1}  — refs: character sheet / reference pictures that steer the
+             "refs"?: [paths], "ref_scale"?: 0..1, "loras"?: [{"path", "scale"}]}  — loras: characters baked with
+             train_lora.py  — refs: character sheet / reference pictures that steer the
              character's look through IP-Adapter Plus (h94/IP-Adapter, Apache-2.0) when it is downloaded
             {"id", "task": "mouths", "image": path, "box": [x1, y1, x2, y2], "prompt"?, "seed"?, "out": folder}
               → closed.png, small.png, a.png, i.png, u.png: the same picture with only the mouth redrawn in the five
@@ -56,6 +57,25 @@ def ip_adapter_available():
         return True
     except Exception:
         return False
+
+
+lora_loaded = []
+
+
+def use_loras(p, loras):
+    # Baked characters: load exactly the requested LoRAs (cached while the same set is asked for again).
+    global lora_loaded
+    wanted = [(item["path"], float(item.get("scale") or 0.8)) for item in (loras or []) if os.path.exists(item.get("path", ""))]
+    if [path for path, _ in wanted] != [path for path, _ in lora_loaded]:
+        if lora_loaded:
+            p.unload_lora_weights()
+        for index, (path, _) in enumerate(wanted):
+            p.load_lora_weights(os.path.dirname(path), weight_name=os.path.basename(path), adapter_name=f"character{index}")
+        lora_loaded = wanted
+    if wanted:
+        p.set_adapters([f"character{index}" for index in range(len(wanted))], adapter_weights=[scale for _, scale in wanted])
+    lora_loaded = wanted
+    return bool(wanted)
 
 
 def use_ip_adapter(p, wanted):
@@ -170,13 +190,15 @@ def run(request):
         send({"id": rid, "progress": step + 1, "total": steps})
         return kwargs
 
+    baked = use_loras(p, request.get("loras"))
     refs = [path for path in (request.get("refs") or [])[:2] if os.path.exists(path)]
     steer = bool(refs) and ip_adapter_available()
     use_ip_adapter(p, steer)
     extra = {}
     if steer:
         scale = request.get("ref_scale")
-        p.set_ip_adapter_scale(scale if isinstance(scale, dict) else float(scale or 0.4))  # 0.4: the look, not the pose
+        # 0.4: the look, not the pose; a baked character already carries its look, so the sheet only nudges.
+        p.set_ip_adapter_scale(scale if isinstance(scale, dict) else float(scale or (0.25 if baked else 0.4)))
         # Several references (sheet + photo) are averaged into one look by passing them as one batch.
         extra["ip_adapter_image"] = [[Image.open(path).convert("RGB") for path in refs]]
     started = time.time()
@@ -189,7 +211,7 @@ def run(request):
                   generator=torch.Generator("cuda").manual_seed(int(request.get("seed") or 0) % (2**31))).images[0]
     image.save(request["out"])
     torch.cuda.empty_cache()
-    send({"id": rid, "done": True, "out": request["out"], "seconds": round(time.time() - started, 1), "steered": steer})
+    send({"id": rid, "done": True, "out": request["out"], "seconds": round(time.time() - started, 1), "steered": steer, "baked": baked})
 
 
 send({"ready": True, "model": MODEL, "cuda": torch.cuda.is_available()})

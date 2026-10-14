@@ -99,12 +99,11 @@ export function voiceUnavailableNote(engine) {
   if (engine === 'chatterbox' && !snapshotHas(chatterboxRepo, ['ve.safetensors', 't3_cfg.safetensors', 's3gen.safetensors', 'tokenizer.json', 'conds.pt'])) return 'Chatterbox is not downloaded. Install the local voice model files (see docs: Local voices).';
   return null;
 }
-// Kokoro's preset voices: the first letter is the accent (a American, b British, j Japanese, z Mandarin, ...), the
-// second the voice (f female, m male).
+// Kokoro's preset voices: the first letter is the accent (a American, b British), the second the voice
+// (f female, m male). English only: the other Kokoro accents are left out on purpose.
 const kokoroVoices = ['af_heart', 'af_bella', 'af_nicole', 'af_aoede', 'af_kore', 'af_sarah', 'af_nova', 'af_sky', 'af_alloy', 'af_jessica', 'af_river',
   'am_michael', 'am_fenrir', 'am_puck', 'am_echo', 'am_eric', 'am_liam', 'am_onyx', 'am_santa', 'am_adam',
-  'bf_emma', 'bf_isabella', 'bf_alice', 'bf_lily', 'bm_george', 'bm_fable', 'bm_lewis', 'bm_daniel',
-  'jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo'];
+  'bf_emma', 'bf_isabella', 'bf_alice', 'bf_lily', 'bm_george', 'bm_fable', 'bm_lewis', 'bm_daniel'];
 
 export function createWorker(workerFile, python = findPython) {
   let child = null;
@@ -156,7 +155,7 @@ export function createWorker(workerFile, python = findPython) {
         try { message = JSON.parse(line); } catch { continue; }
         const job = waiting.get(message.id);
         if (!job) continue;
-        if (message.progress) job.onProgress?.(message.progress, message.total);
+        if (message.progress) job.onProgress?.(message.progress, message.total, message);
         else if (message.notice) console.info(`[local] ${message.notice}`);
         else if (message.done) { waiting.delete(message.id); job.resolve(message); }
         else if (message.error) { waiting.delete(message.id); job.reject(new ProviderError('provider', message.error)); }
@@ -192,6 +191,7 @@ export function createWorker(workerFile, python = findPython) {
 const workers = {
   wan: createWorker(workerPath('wan_worker.py')), anime: createWorker(workerPath('sdxl_worker.py')),
   voice: createWorker(workerPath('voice_worker.py'), voicePython), lipsync: createWorker(workerPath('lipsync_worker.py'), voicePython),
+  train: createWorker(workerPath('train_lora.py')),
 };
 const animeFace = () => process.env.LUMINA_ANIME_FACE || path.join(os.homedir(), '.local', 'share', 'lumina-studio', 'anime-face', 'lbpcascade_animeface.xml');
 // Lip sync: anime mouth flaps need the anime image model (to draw the mouths) and the anime face detector;
@@ -203,6 +203,13 @@ export const lipSyncInstalled = (mode) => Boolean(voicePython()) && (mode === 'm
 
 // Lumina-side helpers (not part of the provider contract): find the mouth on a picture, draw the three anime mouths,
 // and lip-sync a clip. Paths in, files out; one GPU job at a time like everything else here.
+// Bake a character into a LoRA (local/train_lora.py): one long GPU job that holds the GPU queue until it is done.
+export async function bakeCharacter(payload, onProgress) {
+  if (!animeModelInstalled()) throw new ProviderError('provider', `Baking needs Animagine XL 4.0: hf download ${animeRepo} (7 GB).`);
+  const reply = await gpu('train', { task: 'bake', ...payload }, null, { exclusive: true, onMessage: (message) => onProgress?.(message.progress, message.total, message.stage) });
+  return reply;
+}
+
 export async function findMouth(image) {
   return (await gpu('lipsync', { task: 'find-mouth', image }, null, { exclusive: false })).box ?? null;
 }
@@ -218,7 +225,7 @@ export async function lipSync({ video, audio, mode, box, mouths, lines = [], out
 process.once('exit', () => Object.values(workers).forEach((w) => { w.stop().catch(() => {}); }));
 // One GPU job at a time across both models; the other model's worker is stopped first so the GPU is free for it.
 // A cancelled job never starts, or, while it runs, its worker is stopped (the model reloads on the next job).
-function gpu(name, payload, onProgress, { exclusive = true, signal = null } = {}) {
+function gpu(name, payload, onProgress, { exclusive = true, signal = null, onMessage = null } = {}) {
   return gpuQueue.run(async () => {
     if (signal?.aborted) throw new ProviderError('provider', 'Cancelled.');
     // Await release of the previous model's VRAM before starting another allocation.
@@ -227,7 +234,7 @@ function gpu(name, payload, onProgress, { exclusive = true, signal = null } = {}
     const halt = () => { workers[name].stop().catch(() => {}); };
     signal?.addEventListener('abort', halt, { once: true });
     try {
-      return await workers[name].request(payload, onProgress);
+      return await workers[name].request(payload, onMessage ? (done, total, message) => onMessage(message) : onProgress);
     } finally {
       signal?.removeEventListener('abort', halt);
     }
@@ -307,7 +314,7 @@ export default {
   },
   // A still frame: Animagine XL for anime frames, otherwise Wan generating a single frame.
   cancellable: true,
-  async run({ prompt, size, seed, model, images = [], onProgress, signal }) {
+  async run({ prompt, size, seed, model, images = [], loras = [], onProgress, signal }) {
     const anime = model === 'animagine-xl-4';
     if (anime && !animeModelInstalled()) throw new ProviderError('provider', `Animagine XL 4.0 is not downloaded yet: hf download ${animeRepo} (7 GB).`);
     if (!anime && !modelInstalled()) throw new ProviderError('provider', `Wan 2.2 is not downloaded yet: hf download ${repoId} (34 GB).`);
@@ -322,7 +329,10 @@ export default {
         await writeFile(file, image.bytes);
         refs.push(file);
       }
-      if (anime) await gpu('anime', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 28, out, refs }, log('anime frame', onProgress), { signal });
+      // Baked characters: their LoRA is loaded and their trigger word leads the prompt.
+      const baked = anime ? loras.filter((lora) => lora?.path && existsSync(lora.path)) : [];
+      if (baked.length) prompt = `${baked.map((lora) => lora.trigger).join(', ')}, ${prompt}`;
+      if (anime) await gpu('anime', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 28, out, refs, loras: baked.map(({ path: file, scale }) => ({ path: file, scale })) }, log('anime frame', onProgress), { signal });
       else await gpu('wan', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 40, out }, log('frame', onProgress), { signal });
       return { bytes: await readFile(out), usage: { local: true, cost: 0 } };
     });

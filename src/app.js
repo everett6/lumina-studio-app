@@ -19,7 +19,8 @@ import { createRemoteGateway } from './remote.js';
 import { createRepo } from './repo.js';
 import { createSequenceService } from './sequences.js';
 import { createEnhancer } from './enhance.js';
-import { withGpuLease } from './providers/local.js';
+import { bakeCharacter, withGpuLease } from './providers/local.js';
+import { createBakeService } from './bake.js';
 import { createFaceChecker } from './faces.js';
 
 export const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -31,6 +32,16 @@ function loadToken(file) {
   const token = randomBytes(24).toString('base64url');
   writeFileSync(file, token, { mode: 0o600 });
   return token;
+}
+
+// Tests: a stand-in trainer that writes an empty LoRA file instead of using the GPU.
+async function fakeBake({ out }, onProgress) {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  await mkdir(out, { recursive: true });
+  onProgress?.(1, 1, 'training');
+  const lora = path.join(out, 'character.safetensors');
+  await writeFile(lora, '');
+  return { lora };
 }
 
 // Starts Lumina's backend. `dataRoot` holds data/ (SQLite, keys, token) and storage/assets/.
@@ -52,6 +63,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
   const enhancer = createEnhancer({ binDir: path.join(dataRoot, 'bin'), workDir: path.join(dataRoot, 'tmp'), log });
   const faces = createFaceChecker({ binDir: path.join(dataRoot, 'bin'), log });
   const sequences = createSequenceService({ repo, directors, keys, generations, assetStore, providers, enhancer, budget, faces, log, progressOf: (id) => jobs.progress(id) });
+  const bake = createBakeService({ repo, assetStore, dir: path.join(dataRoot, 'loras'), trainer: enableMock && process.env.LUMINA_FAKE_BAKE ? fakeBake : bakeCharacter, log });
   jobs.events.on('update', books.onGenerationUpdate);
   jobs.events.on('update', sequences.onGenerationUpdate);
   const tokenFile = path.join(dataDir, 'api-token');
@@ -66,7 +78,7 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), binDir: path.join(dataRoot, 'bin'), tunnelCommand: process.env.LUMINA_TUNNEL_COMMAND || null, log,
   });
   const server = createApiServer({
-    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog,
+    repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
   });
   await new Promise((resolve, reject) => {
