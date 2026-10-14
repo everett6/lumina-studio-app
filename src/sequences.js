@@ -63,7 +63,7 @@ export function cleanSequenceSettings(input = {}, base = {}) {
     clipLength: Math.min(30, Math.max(0, Math.round(Number(input.clipLength ?? base.clipLength ?? 0)) || 0)),
     look: pick('look', (v) => v in looks, legacyLook),
     // Mouth movement on shots with recorded dialogue (anime flaps / live-action MuseTalk). On unless turned off.
-    lipSync: typeof input.lipSync === 'boolean' ? input.lipSync : typeof base.lipSync === 'boolean' ? base.lipSync : true,
+    lipSync: typeof input.lipSync === 'boolean' ? input.lipSync : typeof base.lipSync === 'boolean' ? base.lipSync : false, // off unless turned on
     lookBible: typeof input.lookBible === 'string' ? input.lookBible.slice(0, 1500) : base.lookBible ?? '',
     // Themes the audience must clearly see, e.g. "Chaos agent: a grinning trickster who breaks every plan". The writer
     // gives each one people, actions and a recurring image on screen, and tags the shots that carry it.
@@ -417,7 +417,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       sequence.settings.lookBible,
       kind === 'clip' ? 'Keep every person exactly as in the start frame: same face, hair, clothes and colours; same set and lighting.' : '',
       // Anime lip sync draws the mouth afterwards: a clip that animates talking by itself would fight the drawn mouth.
-      kind === 'clip' && sequence.settings.look === 'anime' && sequence.settings.lipSync !== false && d.dialogue.length
+      kind === 'clip' && sequence.settings.look === 'anime' && sequence.settings.lipSync === true && d.dialogue.length
         ? 'Mouths stay closed and still (the dialogue is added afterwards); move the head, eyes, hair and body instead.' : '',
       d.forbidden ? `Must not change: ${d.forbidden}` : '',
       ...d.themes.map((name) => themeVisual(sequence.settings.themes, name)).filter(Boolean),
@@ -519,7 +519,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   async function lipSyncShot(shotId, { box = null } = {}) {
     const shot = needShot(shotId);
     const sequence = needSequence(shot.sequenceId);
-    if (sequence.settings.lipSync === false) throw new RequestError(409, 'Lip sync is turned off for this storyboard (Settings).');
+    if (sequence.settings.lipSync !== true) throw new RequestError(409, 'Lip sync is turned off for this storyboard (Settings).');
     const synced = shot.details.lipsync;
     const source = asset(synced && synced.result === shot.videoAssetId ? synced.source : shot.videoAssetId);
     if (!source) throw new RequestError(400, 'Make this shot\'s clip first.');

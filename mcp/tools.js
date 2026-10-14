@@ -496,7 +496,7 @@ export function registerLuminaTools(server, client) {
       colorMatch: z.enum(['scene', 'film', 'off']).optional().describe('Match every shot\'s colours to the first shot of its scene (default) or of the film, free and local'),
       narratorVoice: z.object({ provider: z.string(), model: z.string(), voice: z.string().optional() }).optional(),
       interpolateFps: z.union([z.literal(0), z.literal(30)]).optional(),
-      lipSync: z.boolean().optional().describe('Allow lip sync (mouth movement) on shots with recorded dialogue (default true). When false, lip_sync_shot is refused.'),
+      lipSync: z.boolean().optional().describe('Allow lip sync (mouth movement) on shots with recorded dialogue (default false: off unless turned on). When false, lip_sync_shot is refused.'),
       requireApproval: z.boolean().optional().describe('Frames and clips must be accepted (review_shot) before video is paid for and before the film is joined'),
       videoSecondsBudget: z.number().int().min(0).max(900).optional().describe('Seconds of paid video the writer may plan; the rest become free still shots'),
       transition: z.enum(['cut', 'crossfade']).optional(), finish: z.enum(['none', 'cinematic', 'anime']).optional().describe('"cinematic": 2.39:1 bars, film grain, fades; "anime": cleaner flat colour, richer colour, crisp line art, short fades'),

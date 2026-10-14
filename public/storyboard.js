@@ -489,7 +489,7 @@ function shotCard(shot, index, total) {
         still
           ? h('button.button.secondary.small', { disabled: !shot.imagePath, onclick: start('still') }, shot.videoPath ? 'Re-render still' : 'Render still (free)')
           : h('button.button.secondary.small', { disabled: jobActive(shot.clipJob), onclick: start('animate') }, shot.videoPath ? 'Redo clip' : 'Animate'),
-        ui.options?.lipSync && ui.detail?.sequence.settings.lipSync !== false && ui.detail?.sequence.settings.look === 'anime' && shot.videoPath && recorded ? h('button.button.secondary.small', { disabled: ui.busy === `lipsync-${shot.id}`, title: 'Make the mouth move with the recorded dialogue (free, on this computer)', onclick: () => lipSync(null) },
+        ui.options?.lipSync && ui.detail?.sequence.settings.lipSync === true && ui.detail?.sequence.settings.look === 'anime' && shot.videoPath && recorded ? h('button.button.secondary.small', { disabled: ui.busy === `lipsync-${shot.id}`, title: 'Make the mouth move with the recorded dialogue (free, on this computer)', onclick: () => lipSync(null) },
           ui.busy === `lipsync-${shot.id}` ? 'Lip-syncing…' : shot.details.lipsync?.result === shot.videoAssetId ? 'Redo lip sync' : 'Lip sync') : null,
         unrecorded ? h('button.button.secondary.small', { title: 'Speak the dialogue in each character\'s voice', onclick: guard(async () => {
           const result = await call(`/api/shots/${shot.id}/dialogue`);

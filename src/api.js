@@ -597,7 +597,7 @@ export function createApiServer(ctx) {
   route('POST', `/api/shots/${uuid}/lipsync`, async (req, [id]) => {
     // Anime lip sync (drawn mouth shapes) is on; the live-action model (MuseTalk) is still experimental.
     const settings = sequences.needSequence(sequences.needShot(id).sequenceId).settings;
-    if (settings.lipSync === false) throw new RequestError(409, 'Lip sync is turned off for this storyboard (Settings).');
+    if (settings.lipSync !== true) throw new RequestError(409, 'Lip sync is turned off for this storyboard (Settings).');
     const anime = settings.look === 'anime';
     if (!anime && process.env.LUMINA_EXPERIMENTAL_LIPSYNC !== '1') throw new RequestError(501, 'Lip sync works on anime storyboards (Look: anime). Live-action lip sync is still experimental.');
     const body = await readBody(req, 4096);

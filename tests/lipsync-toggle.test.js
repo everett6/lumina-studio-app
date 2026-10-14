@@ -8,12 +8,12 @@ const make = (t, project, settings = {}) => t.call('POST', `/api/projects/${proj
   settings: { shotCount: 2, imageProvider: 'mock', imageModel: 'mock-image', videoProvider: 'mock', videoModel: 'mock-video', look: 'anime', ...settings },
 });
 
-test('lipSync defaults to true, can be turned off, and is persisted', async () => {
+test('lipSync defaults to false, can be turned off, and is persisted', async () => {
   const t = await startTestApp();
   try {
     const project = (await t.call('POST', '/api/projects', { name: 'LS' })).body.project;
     const { id, settings } = (await make(t, project)).body.sequence;
-    assert.equal(settings.lipSync, true);
+    assert.equal(settings.lipSync, false);
     const patched = await t.call('PATCH', `/api/storyboards/${id}`, { settings: { lipSync: false } });
     assert.equal(patched.body.sequence.settings.lipSync, false);
     assert.equal((await t.call('GET', `/api/storyboards/${id}`)).body.sequence.settings.lipSync, false);
