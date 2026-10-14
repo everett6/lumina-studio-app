@@ -87,6 +87,7 @@ def drawing(request, rid):
         image.save(path)
         pictures.append((path, framing))
         send({"id": rid, "progress": index + 1, "total": count, "stage": "drawing"})
+        ease_off()
     del pipe
     gc.collect()
     torch.cuda.empty_cache()
@@ -131,6 +132,28 @@ def prepare(request, pictures, rid):
     return unet, scheduler, samples
 
 
+def gpu_temperature():
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        return pynvml.nvmlDeviceGetTemperature(pynvml.nvmlDeviceGetHandleByIndex(0), 0)
+    except Exception:
+        return None
+
+
+def ease_off():
+    # Training keeps the GPU at full load for minutes. A short rest after every step lowers the sustained power and
+    # its spikes, and a hot card cools down before it continues (some systems drop a GPU that is pushed too hard).
+    time.sleep(float(os.environ.get("LUMINA_TRAIN_REST", "0.12")))
+    hot = float(os.environ.get("LUMINA_TRAIN_MAX_TEMP", "75"))
+    temperature = gpu_temperature()
+    while temperature is not None and temperature >= hot:
+        time.sleep(2)
+        temperature = gpu_temperature()
+        if temperature is not None and temperature < hot - 8:
+            break
+
+
 def train(request, unet, scheduler, samples, rid):
     steps = max(200, min(3000, int(request.get("steps") or 900)))
     rank = int(request.get("rank") or 16)
@@ -158,6 +181,7 @@ def train(request, unet, scheduler, samples, rid):
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
+        ease_off()
         if (step + 1) % 25 == 0 or step + 1 == steps:
             send({"id": rid, "progress": step + 1, "total": steps, "stage": "training", "loss": round(float(loss), 4)})
     layers = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))

@@ -31,7 +31,7 @@ test('bake character: needs a sheet, records the LoRA and trigger, can be remove
     const done = await settle(t, character.id);
     assert.equal(done.job.state, 'completed');
     assert.match(done.baked.trigger, /^lmn[a-f0-9]{8}$/);
-    assert.equal(done.baked.scale, 0.8);
+    assert.equal(done.baked.scale, 0.6);
 
     const removed = (await t.call('DELETE', `/api/characters/${character.id}/bake`)).body;
     assert.equal(removed.baked, null);

@@ -34,7 +34,7 @@ export function createBakeService({ repo, assetStore, dir, trainer, log = consol
     trainer({ refs, tags, trigger, out, steps, seed: parseInt(characterId.slice(0, 6), 16) || 0 }, (done, total, stage) => Object.assign(job, { done, total, stage: stage ?? job.stage }))
       .then((result) => {
         if (!repo.characters.get(characterId)) return rm(out, { recursive: true, force: true });
-        repo.settings.set(bakeKey(characterId), { path: result.lora, trigger, scale: 0.8, bakedAt: new Date().toISOString(), minutes: Math.round((Date.now() - started) / 60000) });
+        repo.settings.set(bakeKey(characterId), { path: result.lora, trigger, scale: 0.6, bakedAt: new Date().toISOString(), minutes: Math.round((Date.now() - started) / 60000) });
         Object.assign(job, { state: 'completed', stage: 'done' });
         return null;
       })

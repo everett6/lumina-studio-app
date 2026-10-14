@@ -65,7 +65,7 @@ lora_loaded = []
 def use_loras(p, loras):
     # Baked characters: load exactly the requested LoRAs (cached while the same set is asked for again).
     global lora_loaded
-    wanted = [(item["path"], float(item.get("scale") or 0.8)) for item in (loras or []) if os.path.exists(item.get("path", ""))]
+    wanted = [(item["path"], float(item.get("scale") or 0.6)) for item in (loras or []) if os.path.exists(item.get("path", ""))]
     # A re-baked character keeps its file name, so the file's time is part of what is cached.
     stamp = lambda items: [(path, os.path.getmtime(path) if os.path.exists(path) else 0) for path, _ in items]
     if stamp(wanted) != [(path, when) for path, _, when in lora_loaded]:

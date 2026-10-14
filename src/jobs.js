@@ -100,7 +100,9 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         });
       } else {
         // Characters baked into a LoRA (src/bake.js) travel with the job; providers without LoRA support ignore them.
-        const loras = (params.characterIds ?? []).map((cid) => repo.settings.get(`bake:${cid}`, null)).filter(Boolean);
+        // 0.6 keeps the character without overcooking it; bakes recorded with the old 0.8 default are read as 0.6.
+        const loras = (params.characterIds ?? []).map((cid) => repo.settings.get(`bake:${cid}`, null)).filter(Boolean)
+          .map((lora) => (lora.scale === 0.8 ? { ...lora, scale: 0.6 } : lora));
         output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, loras, onProgress, signal });
       }
       cancelled();
