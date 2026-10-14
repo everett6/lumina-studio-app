@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { callLumina, registerLuminaTools } from './tools.js';
+import { callLumina, LUMINA_INSTRUCTIONS, registerLuminaTools } from './tools.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const configHome = process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config');
@@ -75,7 +75,7 @@ async function call(method, route, body, { approvalId } = {}) {
   }
 }
 
-const server = new McpServer({ name: 'lumina-studio', version: JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version });
+const server = new McpServer({ name: 'lumina-studio', version: JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version }, { instructions: LUMINA_INSTRUCTIONS });
 registerLuminaTools(server, {
   call,
   async fetchRaw(route) {

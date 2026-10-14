@@ -70,6 +70,23 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft
 the bible and pages, show me the text, then illustrate page 1."*
 
+### What a client sees before it calls anything
+
+- **Server instructions.** On connect, the server sends a short playbook (film workflow, budget rules, lip sync off by
+  default, anime is English only, one GPU job at a time, use `watch_jobs` instead of polling). The local and the remote
+  (claude.ai / ChatGPT) endpoints send the same text.
+- **Tool annotations.** Every tool has a title and `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+  `openWorldHint` (true when it may call a paid provider). Replacing tools (`import_shot_plan` with `replace`,
+  `plan_storyboard`, `plan_pages`, `outline_book`, `draft_bible`, `draft_chapter`, `bake_character`, `cancel_job`) are
+  marked destructive. Each description ends with its cost and the usual next tool.
+- **Prompts.** `make_anime_short` (idea, minutes, characters), `fix_a_shot` (storyboardId, shotId, problem) and
+  `finish_film` (storyboardId) return a step plan that uses the real tool names.
+- **Errors.** A failed call returns `isError` with the app's message plus a `Hint:` for common cases: 402 (budget or
+  approval: `budget_status`, `decide_approval`), 409 (busy: `watch_jobs`; lip sync off; locked), 422 (lip sync needs
+  `mouthBox`), 428/501 (something must be installed: ffmpeg, RIFE, Real-ESRGAN, local models), 404 (stale id).
+- Paid work is gated by budget approvals only. The app's "confirm spend" dialog (HTTP 428) does not apply to MCP. After
+  `decide_approval`, repeat the identical call; the approval is matched automatically.
+
 ## Interactive filmmaking in chat
 
 The interactive tools let a chat client walk you through a film one decision at a time, show what was made, and

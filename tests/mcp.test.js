@@ -240,3 +240,91 @@ test('MCP server reports clearly when Lumina is not running', async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------- Server metadata (no app needed: a stub client and an in-memory transport) ----------
+async function connectStub(serverOptions, clientStub = {}) {
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { registerLuminaTools } = await import('../mcp/tools.js');
+  const server = serverOptions === null ? new McpServer({ name: 'x', version: '1' }) : new McpServer({ name: 'x', version: '1' }, serverOptions);
+  registerLuminaTools(server, { call: async () => ({}), fetchRaw: async () => ({ ok: false }), exportDir: () => '.', upload: async () => ({}), ...clientStub });
+  const client = new Client({ name: 'meta-test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  return { client, server };
+}
+
+test('every MCP tool has a title, annotations and a cost note', async () => {
+  const { client } = await connectStub(null);
+  const { tools } = await client.listTools();
+  const { toolNames } = await import('../mcp/tools.js');
+  assert.deepEqual(tools.map((x) => x.name).sort(), toolNames().sort(), 'TOOL_META must list exactly the registered tools');
+  for (const tool of tools) {
+    assert.ok(tool.title && tool.title !== tool.name, `${tool.name} needs a title`);
+    const a = tool.annotations ?? {};
+    for (const key of ['readOnlyHint', 'openWorldHint']) assert.equal(typeof a[key], 'boolean', `${tool.name}.${key}`);
+    if (!a.readOnlyHint) for (const key of ['destructiveHint', 'idempotentHint']) assert.equal(typeof a[key], 'boolean', `${tool.name}.${key}`);
+    assert.match(tool.description, /Free|credits|money|cost/i, `${tool.name} should say what it costs`);
+  }
+  const by = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));
+  assert.equal(by.list_projects.readOnlyHint, true);
+  assert.equal(by.import_shot_plan.destructiveHint, true);
+  assert.equal(by.bake_character.destructiveHint, true);
+  assert.equal(by.generate_shot.openWorldHint, true);
+  assert.equal(by.join_storyboard.openWorldHint, false);
+  assert.equal(by.update_shot.idempotentHint, true);
+  assert.equal(by.create_project.destructiveHint, false);
+});
+
+test('server instructions are present, also for a server built without options (remote endpoint)', async () => {
+  const { LUMINA_INSTRUCTIONS } = await import('../mcp/tools.js');
+  for (const options of [{ instructions: LUMINA_INSTRUCTIONS }, null]) {
+    const { client } = await connectStub(options);
+    const text = client.getInstructions();
+    assert.match(text, /film_next_step/);
+    assert.match(text, /lipSync/);
+    assert.match(text, /English only/);
+    assert.match(text, /watch_jobs/);
+    assert.match(text, /budget approvals/);
+  }
+});
+
+test('prompts list and use real tool names', async () => {
+  const { client } = await connectStub(null);
+  const { prompts } = await client.listPrompts();
+  assert.deepEqual(prompts.map((p) => p.name).sort(), ['finish_film', 'fix_a_shot', 'make_anime_short']);
+  const { tools } = await client.listTools();
+  const names = new Set(tools.map((t) => t.name));
+  const anime = await client.getPrompt({ name: 'make_anime_short', arguments: { idea: 'A fox crosses a lake', minutes: '2', characters: 'Pip, a fox' } });
+  const body = anime.messages[0].content.text;
+  assert.match(body, /A fox crosses a lake/);
+  const fix = await client.getPrompt({ name: 'fix_a_shot', arguments: { storyboardId: 'sb1', shotId: 'sh1', problem: 'face drifts' } });
+  const finish = await client.getPrompt({ name: 'finish_film', arguments: { storyboardId: 'sb1' } });
+  const mentioned = new Set([body, fix.messages[0].content.text, finish.messages[0].content.text].flatMap((x) => x.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? []));
+  const known = ['create_project', 'create_character', 'make_character_sheet', 'bake_character', 'create_storyboard', 'film_next_step', 'join_storyboard', 'preview_shot', 'review_shot', 'watch_jobs'];
+  for (const name of known) assert.ok(names.has(name) && (body + fix.messages[0].content.text + finish.messages[0].content.text).includes(name), name);
+  // Any snake_case word that is a tool-like verb in the prompts must be a real tool (ignore argument and status words).
+  const ignored = new Set(['needs_regeneration', 'plan_false', 'strict_budget']);
+  for (const word of mentioned) if (/^(list|get|create|update|make|generate|preview|review|trim|move|adjust|render|voice|estimate|decide|lip|film|join|watch|import|production|budget|set|bake)_/.test(word) && !ignored.has(word)) assert.ok(names.has(word), `prompt mentions unknown tool ${word}`);
+});
+
+test('tool errors carry the API message plus a hint for common statuses', async () => {
+  const { errorHint } = await import('../mcp/tools.js');
+  const err = (status, message, data = {}) => Object.assign(new Error(message), { status, data });
+  assert.match(errorHint(err(402, 'Strict budget: needs approval', { approvalId: 'a1' })), /budget_status.*decide_approval/);
+  assert.match(errorHint(err(402, 'Daily limit reached')), /budget_status/);
+  assert.match(errorHint(err(409, 'Lip sync is turned off for this storyboard (Settings).')), /off by default/);
+  assert.match(errorHint(err(409, 'Pip is locked (approved).')), /locked: false/);
+  assert.match(errorHint(err(409, 'A job is already running')), /watch_jobs/);
+  assert.match(errorHint(err(501, 'Enhancing video needs ffmpeg')), /apt install ffmpeg/);
+  assert.match(errorHint(err(501, 'RIFE missing')), /install/);
+  assert.match(errorHint(err(422, 'Mouth not found', { needBox: true })), /mouthBox/);
+  assert.match(errorHint(err(404, 'Not found')), /list_projects/);
+  assert.equal(errorHint(new Error('plain')), '');
+
+  const { client } = await connectStub(null, { call: async () => { throw err(409, 'Lip sync is turned off for this storyboard (Settings).'); } });
+  const result = await client.callTool({ name: 'lip_sync_shot', arguments: { shotId: 's1' } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Lip sync is turned off/);
+  assert.match(result.content[0].text, /Hint:/);
+});

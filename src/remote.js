@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { callLumina, registerLuminaTools } from '../mcp/tools.js';
+import { callLumina, LUMINA_INSTRUCTIONS, registerLuminaTools } from '../mcp/tools.js';
 import { createTunnel } from './tunnel.js';
 
 const luminaVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -190,7 +190,7 @@ export function createRemoteGateway({ repo, localOrigin, localToken, exportDir, 
     const auth = requireBearerAuth({ verifier: provider, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpUrl) });
     // Stateless Streamable HTTP: a fresh server + transport per request, no session affinity needed through a tunnel.
     app.post('/mcp', auth, express.json({ limit: '4mb' }), async (req, res) => {
-      const mcp = new McpServer({ name: 'lumina-studio', version: luminaVersion });
+      const mcp = new McpServer({ name: 'lumina-studio', version: luminaVersion }, { instructions: LUMINA_INSTRUCTIONS });
       registerLuminaTools(mcp, toolClient);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {

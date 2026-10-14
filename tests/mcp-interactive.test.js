@@ -292,3 +292,19 @@ test('set_character_voice changes the voice and records unrecorded lines only wi
   });
 });
 
+
+test('update_storyboard turns lip sync on after creation and keeps other settings', async () => {
+  await withApp(async ({ t, tool }) => {
+    const { board: created } = await makeFilm(tool);
+    const before = (await tool('get_storyboard', { storyboardId: created.id }));
+    assert.equal(before.isError, undefined);
+    const updated = await tool('update_storyboard', { storyboardId: created.id, title: 'Renamed', settings: { lipSync: true, look: 'anime' } });
+    assert.equal(updated.isError, undefined, updated.content[0].text);
+    const summary = parse(updated);
+    assert.equal(summary.title ?? summary.sequence?.title, 'Renamed');
+    assert.equal(summary.shots.length, 3, 'shots kept');
+    const stored = (await t.call('GET', `/api/storyboards/${created.id}`)).body.sequence.settings;
+    assert.equal(stored.lipSync, true);
+    assert.equal(stored.look, 'anime');
+  });
+});

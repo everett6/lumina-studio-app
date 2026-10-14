@@ -8,6 +8,110 @@ import { nextStep, shotFacts } from './wizard.js';
 
 const maxInlineImageBytes = 3 * 1024 * 1024;
 
+// Playbook sent to every MCP client in the server's `instructions` (stdio and remote endpoints share it).
+export const LUMINA_INSTRUCTIONS = `Lumina Studio makes images, books and films on the user's own computer and provider accounts.
+
+MAKING A FILM (the usual path)
+1. create_project, then create_character for each cast member (a locked "designTags" block keeps the design stable) and make_character_sheet; bake_character (local LoRA, free, ~15-25 min GPU) keeps anime faces on-model.
+2. create_storyboard (set look, targetMinutes, characterIds). Under a strict budget use plan=false and import_shot_plan with a plan you write yourself.
+3. Loop: film_next_step -> show its question and preview images to the user -> make the chosen call -> repeat. It proposes one stage at a time (plan, frames, approve frames, animate, review, voices, fix, join) and never spends anything itself.
+4. Look before you pay: preview_storyboard (all frames), preview_shot (one shot, with video samples and dialogue audio), inspect_video. Accept or reject with review_shot; fix with update_shot, trim_shot, move_shot, adjust_shot_look.
+5. join_storyboard makes the final MP4; enhance_video / interpolate_video are optional polish.
+
+MONEY
+- Local work (local image/video models, still shots, lip sync, bake, join, colour grade, previews, estimates) is free. Provider work (frames, clips, speech, writer models, covers, upscales) can spend the user's credits.
+- Paid requests are controlled by budget approvals, not by a confirm dialog. A refusal with status 402 means: call budget_status, show the estimate to the user, and only if they agree use decide_approval (works only if the user allowed MCP approvals; otherwise they approve it in the Lumina app), then repeat the identical call.
+- Call estimate_film_cost before produce_film or generate_storyboard_shots for clips. Never loop paid retries or submit a second paid take while one is still running; check the first with get_generation / watch_jobs.
+
+RULES OF THE ROAD
+- Anime storyboards (look: "anime") are English only. Japanese and other languages are not supported for anime dialogue.
+- Lip sync is OFF by default per storyboard (setting lipSync, chosen at create_storyboard or in the storyboard's Settings in the app). When off, lip_sync_shot is refused. It needs recorded dialogue first (voice_dialogue).
+- Local models are free but slow and share one GPU: run one heavy job at a time. Do not poll; use watch_jobs with waitSeconds to wait for jobs.
+- Replacing work (import_shot_plan replace, plan_storyboard/plan_pages/outline_book replace, draft_bible, bake_character remove) needs the user's OK first.
+- Ids come from list_* tools or earlier results: list_projects, list_characters, list_assets, list_books, get_storyboard. search and fetch read the user's work by keywords.`;
+
+// Title, flags and cost/next hints per tool. Flags: r read-only, d destructive (overwrites or removes), i idempotent,
+// o may call external (paid) providers. Everything else is local. Descriptions get "Cost" and "Next" appended when listed.
+const free = 'Free.';
+const local = 'Free (runs on this computer).';
+const paid = 'May spend credits on the user\'s provider account (budget approvals apply).';
+const TOOL_META = {
+  search: ['r', free, 'fetch'], fetch: ['r', free, null],
+  list_projects: ['r', free, 'create_project or list_assets'], create_project: ['', free, 'create_character, create_storyboard or generate_image'], update_storyboard: ['i', free, 'film_next_step'],
+  list_models: ['ro', free, 'generate_image / create_storyboard'], list_presets: ['r', free, 'generate_image, generate_video or create_storyboard'],
+  list_characters: ['r', free, 'create_storyboard (characterIds)'], create_character: ['', free, 'make_character_sheet'],
+  update_character: ['i', free, null], make_character_sheet: ['o', 'Free with the local anime model, otherwise may spend credits.', 'get_generation, then bake_character'],
+  enhance_image: ['o', paid, null], generate_image: ['o', paid, 'list_assets or add_to_canvas'],
+  get_generation: ['r', free, null], list_assets: ['r', free, null], add_to_canvas: ['', free, 'run_canvas'], run_canvas: ['o', paid, null],
+  create_book: ['', free, 'draft_bible'], get_book: ['r', free, null], list_books: ['r', free, 'get_book'],
+  update_book: ['i', free, null], draft_bible: ['do', 'Uses the writer model (may spend credits).', 'plan_pages or outline_book'],
+  plan_pages: ['do', 'Uses the writer model (may spend credits); with replace=false existing pages are kept.', 'generate_illustration'],
+  edit_page: ['i', free, null], revise_page: ['o', 'Uses the writer model (may spend credits).', null],
+  generate_illustration: ['o', paid, 'generate_cover or export_book'], outline_book: ['do', 'Uses the writer model (may spend credits).', 'draft_chapter'],
+  draft_chapter: ['do', 'Uses the writer model (may spend credits).', 'read_chapter'], read_chapter: ['r', free, null],
+  revise_chapter: ['o', 'Uses the writer model (may spend credits).', null], edit_chapter: ['i', free, null],
+  generate_cover: ['o', paid, 'export_book'], narrate: ['o', paid, 'export_book'], generate_speech: ['o', paid, null],
+  generate_video: ['o', paid, 'get_generation (if wait=false)'], import_manuscript: ['', free, 'read_chapter or revise_chapter'],
+  create_storyboard: ['o', 'Planning uses the writer model (a little credit); plan=false is free.', 'film_next_step'],
+  import_shot_plan: ['d', free, 'film_next_step'], production_readiness: ['r', free, 'estimate_film_cost'],
+  get_storyboard: ['r', free, 'film_next_step'], update_shot: ['i', free, null], review_shot: ['i', free, 'film_next_step'],
+  render_still_shot: ['i', local, null], voice_dialogue: ['o', 'May spend a little per line on the voice provider (free with a local voice).', 'lip_sync_shot (if enabled)'],
+  estimate_film_cost: ['r', free, 'produce_film or generate_storyboard_shots'], openrouter_credit_status: ['ro', free, 'budget_status'],
+  budget_status: ['r', free, 'decide_approval'], decide_approval: ['', free, 'repeat the refused call unchanged'],
+  refresh_models: ['io', free, 'list_models'], generate_shot: ['o', paid, 'preview_shot then review_shot'],
+  generate_storyboard_shots: ['o', paid, 'watch_jobs, then film_next_step'], produce_film: ['o', paid, 'get_storyboard (production)'],
+  enhance_video: ['', local, null], bake_character: ['d', local, 'generate_shot / generate_storyboard_shots'],
+  lip_sync_shot: ['i', local, 'preview_shot'], inspect_video: ['r', free, null], interpolate_video: ['', local, null],
+  import_video: ['', free, null], join_storyboard: ['i', free, 'enhance_video (optional)'], export_book: ['', free, null],
+  preview_shot: ['r', free, 'review_shot'], preview_storyboard: ['r', free, 'review_shot'],
+  plan_storyboard: ['do', 'Uses the writer model (may spend credits); refused under a strict budget.', 'film_next_step'],
+  film_next_step: ['r', free, 'the tool call in the choice the user picks'], watch_jobs: ['r', free, 'film_next_step'],
+  cancel_job: ['d', free, null], film_checklist: ['r', free, null], adjust_shot_look: ['i', free, 'join_storyboard'],
+  move_shot: ['', free, 'join_storyboard'], trim_shot: ['i', free, 'join_storyboard'], set_character_voice: ['i', free, 'voice_dialogue'],
+};
+
+export function toolAnnotations(name) {
+  const flags = TOOL_META[name]?.[0] ?? '';
+  const readOnlyHint = flags.includes('r');
+  return {
+    readOnlyHint,
+    ...(readOnlyHint ? {} : { destructiveHint: flags.includes('d'), idempotentHint: flags.includes('i') }),
+    openWorldHint: flags.includes('o'),
+  };
+}
+export const toolNames = () => Object.keys(TOOL_META);
+
+// A short hint for an API error, so the model knows what to do next. Never hides the API's own message.
+export function errorHint(error) {
+  const status = error?.status;
+  const message = String(error?.message ?? '');
+  if (status === 402) {
+    return error.data?.approvalId || /approv/i.test(message)
+      ? 'Hint: this paid request needs a spending approval. Call budget_status, show the estimate to the user and, only if they agree, decide_approval (needs MCP approvals enabled in the app; otherwise the user approves it in Lumina Settings -> Budget), then repeat the identical call. Do not retry in a loop.'
+      : 'Hint: the budget refuses this spend. Call budget_status to see the limits; they can only be changed in the Lumina app. Do not retry paid work.';
+  }
+  if (status === 403 && /approval/i.test(message)) return 'Hint: ask the user to approve it in the Lumina app (Settings -> Budget).';
+  if (status === 409) {
+    if (/lip sync is turned off/i.test(message)) return 'Hint: lip sync is off by default per storyboard. Ask the user to turn it on in the storyboard\'s Settings (or create the storyboard with lipSync: true).';
+    if (/locked/i.test(message)) return 'Hint: the item is locked (approved). Send locked: false in the same call only if the user wants it changed.';
+    return 'Hint: Lumina is busy with this item or its state does not allow it. Call watch_jobs (waitSeconds up to 60) and try again when the job has finished; do not submit a duplicate paid job.';
+  }
+  if (status === 422 && error.data?.needBox) return 'Hint: the mouth was not found. Look at preview_shot, then call lip_sync_shot again with mouthBox [x1, y1, x2, y2] as fractions of the frame (0-1).';
+  if (status === 428 || error.data?.needsDownload) return 'Hint: a local tool or model must be installed first. Ask the user to install it in the Lumina app (Storyboard -> Picture quality for RIFE / Real-ESRGAN, Settings for local models).';
+  if (status === 501) {
+    if (/ffmpeg/i.test(message)) return 'Hint: ffmpeg is not installed on the computer running Lumina (Debian/Ubuntu: sudo apt install ffmpeg).';
+    return 'Hint: not available on this computer (not installed or not supported). The message above says what is missing; ask the user to install it from the Lumina app.';
+  }
+  if (status === 404) return 'Hint: that id was not found. Get a fresh id from list_projects / get_storyboard / list_characters / list_books.';
+  if (status === 429) return 'Hint: rate limited. Wait a minute before retrying.';
+  return '';
+}
+
+function filmPrompt(text) {
+  return { messages: [{ role: 'user', content: { type: 'text', text } }] };
+}
+
+
 // One HTTP call from an MCP server to Lumina's API. Calls are marked as coming from MCP (budget approvals look
 // at this) and may carry an approval id. Budget refusals keep their details (approvalId, estimate) for the client.
 export async function callLumina({ origin, token, method, route, body, approvalId, timeoutMs = 660_000 }) {
@@ -29,9 +133,24 @@ export async function callLumina({ origin, token, method, route, body, approvalI
 }
 
 export function registerLuminaTools(server, client) {
+  // The remote endpoint builds its McpServer without options: give it the shared playbook before it connects.
+  if (server.server && !server.server._instructions) server.server._instructions = LUMINA_INSTRUCTIONS;
+  // Every tool gets annotations and a title; cost and next-step hints from TOOL_META are appended to the description.
+  const tool = (name, config, handler) => {
+    const meta = TOOL_META[name];
+    const extra = meta && !/\bCost:/.test(config.description) ? ` Cost: ${meta[1]}${meta[2] ? ` Next: ${meta[2]}.` : ''}` : '';
+    return server.registerTool(name, {
+      ...config, title: config.title ?? name.replace(/_/g, ' '), description: `${config.description}${extra}`,
+      annotations: { ...toolAnnotations(name), ...config.annotations },
+    }, handler);
+  };
   const text = (value) => ({ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) });
   const ok = (...content) => ({ content });
-  const fail = (error) => ({ content: [text(error.message)], isError: true });
+  const hintFor = (error) => errorHint(error);
+  const fail = (error) => {
+    const hint = hintFor(error);
+    return { content: [text(hint ? `${error.message}\n\n${hint}` : error.message)], isError: true };
+  };
   const safe = (handler) => async (args) => {
     try {
       return await handler(args);
@@ -70,7 +189,7 @@ export function registerLuminaTools(server, client) {
   // search + fetch: the read-only pair ChatGPT connectors and deep research require (OpenAI's compatibility schema).
   const citeUrl = (id) => (client.siteUrl ? `${client.siteUrl.replace(/\/$/, '')}/#${id}` : `lumina://${id.replace(':', '/')}`);
   const structured = (value) => ({ structuredContent: value, content: [{ type: 'text', text: JSON.stringify(value) }] });
-  server.registerTool('search', {
+  tool('search', {
     title: 'Search Lumina',
     description: 'Search the user\'s Lumina work — projects, books, chapters, storyboards and characters — by keywords. Returns ids to pass to fetch. An empty query lists recent items.',
     inputSchema: { query: z.string().describe('Keywords to look for') },
@@ -79,7 +198,7 @@ export function registerLuminaTools(server, client) {
     const { results } = await client.call('GET', `/api/search?q=${encodeURIComponent(query ?? '')}`);
     return structured({ results: results.map((d) => ({ id: d.id, title: d.title, url: citeUrl(d.id) })) });
   }));
-  server.registerTool('fetch', {
+  tool('fetch', {
     title: 'Fetch a Lumina item',
     description: 'Read the full text of a search result (a book with its pages or chapter list, a chapter\'s text, a storyboard\'s shots, a character\'s look) by its id from search.',
     inputSchema: { id: z.string().describe('An id returned by search, such as "chapter:<uuid>"') },
@@ -89,20 +208,20 @@ export function registerLuminaTools(server, client) {
     return structured({ id: doc.id, title: doc.title, text: doc.text, url: citeUrl(doc.id), metadata: doc.metadata });
   }));
 
-  server.registerTool('list_projects', {
+  tool('list_projects', {
     title: 'List projects',
     description: 'List Lumina Studio projects, most recently updated first.',
     inputSchema: {},
   }, safe(async () => ok(text((await client.call('GET', '/api/projects')).projects))));
 
-  server.registerTool('create_project', {
+  tool('create_project', {
     title: 'Create project',
     description: 'Create a new Lumina Studio project.',
     inputSchema: { name: z.string().min(1).max(80) },
   }, safe(async ({ name }) => ok(text((await client.call('POST', '/api/projects', { name })).project))));
 
-  server.registerTool('list_models', {
-    title: 'List image models',
+  tool('list_models', {
+    title: 'List providers and models',
     description: 'List providers and models, whether each provider has a key configured, and what each model supports (generate, edit, video, speech, upscale, remove-background, inpaint; sizes, durations, max input images). listPrice is the provider\'s list price when known (USD per image, megapixel or second) — an estimate, not a bill. Also lists creative directors.',
     inputSchema: {},
   }, safe(async () => {
@@ -113,7 +232,7 @@ export function registerLuminaTools(server, client) {
     }));
   }));
 
-  server.registerTool('list_presets', {
+  tool('list_presets', {
     title: 'List presets',
     description: 'List Lumina\'s creative presets: camera moves (video only), effects (time, weather, atmosphere) and styles. Pass preset ids as `presets` to generate_image or generate_video; at most one per group.',
     inputSchema: { mode: z.enum(['image', 'video']).optional().describe('Only presets that work for this mode') },
@@ -126,7 +245,7 @@ export function registerLuminaTools(server, client) {
 
   const charactersArg = z.array(z.string()).max(8).optional().describe('Character and location ids from list_characters. Their look is added to the prompt; their reference photos are attached when the model accepts input images.');
 
-  server.registerTool('list_characters', {
+  tool('list_characters', {
     title: 'List characters',
     description: 'List saved characters and products (name, look description, reference photo asset ids). Pass their ids as characterIds to generate_image, generate_video or create_storyboard to keep them consistent.',
     inputSchema: {},
@@ -141,25 +260,25 @@ export function registerLuminaTools(server, client) {
     locked: z.boolean().optional().describe('Locked (approved) looks cannot change until unlocked with locked: false'),
   };
   const characterView = ({ id, name, kind, description, referenceAssetIds, voice, locked, designTags }) => ({ id, name, kind, description, designTags, referenceAssetIds, voice, locked });
-  server.registerTool('create_character', {
+  tool('create_character', {
     title: 'Create character or location',
     description: 'Save a reusable character, product or location: a name, a description of what must stay the same, and reference image asset ids from list_assets. Used in each shot to guide consistent appearances; generated results still need review.',
     inputSchema: { name: z.string().min(1).max(80), ...characterSchema },
   }, safe(async (args) => ok(text(characterView((await client.call('POST', '/api/characters', args)).character)))));
 
-  server.registerTool('update_character', {
+  tool('update_character', {
     title: 'Update character or location',
     description: 'Change a saved character, product or location (look, references, voice, lock). A locked look is refused unless locked: false is sent in the same call.',
     inputSchema: { characterId: z.string(), name: z.string().min(1).max(80).optional(), ...characterSchema },
   }, safe(async ({ characterId, ...changes }) => ok(text(characterView((await client.call('PATCH', `/api/characters/${characterId}`, changes)).character)))));
 
-  server.registerTool('make_character_sheet', {
+  tool('make_character_sheet', {
     title: 'Make character sheet',
-    description: 'Generate a turnaround model sheet (front, side, back) or, with expressions: true, an expression sheet for a saved character from its designTags (or description), and add it as the character\'s first reference image when done. Uses the default anime model on this computer when installed, else the given or default provider (may cost money). Returns the queued generation; poll get_generation.',
+    description: 'Generate a turnaround model sheet (front, side, back) or, with expressions: true, an expression sheet for a saved character from its designTags (or description), and add it as the character\'s first reference image when done. Uses the default anime model on this computer when installed, else the given or default provider (may cost money). Returns the queued generation; wait with watch_jobs or get_generation.',
     inputSchema: { characterId: z.string(), projectId: z.string(), expressions: z.boolean().optional(), provider: z.string().optional(), model: z.string().optional() },
   }, safe(async ({ characterId, ...rest }) => ok(text((await client.call('POST', `/api/characters/${characterId}/sheet`, rest)).generation))));
 
-  server.registerTool('enhance_image', {
+  tool('enhance_image', {
     title: 'Upscale or remove background',
     description: 'Run an image tool on one existing image: "upscale" (2× or 4×) or "remove-background" (cut-out on transparency). Returns the new image. Costs money on the user\'s provider account. Inpainting needs a painted mask, so it is only available in the Lumina app.',
     inputSchema: {
@@ -174,7 +293,7 @@ export function registerLuminaTools(server, client) {
     return ok(text(summarizeGeneration(done)), ...(await imageContent(done.assetPath)));
   }));
 
-  server.registerTool('generate_image', {
+  tool('generate_image', {
     title: 'Generate or edit an image',
     description: 'Generate an image in a Lumina project using the user\'s own provider keys. Pass inputAssetIds to edit or combine existing images. Waits for the result by default and returns the image. Costs money on the user\'s provider account.',
     inputSchema: {
@@ -201,9 +320,9 @@ export function registerLuminaTools(server, client) {
     return ok(text(summarizeGeneration(done)), ...(await imageContent(done.assetPath)));
   }));
 
-  server.registerTool('get_generation', {
+  tool('get_generation', {
     title: 'Get generation',
-    description: 'Get the status of a generation; returns the image when it is complete.',
+    description: 'Get the status of one generation; returns the image when it is complete. To wait for several jobs use watch_jobs instead of polling this.',
     inputSchema: { generationId: z.string(), includeImage: z.boolean().optional() },
   }, safe(async ({ generationId, includeImage = true }) => {
     const { generation } = await client.call('GET', `/api/generations/${generationId}`);
@@ -211,7 +330,7 @@ export function registerLuminaTools(server, client) {
     return ok(text(summarizeGeneration(generation)), ...image);
   }));
 
-  server.registerTool('list_assets', {
+  tool('list_assets', {
     title: 'List project images',
     description: 'List images (generated and uploaded references) in a project, plus its canvases.',
     inputSchema: { projectId: z.string() },
@@ -224,7 +343,7 @@ export function registerLuminaTools(server, client) {
     }));
   }));
 
-  server.registerTool('add_to_canvas', {
+  tool('add_to_canvas', {
     title: 'Add image to canvas',
     description: 'Add an image to a project canvas as a reference node. Uses the most recent canvas, or creates one, when canvasId is omitted.',
     inputSchema: { assetId: z.string(), canvasId: z.string().optional(), projectId: z.string().describe('Project that owns the canvas') },
@@ -241,7 +360,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ canvasId: id, canvasName: saved.canvas.name, nodeId: node.id }));
   }));
 
-  server.registerTool('run_canvas', {
+  tool('run_canvas', {
     title: 'Run canvas',
     description: 'Run a canvas workflow (or only what one node needs) and wait for it to finish. Generate/edit nodes spend money on the user\'s provider accounts.',
     inputSchema: { canvasId: z.string(), nodeId: z.string().optional(), timeoutSeconds: z.number().int().min(10).max(1800).optional() },
@@ -286,7 +405,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ ...summarizeGeneration(done), ...extra }), ...media);
   }
 
-  server.registerTool('create_book', {
+  tool('create_book', {
     title: 'Create book',
     description: 'Create a book in a Lumina project from a brief. kind: picture_book (pages with illustrations), novel, or nonfiction (chapters). Next: draft_bible; then plan_pages (picture books) or outline_book + draft_chapter (novels/nonfiction); then illustrations/cover/narration and export_book.',
     inputSchema: {
@@ -298,19 +417,19 @@ export function registerLuminaTools(server, client) {
     return ok(text(bookSummary(await client.call('GET', `/api/books/${book.id}`))));
   }));
 
-  server.registerTool('get_book', {
+  tool('get_book', {
     title: 'Get book',
     description: 'Read a book: brief, story bible and every page\'s text, illustration brief and illustration status. Use list_books to find ids.',
     inputSchema: { bookId: z.string() },
   }, safe(async ({ bookId }) => ok(text(bookSummary(await client.call('GET', `/api/books/${bookId}`))))));
 
-  server.registerTool('list_books', {
+  tool('list_books', {
     title: 'List books',
     description: 'List books in a project.',
     inputSchema: { projectId: z.string() },
   }, safe(async ({ projectId }) => ok(text((await client.call('GET', `/api/projects/${projectId}/books`)).books.map(({ id, title, pageCount, updatedAt }) => ({ id, title, pageCount, updatedAt }))))));
 
-  server.registerTool('update_book', {
+  tool('update_book', {
     title: 'Update book brief or story bible',
     description: 'Edit a book\'s title, brief fields, writer, or story bible (characters with name/description/visual, setting, voice, styleNotes). Pass the whole bible object when changing it.',
     inputSchema: {
@@ -325,7 +444,7 @@ export function registerLuminaTools(server, client) {
     return ok(text(bookSummary(await client.call('GET', `/api/books/${bookId}`))));
   }));
 
-  server.registerTool('draft_bible', {
+  tool('draft_bible', {
     title: 'Draft story bible',
     description: 'Have the book\'s writer model draft the story bible (characters, setting, voice, visual style) from the brief. Replaces the current bible; uses the user\'s text-model credits.',
     inputSchema: { bookId: z.string(), writer: z.string().optional() },
@@ -334,25 +453,25 @@ export function registerLuminaTools(server, client) {
     return ok(text(bookSummary(await client.call('GET', `/api/books/${bookId}`))));
   }));
 
-  server.registerTool('plan_pages', {
+  tool('plan_pages', {
     title: 'Plan pages',
     description: 'Have the writer model write every page (text + illustration brief) from the brief and story bible. Set replace=true to overwrite existing pages — ask the user first.',
     inputSchema: { bookId: z.string(), writer: z.string().optional(), replace: z.boolean().optional() },
   }, safe(async ({ bookId, writer, replace }) => ok(text(bookSummary(await client.call('POST', `/api/books/${bookId}/plan`, { writer, replace }))))));
 
-  server.registerTool('edit_page', {
+  tool('edit_page', {
     title: 'Edit page',
     description: 'Set a page\'s text and/or illustration brief directly (previous version kept in history).',
     inputSchema: { pageId: z.string(), text: z.string().max(4000).optional(), illustrationBrief: z.string().max(2000).optional() },
   }, safe(async ({ pageId, ...changes }) => ok(text((await client.call('PATCH', `/api/pages/${pageId}`, changes)).page))));
 
-  server.registerTool('revise_page', {
+  tool('revise_page', {
     title: 'Revise page with the writer',
     description: 'Ask the writer model to revise one page following an instruction, keeping it consistent with the story bible and neighbouring pages.',
     inputSchema: { pageId: z.string(), instruction: z.string().min(1).max(2000), writer: z.string().optional() },
   }, safe(async (args) => ok(text((await client.call('POST', `/api/pages/${args.pageId}/revise`, args)).page))));
 
-  server.registerTool('generate_illustration', {
+  tool('generate_illustration', {
     title: 'Illustrate page',
     description: 'Generate an illustration for one page using its brief plus the story bible\'s character looks and reference images. Waits and returns the image. Costs money on the user\'s image provider — confirm with the user before illustrating many pages.',
     inputSchema: { pageId: z.string(), provider: z.string().optional(), model: z.string().optional(), wait: z.boolean().optional() },
@@ -366,13 +485,13 @@ export function registerLuminaTools(server, client) {
     return ok(text({ ...summarizeGeneration(done), note }), ...(await imageContent(done.assetPath)));
   }));
 
-  server.registerTool('outline_book', {
+  tool('outline_book', {
     title: 'Outline novel or nonfiction',
     description: 'Have the writer model outline every chapter (title, summary, scenes or sections) from the brief and bible. replace=true overwrites existing chapters — ask the user first.',
     inputSchema: { bookId: z.string(), writer: z.string().optional(), replace: z.boolean().optional() },
   }, safe(async ({ bookId, writer, replace }) => ok(text(bookSummary(await client.call('POST', `/api/books/${bookId}/outline`, { writer, replace }))))));
 
-  server.registerTool('draft_chapter', {
+  tool('draft_chapter', {
     title: 'Draft chapter',
     description: 'Have the writer model write a chapter in full from its outline, the bible and earlier chapters (keeps continuity). Replaces the chapter text; the previous version stays in history. Takes a minute or more.',
     inputSchema: { chapterId: z.string(), writer: z.string().optional(), instructions: z.string().max(2000).optional() },
@@ -381,7 +500,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ id: chapter.id, position: chapter.position, title: chapter.title, words: (chapter.text.match(/\S+/g) ?? []).length, excerpt: chapter.text.slice(0, 1200) }));
   }));
 
-  server.registerTool('read_chapter', {
+  tool('read_chapter', {
     title: 'Read chapter',
     description: 'Return a chapter\'s full text, outline and beats.',
     inputSchema: { bookId: z.string(), chapterId: z.string() },
@@ -393,7 +512,7 @@ export function registerLuminaTools(server, client) {
     return ok(text(rest));
   }));
 
-  server.registerTool('revise_chapter', {
+  tool('revise_chapter', {
     title: 'Revise chapter with the writer',
     description: 'Ask the writer model to rewrite a drafted chapter following an instruction (e.g. "tighten the opening", "more dialogue"). Previous version kept in history.',
     inputSchema: { chapterId: z.string(), instruction: z.string().min(1).max(2000), writer: z.string().optional() },
@@ -402,7 +521,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ id: chapter.id, words: (chapter.text.match(/\S+/g) ?? []).length, excerpt: chapter.text.slice(0, 1200) }));
   }));
 
-  server.registerTool('edit_chapter', {
+  tool('edit_chapter', {
     title: 'Edit chapter',
     description: 'Set a chapter\'s title, summary, beats (scenes/sections) and/or full text directly. Previous version kept in history.',
     inputSchema: { chapterId: z.string(), title: z.string().max(200).optional(), summary: z.string().max(3000).optional(), beats: z.array(z.string().max(1000)).max(30).optional(), text: z.string().max(400000).optional() },
@@ -411,7 +530,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ id: chapter.id, title: chapter.title, words: (chapter.text.match(/\S+/g) ?? []).length }));
   }));
 
-  server.registerTool('generate_cover', {
+  tool('generate_cover', {
     title: 'Generate book cover',
     description: 'Generate cover art from the brief and bible (title is typeset separately in exports). Costs money on the image provider.',
     inputSchema: { bookId: z.string(), provider: z.string().optional(), model: z.string().optional() },
@@ -420,7 +539,7 @@ export function registerLuminaTools(server, client) {
     return waitAndShow(generation, droppedReferences ? { note: `${droppedReferences} reference image(s) not sent (model does not accept input images).` } : {});
   }));
 
-  server.registerTool('narrate', {
+  tool('narrate', {
     title: 'Narrate page or chapter',
     description: 'Turn a picture-book page or a chapter into narration audio with the book\'s narration voice (set it with update_book brief.narration, or pass provider/model/voice). Costs money on the voice provider.',
     inputSchema: { pageId: z.string().optional(), chapterId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), voice: z.string().optional(), style: z.string().max(500).optional() },
@@ -430,7 +549,7 @@ export function registerLuminaTools(server, client) {
     return waitAndShow(generation);
   }));
 
-  server.registerTool('generate_speech', {
+  tool('generate_speech', {
     title: 'Generate speech',
     description: 'Turn any text into spoken audio (saved to the project library). Long text is split and joined automatically. Costs money on the voice provider.',
     inputSchema: { projectId: z.string(), text: z.string().min(1).max(200000), provider: z.string().optional(), model: z.string().optional(), voice: z.string().optional(), style: z.string().max(500).optional() },
@@ -440,9 +559,9 @@ export function registerLuminaTools(server, client) {
     return waitAndShow(generation);
   }));
 
-  server.registerTool('generate_video', {
+  tool('generate_video', {
     title: 'Generate video',
-    description: 'Generate a short video clip from a prompt, optionally animating an image (inputAssetId). Slow (minutes) and more expensive than images — confirm with the user first.',
+    description: 'Generate a short video clip from a prompt, optionally animating an image (inputAssetId). Slow (minutes) and dearer than images; paid requests go through budget approvals. Use wait=false for long jobs and never submit a second paid take while one is running.',
     inputSchema: { projectId: z.string(), prompt: z.string().min(1).max(4000), inputAssetId: z.string().optional(), provider: z.string().optional(), model: z.string().optional(), duration: z.number().int().optional(), aspect: z.string().optional(), seed: z.number().int().min(0).max(2147483646).optional(), wait: z.boolean().optional().describe('Use false for long jobs; poll get_generation'), presets: presetsArg, characterIds: charactersArg },
   }, safe(async ({ projectId, prompt, inputAssetId, provider, model, duration, aspect, seed, wait = true, presets, characterIds }) => {
     const choice = await pickModel('video', provider, model);
@@ -451,7 +570,7 @@ export function registerLuminaTools(server, client) {
     return waitAndShow(generation);
   }));
 
-  server.registerTool('import_manuscript', {
+  tool('import_manuscript', {
     title: 'Import manuscript',
     description: 'Create a novel or nonfiction book from existing text. Chapters are split at Markdown headings ("# Title", "## Chapter") or lines like "Chapter 3". Afterwards use read_chapter, revise_chapter, edit_chapter, or add chapters and draft_chapter to continue the book.',
     inputSchema: {
@@ -478,7 +597,7 @@ export function registerLuminaTools(server, client) {
     })),
   });
 
-  server.registerTool('create_storyboard', {
+  tool('create_storyboard', {
     title: 'Create storyboard',
     description: 'Turn an idea into a storyboard: a writer model plans the shots (description, camera move, length). For a film of a given length set targetMinutes (up to 15) and enough shots (a 5-minute film is about 30-40 shots). Next: generate_storyboard_shots (or generate_shot) for frames and clips, then join_storyboard for one video. Planning costs a little on the writer\'s provider account.',
     inputSchema: {
@@ -486,7 +605,7 @@ export function registerLuminaTools(server, client) {
       targetMinutes: z.number().min(0).max(15).optional().describe('Total running time the writer aims for'),
       clipLength: z.number().int().min(0).max(30).optional().describe('Seconds per clip for every shot (0 = writer decides); long takes like 10-15 s need a model that supports them'),
       continuity: z.enum(['frames', 'keyframes', 'chain']).optional().describe('"frames": each clip starts from its own approved still; "keyframes": also ends on the next shot\'s still within a scene (strongest against drift; needs a model with last-frame support); "chain": each clip starts from the previous clip\'s last frame'),
-      look: z.enum(['live-action', 'anime', 'as-written']).optional().describe('How every frame and clip is directed (default live-action)'),
+      look: z.enum(['live-action', 'anime', 'as-written']).optional().describe('How every frame and clip is directed (default live-action). Anime is English only'),
       lookBible: z.string().max(1500).optional().describe('Palette, lenses, lighting, era, grain: added to every prompt so the film looks like one film'),
       themes: z.array(z.string().max(300)).max(8).optional().describe('Themes the audience must clearly see, as "Name: how it shows on screen" (e.g. "Chaos agent: a grinning trickster who breaks every plan with fire"). The writer gives each one people, actions and a recurring image, and tags the shots; get_storyboard reports where each appears'),
       screenplay: z.string().max(60000).optional().describe('A screenplay to follow scene by scene, dialogue word for word (instead of inventing from the idea)'),
@@ -522,25 +641,44 @@ export function registerLuminaTools(server, client) {
     return ok(text(storyboardSummary(plan ? await client.call('POST', `/api/storyboards/${created.sequence.id}/plan`, {}) : created)));
   }));
 
-  server.registerTool('import_shot_plan', {
+  tool('update_storyboard', {
+    title: 'Change storyboard settings',
+    description: 'Change a storyboard\'s title, idea or settings after it was created, for example turn lip sync on (lipSync: true), switch the look, the delivery size, the finish, the cast or the image/video models. Only the fields given change. Shots already made are kept; new settings apply to frames, clips and joins made afterwards.',
+    inputSchema: {
+      storyboardId: z.string(), title: z.string().min(1).max(80).optional(), idea: z.string().min(1).max(6000).optional(),
+      settings: z.object({
+        lipSync: z.boolean().optional(), look: z.enum(['live-action', 'anime', 'as-written']).optional(), lookBible: z.string().max(1500).optional(),
+        themes: z.array(z.string().max(300)).max(8).optional(), seed: z.number().int().min(0).optional(),
+        outputHeight: z.union([z.literal(720), z.literal(1080), z.literal(1440), z.literal(2160)]).optional(),
+        upscale: z.enum(['none', 'fast', 'anime', 'ai']).optional(), colorMatch: z.enum(['scene', 'film', 'off']).optional(),
+        narratorVoice: z.object({ provider: z.string(), model: z.string(), voice: z.string().optional() }).optional(),
+        interpolateFps: z.union([z.literal(0), z.literal(30)]).optional(), requireApproval: z.boolean().optional(),
+        transition: z.enum(['cut', 'crossfade']).optional(), finish: z.enum(['none', 'cinematic', 'anime']).optional(),
+        aspect: z.enum(['16:9', '9:16', '1:1']).optional(), style: z.string().optional(), characterIds: charactersArg,
+        imageProvider: z.string().optional(), imageModel: z.string().optional(), videoProvider: z.string().optional(), videoModel: z.string().optional(),
+      }).optional(),
+    },
+  }, safe(async ({ storyboardId, title, idea, settings }) => ok(text(storyboardSummary(await client.call('PATCH', `/api/storyboards/${storyboardId}`, { title, idea, settings }))))));
+
+  tool('import_shot_plan', {
     title: 'Import a shot plan written in this chat',
-    description: 'Save a complete shot plan without a paid writer API call. For a strict $12 budget, write the script and plan in ChatGPT/Claude, create_storyboard with plan=false, then import it here. Models can be assigned per shot using details.model as provider|model, e.g. local|wan2.2-ti2v-5b. Never replace a plan without user approval.',
+    description: 'Save a complete shot plan you wrote yourself, without a paid writer-model call: create_storyboard with plan=false, then import here. replace=true discards the existing shots, so ask the user first. Models can be assigned per shot using details.model as provider|model, e.g. local|wan2.2-ti2v-5b. Never replace a plan without user approval.',
     inputSchema: { storyboardId: z.string(), replace: z.boolean().optional(), shots: z.array(z.object({ description: z.string().min(1).max(2000), duration: z.number().int().min(1).max(30), camera: z.string().optional(), details: z.record(z.string(), z.unknown()).optional() })).min(1).max(60) },
   }, safe(async ({ storyboardId, ...plan }) => ok(text(storyboardSummary(await client.call('POST', `/api/storyboards/${storyboardId}/import-plan`, plan))))));
 
-  server.registerTool('production_readiness', {
+  tool('production_readiness', {
     title: 'Check anime production readiness',
     description: 'Check required frames/clips/voices, installed local models and NVIDIA runtime, ffmpeg, requested RIFE/Real-ESRGAN tools, and budget before production. Never spend until ready=true and the user approves the estimate. Lip sync is excluded.',
     inputSchema: { storyboardId: z.string() },
   }, safe(async ({ storyboardId }) => ok(text(await client.call('GET', `/api/storyboards/${storyboardId}/readiness`)))));
 
-  server.registerTool('get_storyboard', {
+  tool('get_storyboard', {
     title: 'Get storyboard',
     description: 'Read a storyboard: its settings and every shot with frame and clip status.',
     inputSchema: { storyboardId: z.string() },
   }, safe(async ({ storyboardId }) => ok(text(storyboardSummary(await client.call('GET', `/api/storyboards/${storyboardId}`))))));
 
-  server.registerTool('update_shot', {
+  tool('update_shot', {
     title: 'Edit a storyboard shot',
     description: 'Change a shot: description, camera move (a camera preset id from list_presets, or "" for none), length, and its continuity details (scene, cast and location ids, action, dialogue, start and end state, what must not change, video or free still shot, per-shot video model, lock). Locked shots refuse story changes unless locked: false is sent.',
     inputSchema: {
@@ -556,7 +694,7 @@ export function registerLuminaTools(server, client) {
     },
   }, safe(async ({ shotId, ...changes }) => ok(text(storyboardSummary(await client.call('PATCH', `/api/shots/${shotId}`, changes))))));
 
-  server.registerTool('review_shot', {
+  tool('review_shot', {
     title: 'Review a shot',
     description: 'Record a decision on a shot. status "accepted" uses its clip in the film; needs_repair / needs_regeneration / rejected keep it out; approveFrame: true approves its still before any video is paid for (with requireApproval). Look at the frame and clip first (and at problems from the free checks).',
     inputSchema: {
@@ -571,13 +709,13 @@ export function registerLuminaTools(server, client) {
     return ok(text(storyboardSummary(result)));
   }));
 
-  server.registerTool('render_still_shot', {
+  tool('render_still_shot', {
     title: 'Render a still shot (free)',
     description: 'Render a still shot locally: the shot\'s frame with a slow camera move, at the film\'s size. Costs nothing. The shot\'s method should be "still".',
     inputSchema: { shotId: z.string() },
   }, safe(async ({ shotId }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/still`, {}))))));
 
-  server.registerTool('voice_dialogue', {
+  tool('voice_dialogue', {
     title: 'Record a shot\'s dialogue',
     description: 'Queue speech for every unrecorded dialogue line of a shot, in each character\'s saved voice (or the storyboard\'s narrator voice). Costs a little per line on the voice provider. Reports characters with no voice set.',
     inputSchema: { shotId: z.string() },
@@ -586,7 +724,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ queued: result.queued.length, missingVoices: result.missingVoices }));
   }));
 
-  server.registerTool('estimate_film_cost', {
+  tool('estimate_film_cost', {
     title: 'Estimate what a film will cost',
     description: 'Price everything a storyboard still needs (frames, clips, dialogue) from the providers\' published prices, and whether it fits the budget. Free to call. Show this to the user before produce_film.',
     inputSchema: { storyboardId: z.string() },
@@ -598,26 +736,26 @@ export function registerLuminaTools(server, client) {
       videoSeconds: result.videoSeconds, freeStillSeconds: result.stillSeconds }));
   }));
 
-  server.registerTool('openrouter_credit_status', {
+  tool('openrouter_credit_status', {
     title: 'Check OpenRouter remaining key allowance',
     description: 'Read the current OpenRouter API key spending limit, remaining allowance and usage, with a timestamp. Does not spend credits or change limits. Account-wide credits require a management key and are reported unavailable here. Null is unknown, not free or unlimited. Check before paid work and compare with budget_status and reservations.',
     annotations: { readOnlyHint: true },
     inputSchema: { refresh: z.boolean().optional().describe('Fetch a fresh snapshot instead of a cache up to 30 seconds old') },
   }, safe(async ({ refresh = false }) => ok(text(await client.call('GET', `/api/providers/openrouter/credits?refresh=${refresh}`)))));
 
-  server.registerTool('budget_status', {
+  tool('budget_status', {
     title: 'Budget status',
     description: 'Spending limits, what has been spent or reserved, and approvals waiting for a decision. Limits can only be changed in the app.',
     inputSchema: {},
   }, safe(async () => ok(text(await client.call('GET', '/api/budget')))));
 
-  server.registerTool('decide_approval', {
+  tool('decide_approval', {
     title: 'Approve or deny a spend',
-    description: 'Approve or deny a pending spending approval. Only works when the user allowed MCP approvals in the app; otherwise ask the user to approve it in Lumina. After approving, repeat the original request with approvalId.',
+    description: 'Approve or deny a pending spending approval. Only works when the user allowed MCP approvals in the app; otherwise ask the user to approve it in Lumina. After approving, repeat the exact same call with the same arguments: the approval is matched automatically (no tool takes an approvalId). Never approve on the user\'s behalf unless they said so.',
     inputSchema: { approvalId: z.string(), approve: z.boolean() },
   }, safe(async ({ approvalId, approve }) => ok(text(await client.call('POST', `/api/budget/approvals/${approvalId}`, { approve })))));
 
-  server.registerTool('refresh_models', {
+  tool('refresh_models', {
     title: 'Refresh the model list',
     description: 'Re-read OpenRouter\'s public model list and prices (free; no key used).',
     inputSchema: {},
@@ -626,9 +764,9 @@ export function registerLuminaTools(server, client) {
     return ok(text(status));
   }));
 
-  server.registerTool('generate_shot', {
+  tool('generate_shot', {
     title: 'Generate a shot frame or clip',
-    description: 'Make the still frame ("frame") or the video clip ("clip") for one storyboard shot. A clip starts from the shot\'s frame when the video model accepts a start image. Clips are slow and cost more than images — confirm with the user first.',
+    description: 'Make the still frame ("frame") or the video clip ("clip") for one storyboard shot. A clip starts from the shot\'s frame when the video model accepts a start image. Clips are slow and cost more than images; paid requests go through budget approvals (402 -> budget_status / decide_approval). Do not retry a paid shot in a loop: preview_shot it first. Pass idempotencyKey to make a repeat safe.',
     inputSchema: {
       shotId: z.string(), kind: z.enum(['frame', 'clip']), provider: z.string().optional(), model: z.string().optional(),
       resolution: z.string().optional().describe('Clip resolution such as 480p or 720p (default: 720p where offered); higher costs more'),
@@ -639,9 +777,9 @@ export function registerLuminaTools(server, client) {
     return waitAndShow(generation, { shotId });
   }));
 
-  server.registerTool('generate_storyboard_shots', {
+  tool('generate_storyboard_shots', {
     title: 'Generate all storyboard frames or clips',
-    description: 'Queue the still frame ("frames") or video clip ("clips") for every shot that does not have one yet (or every shot with redo: true). Returns at once; the jobs run in the background two at a time. Check progress with get_storyboard. Clips for a long film cost real money (e.g. 300 seconds of video) — confirm the price with the user first.',
+    description: 'Queue the still frame ("frames") or video clip ("clips") for every shot that does not have one yet (or every shot with redo: true). Returns at once; the jobs run in the background two at a time. Check progress with watch_jobs or get_storyboard. Clips for a long film cost real money (e.g. 300 seconds of video) — confirm the price with the user first.',
     inputSchema: { storyboardId: z.string(), kind: z.enum(['frames', 'clips']), redo: z.boolean().optional() },
   }, safe(async ({ storyboardId, kind, redo = false }) => {
     const detail = await client.call('GET', `/api/storyboards/${storyboardId}`);
@@ -654,7 +792,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ queued: queued.length, generationIds: queued, next: 'Call get_storyboard to follow progress; join_storyboard once the clips are done.' }));
   }));
 
-  server.registerTool('produce_film', {
+  tool('produce_film', {
     title: 'Produce the whole film',
     description: 'Make every missing frame and clip of a storyboard and join them into the finished film, in the background. With continuity "chain" (set via create_storyboard or the app) each clip starts from the last frame of the one before for unbroken action. Still shots are rendered free. With requireApproval, production stops at "review" twice: once for the frames (approve each with review_shot approveFrame), once for the clips (accept each) — then call produce_film again. Costs real money for every clip — call estimate_film_cost and confirm the price with the user first. Follow progress with get_storyboard (production).',
     inputSchema: { storyboardId: z.string() },
@@ -663,7 +801,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ ...storyboardSummary(result), production: result.sequence.production }));
   }));
 
-  server.registerTool('enhance_video', {
+  tool('enhance_video', {
     title: 'Enhance (upscale) a video',
     description: 'Make a 2x larger, sharper copy of a video (up to 4K) on the computer running Lumina: mode "fast" uses GPU scaling (seconds to minutes); mode "ai" uses Real-ESRGAN on the GPU (much slower, adds detail; must be installed from the app first); mode "anime" uses Real-ESRGAN\'s anime-video model (trained for animation; review for altered details). height picks an exact target (1080, 1440 or 2160). Runs in the background; returns the job status. Call again with the same assetId to check.',
     inputSchema: { assetId: z.string(), mode: z.enum(['fast', 'ai', 'anime']).optional(), height: z.union([z.literal(1080), z.literal(1440), z.literal(2160)]).optional(), checkOnly: z.boolean().optional() },
@@ -672,20 +810,20 @@ export function registerLuminaTools(server, client) {
     return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode, height })));
   }));
 
-  server.registerTool('bake_character', {
+  tool('bake_character', {
     title: 'Bake a character (LoRA)',
-    description: 'Train a small LoRA of one character for the local anime image model, from its character sheet and design tags, on the computer running Lumina (free, about 15-25 minutes of GPU time; other GPU work waits). Afterwards every local anime frame with that character uses it, so the face, hair and outfit stay on-model. Make a character sheet first (make_character_sheet). action: "start", "status" (progress), or "remove".',
+    description: 'Train a small LoRA of one character for the local anime image model, from its character sheet and design tags, on the computer running Lumina (free, about 15-25 minutes of GPU time; other GPU work waits). Afterwards every local anime frame with that character uses it, so the face, hair and outfit stay on-model. Make a character sheet first (make_character_sheet). action: "start", "status" (progress; the default) or "remove" (deletes the trained LoRA: ask the user first).',
     inputSchema: { characterId: z.string(), action: z.enum(['start', 'status', 'remove']).default('status') },
   }, safe(async ({ characterId, action }) => ok(text(action === 'start' ? await client.call('POST', `/api/characters/${characterId}/bake`, {})
     : action === 'remove' ? await client.call('DELETE', `/api/characters/${characterId}/bake`) : await client.call('GET', `/api/characters/${characterId}/bake`)))));
 
-  server.registerTool('lip_sync_shot', {
+  tool('lip_sync_shot', {
     title: 'Lip sync a shot',
-    description: 'Make a storyboard shot\'s mouth move with its recorded dialogue, on the computer running Lumina (free). Anime look (storyboard Look: anime): five mouth shapes (closed, small, open a, wide i/e, round u/o) are drawn in the shot\'s own style and switched in time with the words like theatrical anime: shapes follow the vowels, close on m/b/p and at pauses, held two frames or more, and follow the face as it moves. Live-action lip sync is experimental. Record the dialogue first (voice_dialogue). The mouth is found automatically; if that fails, pass mouthBox as fractions of the frame [x1, y1, x2, y2].',
+    description: 'Make a storyboard shot\'s mouth move with its recorded dialogue, on the computer running Lumina (free). Lip sync is OFF by default: the storyboard\'s lipSync setting must be on, otherwise this is refused (409). Anime look (storyboard Look: anime): five mouth shapes (closed, small, open a, wide i/e, round u/o) are drawn in the shot\'s own style and switched in time with the words like theatrical anime: shapes follow the vowels, close on m/b/p and at pauses, held two frames or more, and follow the face as it moves. Live-action lip sync is not available (501). Record the dialogue first (voice_dialogue). The mouth is found automatically; if that fails, pass mouthBox as fractions of the frame [x1, y1, x2, y2].',
     inputSchema: { shotId: z.string(), mouthBox: z.array(z.number().min(0).max(1)).length(4).optional() },
   }, safe(async ({ shotId, mouthBox }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/lipsync`, { box: mouthBox }))))));
 
-  server.registerTool('inspect_video', {
+  tool('inspect_video', {
     title: 'View video samples for review',
     description: 'Read video dimensions, duration, fps and audio presence, and view up to six timestamped thumbnail frames. Free local decoding; no generation, billing or edits. Use on a clip before accepting it or buying another take. Samples cannot prove motion accuracy or rule out drift between sampled frames.',
     annotations: { readOnlyHint: true },
@@ -696,7 +834,7 @@ export function registerLuminaTools(server, client) {
       ...result.frames.map((frame) => ({ type: 'image', mimeType: frame.mimeType, data: frame.data })));
   }));
 
-  server.registerTool('interpolate_video', {
+  tool('interpolate_video', {
     title: 'Interpolate a video (smoother motion)',
     description: 'Make the in-between frames of a video with RIFE v4.6 on the GPU of the computer running Lumina, so it plays at `fps` within one target frame of the original duration (e.g. 12 → 24 fps rebuilds every other frame; 24 → 60 for smooth motion). Saves a new video in the library and returns its asset id (and file path on a local connection). Clips containing a cut are refused. RIFE must be installed from the app first (Storyboard → Picture quality → Smooth).',
     inputSchema: { assetId: z.string(), fps: z.number().int().min(2).max(120) },
@@ -706,7 +844,7 @@ export function registerLuminaTools(server, client) {
   }));
 
   if (client.upload) {
-    server.registerTool('import_video', {
+    tool('import_video', {
       title: 'Import a video file',
       description: 'Add an MP4 file from this computer to a project\'s library (up to 300 MB), so other tools (interpolate_video, enhance_video) can work on it. Local connections only.',
       inputSchema: { projectId: z.string(), filePath: z.string().describe('Absolute path of an .mp4 file'), label: z.string().max(120).optional() },
@@ -718,7 +856,7 @@ export function registerLuminaTools(server, client) {
     }));
   }
 
-  server.registerTool('join_storyboard', {
+  tool('join_storyboard', {
     title: 'Join storyboard clips',
     description: 'Join the storyboard\'s clips, in shot order, into one MP4 saved in the project library. Needs ffmpeg on the computer running Lumina. Shots without a clip are skipped. Long films take a few minutes; if it is still running when this returns, call get_storyboard later.',
     inputSchema: { storyboardId: z.string() },
@@ -736,7 +874,7 @@ export function registerLuminaTools(server, client) {
       seconds: join?.duration ? Math.round(join.duration * 10) / 10 : undefined, file }));
   }));
 
-  server.registerTool('export_book', {
+  tool('export_book', {
     title: 'Export book',
     description: 'Export a book as a print-layout PDF, EPUB e-book, Word document (docx), Markdown text, or audiobook (joined narration). Saves the file on the computer running Lumina and returns its path.',
     inputSchema: { bookId: z.string(), format: z.enum(['pdf', 'epub', 'docx', 'md', 'audio']).optional(), fixedLayout: z.boolean().optional().describe('EPUB only, picture books only: fixed-layout pages (art and text placed like the print book) instead of reflowable text'), outputPath: z.string().optional().describe('Absolute file path (local connections only); defaults to the Lumina exports folder') },
@@ -795,7 +933,7 @@ export function registerLuminaTools(server, client) {
     };
   };
 
-  server.registerTool('preview_shot', {
+  tool('preview_shot', {
     title: 'Preview a shot (images and audio)',
     description: 'See one shot the way a person would: a text summary (description, method, length, review status, failed checks, dialogue lines with recorded yes/no, themes), its frame image, a contact sheet of six timestamped frames sampled across its clip, and each recorded dialogue line as audio. Free and read-only. Use it before asking the user to accept, redo or trim a shot. Files over the inline size limits are skipped with a note.',
     annotations: { readOnlyHint: true },
@@ -811,7 +949,7 @@ export function registerLuminaTools(server, client) {
     return ok(text(shotLine(shot)), ...(await mediaParts(items)));
   }));
 
-  server.registerTool('preview_storyboard', {
+  tool('preview_storyboard', {
     title: 'Preview every shot at once',
     description: 'Status of every shot (frame, clip, review, dialogue recorded) plus one contact sheet image with all shots numbered: kind "frames" (default) shows each shot\'s still, "clips" shows the middle frame of each clip. Free and read-only. Use it to show the user the whole film at a glance.',
     annotations: { readOnlyHint: true },
@@ -822,13 +960,13 @@ export function registerLuminaTools(server, client) {
       ...(await mediaParts([[`/api/storyboards/${storyboardId}/contact-sheet?kind=${kind}`, 'image', `Contact sheet (${kind})`]])));
   }));
 
-  server.registerTool('plan_storyboard', {
+  tool('plan_storyboard', {
     title: 'Plan the shots with the writer model',
     description: 'Have the storyboard\'s writer model plan its shots (costs a little on the writer\'s provider; refused under a strict budget, where you should write the shot list yourself and use import_shot_plan). replace: true discards existing shots, so ask the user first.',
     inputSchema: { storyboardId: z.string(), replace: z.boolean().optional() },
   }, safe(async ({ storyboardId, replace }) => ok(text(storyboardSummary(await client.call('POST', `/api/storyboards/${storyboardId}/plan`, { replace }))))));
 
-  server.registerTool('film_next_step', {
+  tool('film_next_step', {
     title: 'Film wizard: what to do next',
     description: 'Step-by-step film making. Looks at the storyboard and proposes the ONE next stage (plan, frames, approve frames, animate, review, voices, fix, join, done) with a plain-language question for the user and `choices`, each an exact tool call (tool + arguments) you can make once the user agrees. Includes preview images of the shots involved. It never changes anything or spends money itself. Loop: call film_next_step, show the question and images to the user, make the chosen call, repeat.',
     annotations: { readOnlyHint: true },
@@ -854,7 +992,7 @@ export function registerLuminaTools(server, client) {
   });
   const jobsKey = (jobs) => JSON.stringify(jobs.map((j) => [j.id, j.status, j.progress?.done ?? null]).sort());
 
-  server.registerTool('watch_jobs', {
+  tool('watch_jobs', {
     title: 'Watch running jobs',
     description: 'List the queued and running generation jobs of a project with percent done and time left. With waitSeconds (up to 60) it waits, checking every 2 seconds, and returns as soon as a job starts, finishes or advances, or when the time is up. Free and read-only. Use it instead of repeatedly polling get_generation.',
     annotations: { readOnlyHint: true },
@@ -872,7 +1010,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ active: jobs.length, jobs: jobs.map(jobView), note: jobs.length ? undefined : 'Nothing is running.' }));
   }));
 
-  server.registerTool('cancel_job', {
+  tool('cancel_job', {
     title: 'Cancel a job',
     description: 'Cancel a queued job (any provider) or a running local-model job. A paid job already submitted to a provider cannot be stopped: it is reported as not cancellable and will still be billed.',
     inputSchema: { generationId: z.string() },
@@ -886,7 +1024,7 @@ export function registerLuminaTools(server, client) {
     }
   }));
 
-  server.registerTool('film_checklist', {
+  tool('film_checklist', {
     title: 'What is left to finish the film',
     description: 'A text checklist of what remains per shot (frame, clip, review, voices, dialogue overrun) plus the cost estimate for what is missing. Free and read-only. Use film_next_step for a guided single step instead.',
     annotations: { readOnlyHint: true },
@@ -915,7 +1053,7 @@ export function registerLuminaTools(server, client) {
     }));
   }));
 
-  server.registerTool('adjust_shot_look', {
+  tool('adjust_shot_look', {
     title: 'Adjust a shot\'s colour (brightness, contrast, saturation, warmth)',
     description: 'Colour-grade one shot; it is applied when the film is joined (free). Values you give are merged into the shot\'s current grade. Examples: "darker" = brightness -0.1; "brighter" = brightness 0.1; "moodier" = saturation 0.8 and contrast 1.1; "warmer" = warmth 0.4; "cooler" = warmth -0.4; "washed out" = saturation 0.6. Neutral is brightness 0, contrast 1, saturation 1, warmth 0. reset: true clears the grade. Rejoin the film (join_storyboard) to see it.',
     inputSchema: {
@@ -934,7 +1072,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ shotId, grade: shotIn(detail, shotId)?.details?.grade ?? grade, note: 'Applied when the film is joined; run join_storyboard to see it.' }));
   }));
 
-  server.registerTool('move_shot', {
+  tool('move_shot', {
     title: 'Move a shot to another position',
     description: 'Reorder the film: move a shot so it ends up at toPosition (1 = first). Other shots shift. Returns the new order. Rejoin the film afterwards.',
     inputSchema: { shotId: z.string(), toPosition: z.number().int().min(1) },
@@ -948,7 +1086,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ movedTo: index() + 1, order: detail.shots.map((s, i) => ({ position: i + 1, id: s.id, description: s.description.slice(0, 60) })) }));
   }));
 
-  server.registerTool('trim_shot', {
+  tool('trim_shot', {
     title: 'Trim or resize a shot',
     description: 'Cut the start off a shot\'s clip (trimStart, 0-10 seconds skipped from the beginning) and/or change its length (duration, 1-30 whole seconds). The clip itself is not regenerated; a longer duration than the clip may need a new take. Free.',
     inputSchema: { shotId: z.string(), trimStart: z.number().min(0).max(10).optional(), duration: z.number().int().min(1).max(30).optional() },
@@ -959,7 +1097,7 @@ export function registerLuminaTools(server, client) {
     return ok(text({ shotId, position: shot?.position, duration: shot?.duration, trimStart: shot?.details?.trimStart }));
   }));
 
-  server.registerTool('set_character_voice', {
+  tool('set_character_voice', {
     title: 'Set a character\'s voice',
     description: 'Choose the speech model and voice for a character (voices from list_models). New dialogue uses it. Lines already recorded keep the OLD voice: Lumina cannot clear a recording through the API, so to re-record a line, edit its text slightly (update_shot with the changed dialogue) and then voice_dialogue. With revoice: true, every line by this character that has no recording yet is queued now in the new voice (costs a little per line); the result lists which recorded lines were left alone.',
     inputSchema: {
@@ -1000,4 +1138,47 @@ export function registerLuminaTools(server, client) {
       return result;
     });
   }
+
+  // ---------- Prompts: ready-made step plans that use the real tool names ----------
+  const arg = (description) => z.string().optional().describe(description);
+  server.registerPrompt('make_anime_short', {
+    title: 'Make an anime short',
+    description: 'Step-by-step plan for an English-language anime short, from idea to joined MP4, using Lumina\'s film tools.',
+    argsSchema: { idea: z.string().describe('The story idea'), minutes: arg('Running time in minutes, e.g. 1'), characters: arg('Cast: names and looks, comma separated') },
+  }, ({ idea, minutes, characters }) => filmPrompt(`Make an English-language anime short in Lumina Studio.
+Idea: ${idea}
+Running time: ${minutes || '1'} minute(s).
+Cast: ${characters || 'invent a small cast that fits the idea'}.
+
+Plan (ask the user before anything that spends credits; local models are free but slow, one GPU job at a time):
+1. list_projects, then create_project (or reuse one).
+2. For each cast member: create_character with a precise description and designTags, then make_character_sheet, check it, and bake_character (action "start") for the main characters. Lock approved looks with update_character locked: true.
+3. create_storyboard with look "anime", finish "anime", the targetMinutes above, characterIds, and lipSync false unless the user wants mouths animated. If the budget is strict, use plan=false and write the shots yourself with import_shot_plan.
+4. production_readiness, then estimate_film_cost; show the numbers to the user.
+5. Loop film_next_step: show its question and images to the user, make the chosen call, repeat. Use watch_jobs (waitSeconds) to wait, never poll.
+6. Record dialogue with set_character_voice and voice_dialogue (English only); lip_sync_shot only if lipSync is on.
+7. preview_storyboard, preview_shot and review_shot every shot; fix problems with update_shot, trim_shot, adjust_shot_look.
+8. join_storyboard, then report the final video asset id and the total spent (budget_status).`));
+
+  server.registerPrompt('fix_a_shot', {
+    title: 'Fix a shot',
+    description: 'Look at one shot, find what is wrong and fix it with the cheapest tool that works.',
+    argsSchema: { storyboardId: z.string().describe('Storyboard id'), shotId: z.string().describe('Shot id'), problem: arg('What looks wrong, in the user\'s words') },
+  }, ({ storyboardId, shotId, problem }) => filmPrompt(`Fix shot ${shotId} of storyboard ${storyboardId}.${problem ? ` Reported problem: ${problem}` : ''}
+
+1. preview_shot (shotId ${shotId}) and read the failed checks. Do not buy another take before you know what is wrong.
+2. Cheapest fixes first (all free): trim_shot (cut the start or change length), adjust_shot_look (colour), move_shot (order), update_shot (description, dialogue, camera, method "still" instead of video), render_still_shot.
+3. If the frame is wrong: update_shot the description, review_shot status "needs_regeneration", then generate_shot kind "frame". If only the clip is wrong: generate_shot kind "clip" once, with an idempotencyKey. Check estimate_film_cost / budget_status first; on a 402 stop and ask the user. Never loop retries.
+4. If dialogue overruns the shot, lengthen it with trim_shot duration or shorten the lines, then voice_dialogue again.
+5. preview_shot again, then review_shot "accepted" if it is good, and join_storyboard to rebuild the film.`));
+
+  server.registerPrompt('finish_film', {
+    title: 'Finish a film',
+    description: 'Take an existing storyboard to the finished MP4 with the guided wizard.',
+    argsSchema: { storyboardId: z.string().describe('Storyboard id') },
+  }, ({ storyboardId }) => filmPrompt(`Finish the film for storyboard ${storyboardId}.
+1. get_storyboard and budget_status, then estimate_film_cost; tell the user what is left and what it costs.
+2. Loop film_next_step (storyboardId ${storyboardId}): show the question and preview images, wait for the user's answer, make the chosen call. Use watch_jobs to wait for jobs.
+3. On a 402 stop and ask the user (decide_approval only if they agree). On a 409 call watch_jobs.
+4. When film_next_step says the film is ready, join_storyboard and give the user the result.`));
 }
