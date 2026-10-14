@@ -21,6 +21,7 @@ import { createSequenceService } from './sequences.js';
 import { createEnhancer } from './enhance.js';
 import { bakeCharacter, withGpuLease } from './providers/local.js';
 import { createBakeService } from './bake.js';
+import { encodePng } from './png.js';
 import { createFaceChecker } from './faces.js';
 
 export const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,10 +35,29 @@ function loadToken(file) {
   return token;
 }
 
-// Tests: a stand-in trainer that writes an empty LoRA file instead of using the GPU.
-async function fakeBake({ out }, onProgress) {
+// Tests: a stand-in trainer that writes an empty LoRA file (and tiny pictures for the review phases) instead of using the GPU.
+// It understands the same tasks as local/train_lora.py; "bake-train" leaves its request in <out>/train-request.json.
+let fakePictures = 0;
+async function fakeBake(request, onProgress) {
   const { mkdir, writeFile } = await import('node:fs/promises');
-  await mkdir(out, { recursive: true });
+  const { out, task = 'bake' } = request;
+  await mkdir(path.join(out, 'pictures'), { recursive: true });
+  const draw = async (indexes) => {
+    const listing = path.join(out, 'pictures.json');
+    const entries = existsSync(listing) ? JSON.parse(readFileSync(listing, 'utf8')) : [];
+    for (const [n, index] of indexes.entries()) {
+      const file = path.join(out, 'pictures', `${String(index).padStart(2, '0')}.png`);
+      await writeFile(file, encodePng(4, 4, () => [(index * 15) % 256, 40, ++fakePictures % 256]));
+      entries[index] = { file, framing: `framing ${index}` };
+      onProgress?.(n + 1, indexes.length, 'drawing');
+    }
+    await writeFile(listing, JSON.stringify(entries));
+    return entries;
+  };
+  if (task === 'bake-draw') return { pictures: await draw(Array.from({ length: 16 }, (_, i) => i)) };
+  if (task === 'bake-redraw') return { pictures: await draw(request.indexes) };
+  if (task === 'bake-train') await writeFile(path.join(out, 'train-request.json'), JSON.stringify({ pictures: request.pictures, steps: request.steps }));
+  if (task === 'bake') await writeFile(path.join(out, 'train-request.json'), JSON.stringify({ auto: true, mirror: request.mirror, steps: request.steps }));
   onProgress?.(1, 1, 'training');
   const lora = path.join(out, 'character.safetensors');
   await writeFile(lora, '');

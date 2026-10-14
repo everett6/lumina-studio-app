@@ -64,8 +64,15 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `plan_storyboard` | Have the storyboard's writer model plan its shots (a small writer cost; refused under a strict budget, where you write the list and use `import_shot_plan`). `replace: true` discards existing shots. |
 | `adjust_shot_look` | Colour-grade one shot (`brightness`, `contrast`, `saturation`, `warmth`, or `reset: true`). Free; applied when the film is joined. |
 | `move_shot` | Move a shot to another position (1 = first); the others shift. Rejoin afterwards. |
+| `set_shot_timing` | Anime exposure for a shot, applied when the film is joined: `timing` `twos`/`threes` holds each drawing 2/3 frames at the film's frame rate, `ones` a new drawing every frame, `auto` (default) leaves the clip alone; `holds` `[{start, seconds}]` freezes the picture for a span (seconds from the shot start, after the trim). Twos/threes/holds skip RIFE smoothing for the shot, and anime storyboards do not auto-smooth `auto` shots (a shot's own `interpolate` still works). Not applied to the camera move of a free still shot. Free; no review reset. Same as `update_shot` with `details.timing` / `details.holds`. |
 | `trim_shot` | Skip the start of a shot's clip (`trimStart`, 0-10 s) and/or change its length (`duration`, 1-30 whole seconds). The clip is not regenerated. Free. |
 | `set_character_voice` | Set a character's speech model and voice. New dialogue uses it; lines already recorded keep the old voice. `revoice: true` queues the character's unrecorded lines now (a little per line). |
+| `list_shot_takes` / `select_shot_take` | Every frame and clip a shot has had (generated, repaired, attached, lip-synced) with the current one flagged; switch to another. `select_shot_take` is also how to undo a bad revision: pick the previous take. Review goes back to pending and a chosen clip is re-checked. Free. |
+| `attach_clip_to_shot` | Use a video from the project library (for example from `import_video`) as the shot's clip. It becomes a clip take. |
+| `repair_frame` | Repaint one box (`[x1, y1, x2, y2]`, fractions of the frame) of the shot's frame with an inpaint model. The result is a new frame take that is not selected; choose it with `select_shot_take`. Refuses with a clear message when no inpaint-capable model is ready. May spend credits on a paid inpaint model. |
+| `rerecord_line` | Re-voice one dialogue line (`lineIndex` from 0), optionally with a new acting direction in `style`. Only that line is queued; its timing is kept. A little per line unless the voice is local. |
+| `set_line_timing` | When a dialogue line starts (seconds into the shot; `null` = automatic). Same as `update_shot` with `details.dialogue[i].start`; the recording is kept and, because only timing changes, a locked shot is allowed and its review is not reset. |
+| `export_production` | Write an editable folder: every shot's selected frame and clip, dialogue recordings, music, `timeline.json`, `timeline.edl` (CMX 3600, 24 fps) and `subtitles.srt`. Returns the folder and files. |
 
 Example request in Claude Code: *"In Lumina, make a 12-page picture book about a fox who's afraid of water. Draft
 the bible and pages, show me the text, then illustrate page 1."*
@@ -118,8 +125,10 @@ Notes:
 - `move_shot` and `trim_shot` also need a rejoin to show up in the film.
 - `cancel_job` works on queued jobs for any provider. A running job can be stopped only if it runs on this
   computer (local or mock providers). A paid job already sent to a provider cannot be stopped.
-- `set_character_voice` does not change recordings that already exist. To re-record a line, change its text
-  slightly with `update_shot`, then run `voice_dialogue`.
+- `set_character_voice` does not change recordings that already exist. To re-record a line, use `rerecord_line`.
+- Clip checks now also flag **flicker** (brightness jumps that bounce back) and **character-area colour drift**
+  (the colours of the middle/upper part of the frame change a lot, which can mean costume or hair colour drift).
+  They only warn, never fail a shot, and do not check who is on screen (no identity check).
 
 ### HTTP routes behind these tools
 
@@ -133,6 +142,12 @@ The tools use the same local API as the app. New or changed routes:
 | `GET /api/shots/:id` | One shot with its details. |
 | `GET /api/storyboards/:id/contact-sheet?kind=frames` or `clips` | One JPEG with every shot's frame, or the middle frame of each clip. 404 when none exist yet. |
 | `GET /api/shots/:id/contact-sheet` | One JPEG with six timestamped frames of the shot's clip. |
+| `GET /api/shots/:id/takes` | `{frames, clips}`: every take with `assetId`, `path`, `createdAt`, `generationId`, `source`, `current`. |
+| `POST /api/shots/:id/takes/select` | `{kind: 'frame' \| 'clip', assetId}`: make a take current (review reset to pending, clip re-checked). |
+| `POST /api/shots/:id/attach-clip` | `{assetId}`: attach a library video of the same project as the shot's clip. |
+| `POST /api/shots/:id/repair-frame` | `{box, instruction, provider?, model?}`: inpaint a box of the frame; 202 with a generation whose result is a new frame take. |
+| `POST /api/shots/:id/dialogue/:index/rerecord` | `{style?}`: re-voice one line. |
+| `POST /api/storyboards/:id/export-project` | Write the editable production folder; returns `{folder, files}`. |
 
 ## Set up
 
@@ -234,6 +249,14 @@ substantial model storage. Local inference avoids provider API charges but uses 
 `production_readiness` and `estimate_film_cost`, clear blockers, review and approve the estimate and frames, then
 produce and review the clips. Lip sync is excluded and is not enabled by default. See
 [docs/SHIPPING_ANIME.md](SHIPPING_ANIME.md) for settings, model setup, finishing steps and release verification.
+
+## Not yet
+
+- **Replacing a section of a clip** (`replace_clip_section`) is not available. Repair the frame with `repair_frame`
+  and generate a new clip instead.
+- **Pose or keyframe control**: local Wan has no end-frame support here, so a clip cannot be steered to end on a chosen
+  pose. Hosted models with last-frame support can (`continuity: keyframes`); local ones cannot yet.
+- Lip sync is not redone automatically after `rerecord_line` or a changed `set_line_timing`; call `lip_sync_shot` again.
 
 ## Verified
 

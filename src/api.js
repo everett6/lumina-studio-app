@@ -426,9 +426,22 @@ export function createApiServer(ctx) {
   };
   // Bake a character into a LoRA for the local anime model (free, this computer's GPU, ~15-25 minutes).
   route('GET', `/api/characters/${uuid}/bake`, (req, [id]) => bake.status(id));
+  // Baking has a review step: POST draws the pictures and stops (state "review"); the person approves/rejects them
+  // (+ mirror flags), can redraw rejected ones, then trains on the approved ones. {auto: true} does it all in one go.
   route('POST', `/api/characters/${uuid}/bake`, async (req, [id]) => {
     const body = await readBody(req, 1024);
-    return { status: 202, body: bake.start(id, { steps: Number.isFinite(Number(body.steps)) ? Number(body.steps) : undefined }) };
+    return { status: 202, body: await bake.start(id, { steps: Number.isFinite(Number(body.steps)) ? Number(body.steps) : undefined, auto: body.auto === true, mirrorOk: body.mirrorOk !== false }) };
+  });
+  route('POST', `/api/characters/${uuid}/bake/review`, async (req, [id]) => bake.review(id, await readBody(req, 8192)));
+  route('POST', `/api/characters/${uuid}/bake/redraw`, async (req, [id]) => ({ status: 202, body: bake.redraw(id, await readBody(req, 4096)) }));
+  route('POST', `/api/characters/${uuid}/bake/train`, async (req, [id]) => {
+    const body = await readBody(req, 1024);
+    return { status: 202, body: bake.train(id, { steps: Number.isFinite(Number(body.steps)) ? Number(body.steps) : undefined }) };
+  });
+  // The drawn pictures are served by number (never a client-supplied path), straight out of the character's bake folder.
+  route('GET', `/api/characters/${uuid}/bake/pictures/(\\d{1,3})`, async (req, [id, index], url, res) => {
+    needCharacter(id);
+    return serveFile(res, path.resolve(bake.dir, id), bake.pictureFile(id, Number(index)), { 'cache-control': 'no-cache' });
   });
   route('DELETE', `/api/characters/${uuid}/bake`, async (req, [id]) => bake.remove(id));
   route('POST', `/api/characters/${uuid}/sheet`, async (req, [id]) => {
@@ -460,7 +473,7 @@ export function createApiServer(ctx) {
     needCharacter(id);
     const deleted = repo.characters.remove(id);
     // Its baked LoRA goes too (a bake still running cleans up after itself when it finishes).
-    if (bake.status(id).job?.state !== 'running') await bake.remove(id);
+    if (!bake.status(id).job?.busy) await bake.remove(id);
     return { deleted };
   });
 
@@ -617,6 +630,14 @@ export function createApiServer(ctx) {
     return sequences.detail(sequences.needShot(id).sequenceId);
   });
   route('POST', `/api/shots/${uuid}/dialogue`, (req, [id]) => ({ status: 202, body: sequences.makeDialogue(id) }));
+  // Re-voice one line (optionally with a new acting direction); its timing (details.dialogue[i].start) is kept.
+  route('POST', `/api/shots/${uuid}/dialogue/(\\d{1,2})/rerecord`, async (req, [id, index]) => ({ status: 202, body: sequences.rerecordLine(id, Number(index), await readBody(req, 4096)) }));
+  // Takes: every frame and clip the shot has had; pick one, attach an imported video, or repair part of the frame.
+  route('GET', `/api/shots/${uuid}/takes`, (req, [id]) => sequences.takes(id));
+  route('POST', `/api/shots/${uuid}/takes/select`, async (req, [id]) => sequences.selectTake(id, await readBody(req, 4096)));
+  route('POST', `/api/shots/${uuid}/attach-clip`, async (req, [id]) => sequences.attachClip(id, await readBody(req, 4096)));
+  route('POST', `/api/shots/${uuid}/repair-frame`, async (req, [id]) => ({ status: 202, body: await sequences.repairFrame(id, await readBody(req, 8192)) }));
+  route('POST', `/api/storyboards/${uuid}/export-project`, async (req, [id]) => sequences.exportProject(id, exportDir));
   route('DELETE', `/api/shots/${uuid}`, (req, [id]) => {
     const shot = sequences.needShot(id);
     repo.shots.remove(id);

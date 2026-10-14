@@ -287,7 +287,7 @@ test('set_character_voice changes the voice and records unrecorded lines only wi
     assert.equal(revoiced.queued, 1, 'only the unrecorded line is queued');
     assert.equal(revoiced.keptOldVoice.length, 1);
     assert.equal(revoiced.keptOldVoice[0].shotId, first.id);
-    assert.match(revoiced.note, /voice_dialogue/);
+    assert.match(revoiced.note, /rerecord_line/);
     assert.ok(project.id);
   });
 });

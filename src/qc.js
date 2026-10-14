@@ -103,3 +103,89 @@ export async function driftChecks(clip, { startFrame = null, endFrame = null } =
   }
   return checks;
 }
+
+// Anime-friendly review checks, free and local (ffmpeg plus a little arithmetic; no models). They flag, never fail:
+//  - flicker: the picture's overall brightness jumps and jumps back within a frame or two, again and again
+//  - drift: the colours in the middle/upper part of the frame (where the character usually is) change a lot over the
+//    clip, which often means costume or hair colour drift.
+// They do not check who is on screen (no identity check) and a fast camera move or a lighting change can also trigger
+// them, so the messages say "may" and a person decides.
+
+// Brightness spikes: |step| is large both into and out of a frame, in opposite directions. `lumas` = mean brightness
+// (0-255) of each frame, in order. A steady drift or a single cut is not a spike.
+export function flickerScore(lumas) {
+  const steps = [];
+  for (let i = 1; i < lumas.length; i += 1) steps.push(lumas[i] - lumas[i - 1]);
+  if (steps.length < 3) return { spikes: 0, share: 0, frames: lumas.length };
+  const sorted = steps.map(Math.abs).sort((a, b) => a - b);
+  const threshold = Math.max(6, 4 * sorted[Math.floor(sorted.length / 2)]);
+  let spikes = 0;
+  for (let i = 0; i + 1 < steps.length; i += 1) {
+    const [into, out] = [steps[i], steps[i + 1]];
+    if (Math.abs(into) >= threshold && Math.abs(out) >= threshold && into * out < 0 && Math.abs(into + out) < 0.5 * Math.max(Math.abs(into), Math.abs(out))) {
+      spikes += 1;
+      i += 1; // one flicker uses up both its steps
+    }
+  }
+  return { spikes, share: spikes / lumas.length, frames: lumas.length };
+}
+
+// Colour histogram (4 levels per channel = 64 bins, sums to 1) of an RGB24 buffer.
+export function colourHistogram(rgb) {
+  const bins = new Array(64).fill(0);
+  const pixels = Math.floor(rgb.length / 3);
+  for (let i = 0; i < pixels; i += 1) bins[(rgb[i * 3] >> 6) * 16 + (rgb[i * 3 + 1] >> 6) * 4 + (rgb[i * 3 + 2] >> 6)] += 1;
+  return pixels ? bins.map((n) => n / pixels) : bins;
+}
+// Total variation distance between two histograms: 0 = same colours, 1 = nothing in common.
+export const histogramDistance = (a, b) => a.reduce((sum, v, i) => sum + Math.abs(v - b[i]), 0) / 2;
+
+// `frames`: RGB24 buffers of the character area over time. Returns the biggest change from the first frame.
+export function colourDrift(frames) {
+  if (frames.length < 2) return { drift: 0, atIndex: 0 };
+  const first = colourHistogram(frames[0]);
+  let worst = { drift: 0, atIndex: 0 };
+  frames.slice(1).forEach((frame, i) => {
+    const drift = histogramDistance(first, colourHistogram(frame));
+    if (drift > worst.drift) worst = { drift, atIndex: i + 1 };
+  });
+  return worst;
+}
+
+const rawFrames = async (file, filter, size, { seconds = 30 } = {}) => {
+  const { execFile } = await import('node:child_process');
+  const bytes = await new Promise((resolve, reject) => {
+    execFile('ffmpeg', ['-v', 'error', '-t', String(seconds), '-i', file, '-an', '-vf', filter, '-f', 'rawvideo', '-'],
+      { encoding: 'buffer', maxBuffer: 64 << 20, timeout: 180_000 }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
+  });
+  const frames = [];
+  for (let at = 0; at + size <= bytes.length; at += size) frames.push(bytes.subarray(at, at + size));
+  return frames;
+};
+
+export async function animeChecks(file) {
+  const checks = [];
+  try {
+    // Every frame (up to 30 s), shrunk to 16×9 grey.
+    const grey = await rawFrames(file, 'scale=16:9:flags=area,format=gray', 16 * 9);
+    if (grey.length >= 6) {
+      const lumas = grey.map((f) => f.reduce((sum, v) => sum + v, 0) / f.length);
+      const { spikes, share } = flickerScore(lumas);
+      const flagged = spikes >= 3 || share > 0.04;
+      checks.push({ id: 'flicker', ok: !flagged, severity: 'warning', score: spikes,
+        detail: flagged ? `The picture may flicker: ${spikes} sudden brightness jumps that bounce back within a frame or two. Look at it before accepting.` : 'No flicker found' });
+    }
+    // Four samples a second of the middle and upper part of the frame, where the main character usually stands.
+    const area = await rawFrames(file, 'fps=4,crop=iw*0.5:ih*0.6:iw*0.25:ih*0.05,scale=32:32:flags=area,format=rgb24', 32 * 32 * 3);
+    if (area.length >= 3) {
+      const { drift } = colourDrift(area);
+      const flagged = drift > 0.45;
+      checks.push({ id: 'character-drift', ok: !flagged, severity: 'warning', score: drift,
+        detail: flagged ? `The colours in the character area change a lot during the clip (${Math.round(drift * 100)}% different from the start): costume or hair colour may be drifting. This does not check who it is; compare with the start frame.`
+          : 'Colours in the character area stay steady' });
+    }
+  } catch (error) {
+    checks.push({ id: 'anime-review', ok: true, severity: 'warning', detail: `Anime review checks could not run: ${error.message}` });
+  }
+  return checks;
+}

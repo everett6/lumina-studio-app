@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { extractJson } from './books.js';
@@ -7,7 +7,9 @@ import { confirmSpend, nearestDuration, RequestError } from './generation.js';
 import { presets } from './presets.js';
 import { priceFor } from './pricing.js';
 import { colourStats, curveFilter, matchCurve } from './grade.js';
-import { checkClip, driftChecks, suggestedStatus } from './qc.js';
+import { animeChecks, checkClip, driftChecks, suggestedStatus } from './qc.js';
+import { imageSize } from './assets.js';
+import { encodePng } from './png.js';
 import { lineTimes, mixSoundtrack } from './soundtrack.js';
 import { deliverFilm, filmFps, hasFfmpeg, lastFrame, mediaSeconds, probe, renderStill, run, stillMotions, stitchClips } from './video.js';
 import { drawMouths, findMouth, lipSync, lipSyncInstalled } from './providers/local.js';
@@ -150,6 +152,38 @@ export function gradeFilter(grade) {
   return parts.join(',');
 }
 
+// Anime exposure ("timing"): how long each drawing stays on screen. 'twos'/'threes' hold every drawing 2/3 frames at the
+// film's frame rate; 'ones' draws a new picture every frame; 'auto' leaves the clip as it is. `holds` freeze the picture
+// for a span of seconds from the start of the shot (after the trim).
+export const shotTimings = ['auto', 'ones', 'twos', 'threes'];
+const holdsOf = (input) => {
+  if (!Array.isArray(input)) return null;
+  const clean = input.slice(0, 8).map((hold) => ({ start: Math.round(Math.min(600, Number(hold?.start)) * 1000) / 1000, seconds: Math.round(Math.min(10, Number(hold?.seconds)) * 1000) / 1000 }))
+    .filter((hold) => Number.isFinite(hold.start) && hold.start >= 0 && Number.isFinite(hold.seconds) && hold.seconds > 0)
+    .sort((a, b) => a.start - b.start);
+  return clean.filter((hold, i) => i === 0 || hold.start >= clean[i - 1].start + clean[i - 1].seconds); // overlapping holds are dropped
+};
+// The ffmpeg filter that gives a clip its exposure at `rate` frames per second ('' when nothing changes).
+export function exposureFilter(details = {}, rate = 24) {
+  const parts = [];
+  const step = { twos: 2, threes: 3 }[details.timing];
+  if (step) parts.push(`fps=${(rate / step).toFixed(6)}`, `fps=${rate}`); // keep every Nth drawing, then repeat it up to the film rate
+  // A hold drops the frames after its first one and keeps their time slots; the second fps filter then repeats the
+  // held frame into the gap (the same trick works the same way in every ffmpeg version).
+  const dropped = (details.holds ?? []).map((hold) => {
+    const first = Math.round(hold.start * rate);
+    const extra = Math.round(hold.seconds * rate) - 1; // the drawing already shows once; `extra` more frames freeze
+    return extra >= 1 ? `between(n,${first + 1},${first + extra})` : null;
+  }).filter(Boolean);
+  if (dropped.length) parts.push(`fps=${rate}`, `select='not(${dropped.join('+')})'`, `fps=${rate}`);
+  return parts.join(',');
+}
+// Frame interpolation (RIFE) would smear the held drawings of anime timing, so it is skipped for those shots, and
+// anime storyboards never smooth shots that are on 'auto' timing automatically (a shot's own interpolate switch still works).
+export function skipsSmoothing(details, look) {
+  return ['twos', 'threes'].includes(details.timing) || (details.holds?.length ?? 0) > 0 || (look === 'anime' && (details.timing ?? 'auto') === 'auto' && !details.interpolate);
+}
+
 export function cleanShotDetails(input = {}, base = {}) {
   const str = (key, max) => (typeof input[key] === 'string' ? input[key].slice(0, max) : base[key] ?? '');
   const ids = (key, max) => (Array.isArray(input[key]) ? [...new Set(input[key].filter((id) => typeof id === 'string'))].slice(0, max) : base[key] ?? []);
@@ -175,12 +209,15 @@ export function cleanShotDetails(input = {}, base = {}) {
     motion: stillMotions.includes(input.motion) ? input.motion : base.motion ?? 'push-in',
     model: typeof input.model === 'string' && /^[\w.-]+\|[\w./:-]+$/.test(input.model) ? input.model : input.model === '' ? '' : base.model ?? '',
     interpolate: typeof input.interpolate === 'boolean' ? input.interpolate : base.interpolate ?? false,
+    timing: shotTimings.includes(input.timing) ? input.timing : shotTimings.includes(base.timing) ? base.timing : 'auto',
+    holds: input.holds === null ? [] : holdsOf(input.holds) ?? holdsOf(base.holds) ?? [],
     trimStart: Math.min(10, Math.max(0, Number(input.trimStart ?? base.trimStart ?? 0) || 0)),
     muteClipSound: typeof input.muteClipSound === 'boolean' ? input.muteClipSound : base.muteClipSound ?? false,
     locked: typeof input.locked === 'boolean' ? input.locked : base.locked ?? false,
     grade: input.grade === null ? null : input.grade && typeof input.grade === 'object' ? cleanGrade(input.grade) : base.grade ? cleanGrade(base.grade) : null,
     post: base.post ?? {}, // cached derived clips (upscaled / interpolated), keyed by source and settings
     lipsync: base.lipsync ?? null, // { source, result, mode, box } once the clip has been lip-synced
+    attachedClips: base.attachedClips ?? [], // imported video assets attached to this shot as clip takes
   };
 }
 
@@ -361,7 +398,10 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   function updateShot(shotId, body) {
     const shot = needShot(shotId);
     const story = ['description', 'scene', 'locationId', 'characterIds', 'action', 'dialogue', 'startState', 'endState', 'forbidden', 'method', 'themes'];
-    const touchesStory = 'description' in body || story.some((key) => body.details && key in body.details);
+    // Moving a dialogue line in time (only `start` differs) is not a story change: no lock, no review reset.
+    const sameWords = Array.isArray(body.details?.dialogue) && body.details.dialogue.length === shot.details.dialogue.length
+      && body.details.dialogue.every((l, i) => l?.text?.trim() === shot.details.dialogue[i].text && (l.speaker ?? 'narrator') === shot.details.dialogue[i].speaker && (l.style ?? shot.details.dialogue[i].style ?? '') === (shot.details.dialogue[i].style ?? ''));
+    const touchesStory = 'description' in body || story.some((key) => body.details && key in body.details && !(key === 'dialogue' && sameWords));
     if (shot.details.locked && touchesStory && body.details?.locked !== false) {
       throw new RequestError(409, `Shot ${shot.position} is locked (approved screenplay). Unlock it first to revise it.`);
     }
@@ -588,6 +628,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       const start = asset(generation?.inputAssetIds?.[0]);
       const end = asset(generation?.params?.endFrameAssetId);
       checks.push(...await driftChecks(assetStore.path(clip), { startFrame: start ? assetStore.path(start) : null, endFrame: end ? assetStore.path(end) : null }));
+      checks.push(...await animeChecks(assetStore.path(clip)));
     }
     // Identity: do the people in the shot still look like their reference photos? (Only when installed; real faces.)
     if (faces?.status().installed && sequence.settings.look !== 'anime') {
@@ -619,6 +660,22 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   }
 
   // Voices for a shot's dialogue: each line spoken in its character's voice (or the narrator's).
+  function queueLine(shot, sequence, index) {
+    const line = shot.details.dialogue[index];
+    const target = `shot-line:${shot.id}:${index}`;
+    if (active(target)) return { missing: null, generation: null };
+    const speaker = line.speaker === 'narrator' ? null : repo.characters.get(line.speaker);
+    const voice = speaker?.voice ?? sequence.settings.narratorVoice;
+    if (!voice) return { missing: speaker?.name ?? 'Narrator', generation: null };
+    return {
+      missing: null,
+      generation: generations.submit({
+        projectId: sequence.projectId, operation: 'speech', prompt: line.text, provider: voice.provider, model: voice.model, voice: voice.voice, style: line.style,
+        bookTarget: target,
+      }),
+    };
+  }
+
   function makeDialogue(shotId) {
     const shot = needShot(shotId);
     const sequence = needSequence(shot.sequenceId);
@@ -626,20 +683,28 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const missing = [];
     shot.details.dialogue.forEach((line, index) => {
       if (line.assetId && asset(line.assetId)) return;
-      const target = `shot-line:${shot.id}:${index}`;
-      if (active(target)) return;
-      const speaker = line.speaker === 'narrator' ? null : repo.characters.get(line.speaker);
-      const voice = speaker?.voice ?? sequence.settings.narratorVoice;
-      if (!voice) {
-        missing.push(speaker?.name ?? 'Narrator');
-        return;
-      }
-      queued.push(generations.submit({
-        projectId: sequence.projectId, operation: 'speech', prompt: line.text, provider: voice.provider, model: voice.model, voice: voice.voice, style: line.style,
-        bookTarget: target,
-      }));
+      const result = queueLine(shot, sequence, index);
+      if (result.missing) missing.push(result.missing);
+      if (result.generation) queued.push(result.generation);
     });
     return { queued, missingVoices: [...new Set(missing)] };
+  }
+
+  // Re-voice ONE line: clears its recording (and measured length), optionally sets a new acting direction, and queues
+  // only that line. Timing (`start`) is kept; change it with updateShot (details.dialogue[i].start).
+  function rerecordLine(shotId, index, { style } = {}) {
+    const shot = needShot(shotId);
+    const sequence = needSequence(shot.sequenceId);
+    const line = shot.details.dialogue[index];
+    if (!Number.isInteger(index) || !line) throw new RequestError(404, `This shot has no dialogue line ${index} (lines count from 0).`);
+    if (style !== undefined && typeof style !== 'string') throw new RequestError(400, 'style must be text.');
+    if (active(`shot-line:${shot.id}:${index}`)) throw new RequestError(409, 'That line is being recorded right now. Wait for it to finish, then re-record it.');
+    const speaker = line.speaker === 'narrator' ? null : repo.characters.get(line.speaker);
+    if (!(speaker?.voice ?? sequence.settings.narratorVoice)) throw new RequestError(400, `${speaker?.name ?? 'The narrator'} has no voice yet. Set one first (set_character_voice).`);
+    const dialogue = shot.details.dialogue.map((l, i) => (i === index ? { ...l, assetId: null, seconds: null, ...(style === undefined ? {} : { style: style.slice(0, 500) }) } : l));
+    repo.shots.update(shot.id, { details: { ...shot.details, dialogue } });
+    const result = queueLine(needShot(shotId), sequence, index);
+    return { queued: result.generation ? [result.generation] : [], missingVoices: [] };
   }
 
   // Derived clips are made once per source clip and settings and kept with the shot.
@@ -683,7 +748,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         for (const shot of usable) {
           let clip = asset(shot.videoAssetId);
           const source = clip.id;
-          if ((shot.details.interpolate || settings.interpolateFps) && shot.details.method !== 'still' && enhancer) {
+          if ((shot.details.interpolate || settings.interpolateFps) && shot.details.method !== 'still' && enhancer && !skipsSmoothing(shot.details, settings.look)) {
             const smooth = await derived(shot, `smooth|${source}|30`, async () => (await enhancer.interpolate(assetStore.path(clip), { fps: 30 }))?.bytes ?? null);
             if (smooth) clip = smooth;
           }
@@ -716,6 +781,11 @@ export function createSequenceService({ repo, directors, keys, generations, asse
             const anchor = anchors.get(group);
             if (anchor !== undefined && anchor !== i && stats[i]) item.vf = curveFilter(matchCurve(stats[i], stats[anchor])) || undefined;
           });
+        }
+        // Anime exposure (twos / threes / holds) comes first, on the drawn clip only; a still shot's camera move stays smooth.
+        for (const item of items) {
+          const exposure = item.shot.details.method === 'still' ? '' : exposureFilter(item.shot.details, rate);
+          if (exposure) item.vf = item.vf ? `${exposure},${item.vf}` : exposure;
         }
         // The shot's own look goes on top of the match, so "darker" stays darker than its neighbours.
         for (const item of items) {
@@ -999,11 +1069,187 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     if (generation.status === 'completed') track(advance(shot.sequenceId).catch((error) => log.error?.('Production step failed', { detail: error.message })));
   }
 
+  // ---------- Takes: every frame and clip a shot ever had, and picking between them ----------
+  // Frames: every finished frame job (and repair job) of the shot. Clips: every finished clip job, clips attached by
+  // hand, and clips made from those (lip-synced or still renders). The current choice is flagged and always listed.
+  function takes(shotId) {
+    const shot = needShot(shotId);
+    const sequence = needSequence(shot.sequenceId);
+    const done = (target) => repo.generations.listByTarget(target).filter((g) => g.status === 'completed' && g.assetId && asset(g.assetId));
+    const entry = (id, extra = {}) => {
+      const a = asset(id);
+      return { assetId: id, path: a.path, createdAt: a.createdAt, label: a.label ?? null, ...extra };
+    };
+    const frames = new Map();
+    for (const g of done(`shot-image:${shot.id}`)) frames.set(g.assetId, entry(g.assetId, { generationId: g.id, source: 'frame' }));
+    for (const g of done(`shot-repair:${shot.id}`)) frames.set(g.assetId, entry(g.assetId, { generationId: g.id, source: 'repair' }));
+    if (shot.imageAssetId && asset(shot.imageAssetId) && !frames.has(shot.imageAssetId)) frames.set(shot.imageAssetId, entry(shot.imageAssetId, { generationId: null, source: 'other' }));
+    const clips = new Map();
+    for (const g of done(`shot-video:${shot.id}`)) clips.set(g.assetId, entry(g.assetId, { generationId: g.id, source: 'clip' }));
+    for (const id of shot.details.attachedClips ?? []) if (asset(id)) clips.set(id, entry(id, { generationId: null, source: 'attached' }));
+    // Clips made from a take (lip sync, still renders): walk up each project video's parents until a take is found.
+    const byId = new Map(repo.assets.listByProject(sequence.projectId).map((a) => [a.id, a]));
+    const belongs = (a) => {
+      for (let hop = 0, cur = a; cur?.parentAssetId && hop < 6; hop += 1, cur = byId.get(cur.parentAssetId)) {
+        if (clips.has(cur.parentAssetId) || frames.has(cur.parentAssetId)) return true;
+      }
+      return false;
+    };
+    for (const a of byId.values()) {
+      if (a.kind === 'video' && !clips.has(a.id) && /\((lip-synced|still,)/.test(a.label ?? '') && belongs(a)) clips.set(a.id, entry(a.id, { generationId: null, source: /lip-synced/.test(a.label) ? 'lip-synced' : 'still' }));
+    }
+    if (shot.videoAssetId && asset(shot.videoAssetId) && !clips.has(shot.videoAssetId)) clips.set(shot.videoAssetId, entry(shot.videoAssetId, { generationId: null, source: 'other' }));
+    const list = (map, current) => [...map.values()].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map((t) => ({ ...t, current: t.assetId === current }));
+    return { shotId: shot.id, position: shot.position, frames: list(frames, shot.imageAssetId), clips: list(clips, shot.videoAssetId) };
+  }
+
+  // Switch the shot to another take. Like any new frame/clip, the review goes back to pending and a clip is checked again.
+  // Lip sync bookkeeping follows the clip: choosing a lip-synced take records it as the shot's synced result, so a later
+  // lip sync starts from its original clip; derived caches (smooth/upscale) are keyed by source clip and stay valid.
+  async function selectTake(shotId, { kind, assetId } = {}) {
+    if (!['frame', 'clip'].includes(kind)) throw new RequestError(400, 'kind must be "frame" or "clip".');
+    const shot = needShot(shotId);
+    const chosen = takes(shotId)[kind === 'frame' ? 'frames' : 'clips'].find((t) => t.assetId === assetId);
+    if (!chosen) throw new RequestError(404, `That ${kind} is not one of this shot's takes. List them with GET /api/shots/${shotId}/takes.`);
+    if (kind === 'frame') {
+      repo.shots.update(shotId, { imageAssetId: assetId, review: { ...shot.review, frameApproved: null } });
+      return detail(shot.sequenceId);
+    }
+    const parent = asset(assetId)?.parentAssetId;
+    const syncedTake = chosen.source === 'lip-synced' && parent && asset(parent);
+    repo.shots.update(shotId, {
+      videoAssetId: assetId, review: { status: 'pending' },
+      ...(syncedTake ? { details: { ...shot.details, lipsync: { ...(shot.details.lipsync ?? {}), source: parent, result: assetId, mode: shot.details.lipsync?.mode ?? null, box: shot.details.lipsync?.box ?? null } } } : {}),
+    });
+    await runChecks(shotId);
+    return detail(shot.sequenceId);
+  }
+
+  // Use an imported video (library asset) as this shot's clip.
+  async function attachClip(shotId, { assetId } = {}) {
+    const shot = needShot(shotId);
+    const sequence = needSequence(shot.sequenceId);
+    const clip = asset(assetId);
+    if (!clip) throw new RequestError(404, 'Video not found. Import one first (import_video).');
+    if (clip.kind !== 'video') throw new RequestError(400, 'Choose a video asset.');
+    if (clip.projectId !== sequence.projectId) throw new RequestError(400, 'That video belongs to another project.');
+    if (!(shot.details.attachedClips ?? []).includes(assetId)) repo.shots.update(shotId, { details: { ...shot.details, attachedClips: [...(shot.details.attachedClips ?? []), assetId] } });
+    return selectTake(shotId, { kind: 'clip', assetId });
+  }
+
+  // Repair part of a frame: a mask is drawn from the box (white = repaint, black = keep) at the frame's own size and an
+  // inpaint job repaints just that area. The result is a new frame take; it is NOT selected (selectTake does that).
+  function pickInpaint(override = {}) {
+    const ready = (p) => (p.keyless ? p.available?.() ?? true : Boolean(keys.get(p.id)));
+    const options = (providers?.list ?? []).filter((p) => (!override.provider || p.id === override.provider) && ready(p))
+      .flatMap((p) => p.models.filter((m) => m.operations?.includes('inpaint') && (p.modelAvailable?.(m.id) ?? true) && (!override.model || m.id === override.model)).map((m) => ({ provider: p.id, model: m.id, keyless: p.keyless })));
+    return options.sort((a, b) => Number(Boolean(b.keyless)) - Number(Boolean(a.keyless)))[0] ?? null;
+  }
+  async function repairFrame(shotId, { box, instruction, provider, model } = {}) {
+    const shot = needShot(shotId);
+    const sequence = needSequence(shot.sequenceId);
+    const frame = asset(shot.imageAssetId);
+    if (!frame) throw new RequestError(400, 'This shot has no frame to repair yet.');
+    if (!Array.isArray(box) || box.length !== 4 || box.some((v) => !Number.isFinite(Number(v)) || v < 0 || v > 1)) throw new RequestError(400, 'box must be [x1, y1, x2, y2] as fractions of the frame (0-1).');
+    const [x1, y1, x2, y2] = box.map(Number);
+    if (x2 - x1 < 0.01 || y2 - y1 < 0.01) throw new RequestError(400, 'The box is empty: x2 must be greater than x1 and y2 greater than y1.');
+    if (typeof instruction !== 'string' || !instruction.trim()) throw new RequestError(400, 'Describe what should appear in the box (instruction).');
+    const running = active(`shot-repair:${shot.id}`);
+    if (running) return { generation: running, alreadyRunning: true };
+    const picked = pickInpaint({ provider, model });
+    if (!picked) throw new RequestError(409, 'No inpaint-capable image model is ready. Add an API key for one (for example fal.ai FLUX.1 Fill pro) or install a local one in Lumina Settings, then try again.');
+    const size = imageSize((await assetStore.read(frame)).bytes) ?? { width: 1024, height: 1024 };
+    const mask = encodePng(size.width, size.height, (x, y) => {
+      const inside = x >= x1 * size.width && x < x2 * size.width && y >= y1 * size.height && y < y2 * size.height;
+      return inside ? [255, 255, 255] : [0, 0, 0];
+    });
+    const saved = await assetStore.save({ bytes: mask, projectId: sequence.projectId, kind: 'mask', label: `Shot ${shot.position} repair mask` });
+    const prompt = `${instruction.trim().slice(0, 3000)}\nMatch the surrounding art style, line work, colours and lighting; change nothing outside the painted area.`;
+    return {
+      generation: generations.submit({
+        projectId: sequence.projectId, operation: 'inpaint', prompt, provider: picked.provider, model: picked.model,
+        inputAssetIds: [frame.id], maskAssetId: saved.id, bookTarget: `shot-repair:${shot.id}`,
+      }),
+    };
+  }
+
+  // ---------- Editable export: originals plus a timeline an editor can open ----------
+  const timecode = (seconds, fps) => {
+    const total = Math.round(Math.max(0, seconds) * fps);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(Math.floor(total / (fps * 3600)))}:${pad(Math.floor(total / (fps * 60)) % 60)}:${pad(Math.floor(total / fps) % 60)}:${pad(total % fps)}`;
+  };
+  const srtTime = (seconds) => {
+    const ms = Math.round(Math.max(0, seconds) * 1000);
+    const pad = (n, w = 2) => String(n).padStart(w, '0');
+    return `${pad(Math.floor(ms / 3_600_000))}:${pad(Math.floor(ms / 60_000) % 60)}:${pad(Math.floor(ms / 1000) % 60)},${pad(ms % 1000, 3)}`;
+  };
+  const safeName = (text) => String(text).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'film';
+
+  async function exportProject(id, exportDir, { fps = 24 } = {}) {
+    const sequence = needSequence(id);
+    const shots = shotsOf(id);
+    const folder = path.join(exportDir, `${safeName(sequence.title)}-edit-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+    for (const sub of ['frames', 'clips', 'dialogue', 'music']) await mkdir(path.join(folder, sub), { recursive: true });
+    const files = [];
+    const copy = async (a, sub, name) => {
+      const out = `${sub}/${name}${path.extname(a.file)}`;
+      await copyFile(assetStore.path(a), path.join(folder, out));
+      files.push(out);
+      return out;
+    };
+    const pad = (n) => String(n).padStart(2, '0');
+    const timeline = [];
+    const subtitles = [];
+    let clock = 0;
+    for (const shot of shots) {
+      const duration = shot.duration ?? 0;
+      const frame = asset(shot.imageAssetId);
+      const clip = asset(shot.videoAssetId);
+      const lines = shot.details.dialogue ?? [];
+      const lengths = lines.map((l) => l.seconds ?? Math.max(1, l.text.split(/\s+/).length / 2.5));
+      const { times } = lineTimes(lines, duration, lengths);
+      const dialogue = [];
+      for (const [i, line] of lines.entries()) {
+        const voice = asset(line.assetId);
+        const speaker = line.speaker === 'narrator' ? 'Narrator' : repo.characters.get(line.speaker)?.name ?? 'Unknown';
+        const file = voice ? await copy(voice, 'dialogue', `${pad(shot.position)}-${pad(i + 1)}-${safeName(speaker)}`) : null;
+        dialogue.push({ speaker, text: line.text, file, start: Math.round(times[i] * 1000) / 1000, seconds: lengths[i], recorded: Boolean(voice), timingSet: Number.isFinite(line.start) });
+        subtitles.push({ from: clock + times[i], to: clock + times[i] + lengths[i], text: line.speaker === 'narrator' ? line.text : `${speaker}: ${line.text}` });
+      }
+      timeline.push({
+        shot: shot.position, shotId: shot.id, description: shot.description, scene: shot.details.scene || null, start: clock, duration, trimStart: shot.details.trimStart || 0,
+        frame: frame ? await copy(frame, 'frames', pad(shot.position)) : null, clip: clip ? await copy(clip, 'clips', pad(shot.position)) : null,
+        muteClipSound: Boolean(shot.details.muteClipSound), review: shot.review.status ?? 'pending', dialogue,
+      });
+      clock += duration;
+    }
+    const beds = [];
+    for (const [role, bed] of [['music', sequence.settings.music], ['ambience', sequence.settings.ambience]]) {
+      const a = bed?.assetId ? asset(bed.assetId) : null;
+      if (a) beds.push({ role, file: await copy(a, 'music', role), volume: bed.volume });
+    }
+    const write = async (name, content) => {
+      await writeFile(path.join(folder, name), content);
+      files.push(name);
+    };
+    await write('timeline.json', JSON.stringify({ title: sequence.title, fps, aspect: sequence.settings.aspect, transition: sequence.settings.transition, totalSeconds: clock, clipVolume: sequence.settings.clipVolume, audioBeds: beds, shots: timeline }, null, 2));
+    // CMX 3600 EDL: one video event per shot that has a clip; source in/out follow trimStart and the shot's length.
+    const events = timeline.filter((s) => s.clip);
+    await write('timeline.edl', [`TITLE: ${sequence.title.replace(/\s+/g, ' ')}`, 'FCM: NON-DROP FRAME', '',
+      ...events.flatMap((s, i) => [
+        `${String(i + 1).padStart(3, '0')}  AX       V     C        ${timecode(s.trimStart, fps)} ${timecode(s.trimStart + s.duration, fps)} ${timecode(s.start, fps)} ${timecode(s.start + s.duration, fps)}`,
+        `* FROM CLIP NAME: ${path.basename(s.clip)}`, `* SHOT ${s.shot}${s.scene ? ` (${s.scene})` : ''}`, '']),
+    ].join('\n'));
+    await write('subtitles.srt', subtitles.map((c, i) => `${i + 1}\n${srtTime(c.from)} --> ${srtTime(c.to)}\n${c.text}\n`).join('\n'));
+    return { folder, files };
+  }
+
   // Signature of what a shot's film depends on (for reports): its clip, frame and recorded lines.
   const shotFingerprint = (shot) => createHash('sha256').update(JSON.stringify([shot.videoAssetId, shot.imageAssetId, shot.details.dialogue?.map((l) => l.assetId)])).digest('hex').slice(0, 12);
 
   return {
-    detail, create, update, plan, importPlan, updateShot, review, approveFrame, generateFrame, animate, renderStillShot, runChecks, makeDialogue, lipSyncShot,
+    detail, create, update, plan, importPlan, updateShot, review, approveFrame, generateFrame, animate, renderStillShot, runChecks, makeDialogue, rerecordLine, lipSyncShot, takes, selectTake, attachClip, repairFrame, exportProject,
     stitch, produce, stopProduction, stopAllProductions, onGenerationUpdate, idle, needShot, needSequence, outputSize, shotFingerprint,
   };
 }

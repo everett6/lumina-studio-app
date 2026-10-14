@@ -368,6 +368,10 @@ function shotDetails(shot) {
   const motion = h('select', { 'aria-label': 'Still-shot move', onchange: () => save({ motion: motion.value }) },
     ...(ui.options?.stillMotions ?? ['push-in', 'pull-out', 'pan-left', 'pan-right', 'rise', 'hold']).map((m) => h('option', { value: m }, m)));
   motion.value = d.motion;
+  const timing = h('select', { 'aria-label': 'Timing', title: 'How long each drawing stays on screen when the film is joined. Twos/threes hold every drawing 2/3 frames (anime rhythm) and skip frame smoothing.',
+    onchange: () => save({ timing: timing.value }) },
+    ...[['auto', 'Auto'], ['ones', 'On ones'], ['twos', 'On twos'], ['threes', 'On threes']].map(([value, label]) => h('option', { value }, label)));
+  timing.value = d.timing ?? 'auto';
   const toggle = (label, key) => {
     const box = h('input', { type: 'checkbox', checked: Boolean(d[key]), onchange: () => save({ [key]: box.checked }) });
     return h('label.check-row', {}, box, h('span', {}, label));
@@ -379,6 +383,7 @@ function shotDetails(shot) {
       h('label', {}, h('span.field-label', {}, 'LOCATION'), location),
       h('label', {}, h('span.field-label', {}, 'SHOT TYPE'), method),
       d.method === 'still' ? h('label', {}, h('span.field-label', {}, 'STILL-SHOT MOVE'), motion) : h('label', {}, h('span.field-label', {}, 'VIDEO MODEL'), model),
+      d.method === 'still' ? null : h('label', {}, h('span.field-label', {}, 'TIMING'), timing),
       text('Action', 'action', 1000, 'The one thing that must happen'),
       text('Starts with', 'startState', 500, 'Situation at the first frame'),
       text('Ends with', 'endState', 500, 'Situation at the last frame'),
@@ -410,6 +415,30 @@ function reviewRow(shot) {
       shot.videoPath ? h('button.text-button.danger', { onclick: act(`/api/shots/${shot.id}/review`, { status: 'rejected' }) }, 'Leave out') : null,
       shot.videoPath ? h('button.text-button', { title: 'Run the free checks again', onclick: act(`/api/shots/${shot.id}/checks`, {}) }, 'Re-check') : null),
     problems.length ? h('ul.sb-problems', {}, ...problems.map((c) => h('li', { dataset: { severity: c.severity } }, c.detail))) : null);
+}
+
+// Takes: every frame and clip this shot has had. Loaded when the menu opens; picking one makes it the shot's current one.
+function takesMenu(shot) {
+  const list = h('div.sb-takes-list', {}, h('span.muted', {}, 'Loading…'));
+  const label = h('summary.button.secondary.small', {}, 'Takes');
+  const pick = (kind, take) => guard(async () => {
+    show(await call(`/api/shots/${shot.id}/takes/select`, 'POST', { kind, assetId: take.assetId }));
+    toast(`Switched to the ${kind === 'frame' ? 'frame' : 'clip'} from ${new Date(take.createdAt).toLocaleString()}.`);
+  });
+  const group = (kind, takes) => h('div.sb-takes-group', {}, h('span.field-label', {}, kind === 'frame' ? 'FRAMES' : 'CLIPS'),
+    ...(takes.length ? takes.map((take) => h('button.text-button', { disabled: take.current, title: take.label || take.source, onclick: pick(kind, take) },
+      `${take.current ? '✓ ' : ''}${new Date(take.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${take.source}`)) : [h('span.muted', {}, 'None')]));
+  const menu = h('details.sb-takes', { ontoggle: async (event) => {
+    if (!event.target.open) return;
+    try {
+      const { frames, clips } = await api(`/api/shots/${shot.id}/takes`);
+      label.textContent = `Takes (${frames.length + clips.length})`;
+      list.replaceChildren(group('frame', frames), group('clip', clips));
+    } catch (error) {
+      list.replaceChildren(h('span.muted', {}, error.message));
+    }
+  } }, label, list);
+  return menu;
 }
 
 function shotCard(shot, index, total) {
@@ -498,6 +527,7 @@ function shotCard(shot, index, total) {
           watch();
         }) }, `Voice ${unrecorded} line(s)`) : null,
         jobBadge(shot.frameJob, 'Frame'), jobBadge(shot.clipJob, 'Clip'),
+        shot.imagePath || shot.videoPath ? takesMenu(shot) : null,
         h('span.sb-spacer'),
         h('button.ghost', { disabled: index === 0, title: 'Move earlier', 'aria-label': 'Move earlier', onclick: act(`/api/shots/${shot.id}/move`, 'POST', { direction: 'up' }) }, '↑'),
         h('button.ghost', { disabled: index === total - 1, title: 'Move later', 'aria-label': 'Move later', onclick: act(`/api/shots/${shot.id}/move`, 'POST', { direction: 'down' }) }, '↓'),

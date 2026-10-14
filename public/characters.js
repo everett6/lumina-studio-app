@@ -95,26 +95,57 @@ function card(character) {
     }
   })();
   // Bake: a LoRA of this character for the local anime model, trained on this computer (~15-25 minutes).
+  // Two phases: the GPU draws training pictures first, then you throw out the bad ones before it learns from them.
   const bakeLabel = h('span.muted', {}, '');
-  const bakeButton = h('button.button.secondary.small', { title: 'Teach the local anime model this exact character from its sheet (free, your GPU, about 15-25 minutes; other GPU work waits)' }, 'Bake character');
+  const bakePanel = h('div.bake-review', { hidden: true });
+  const bakeButton = h('button.button.secondary.small', { title: 'Teach the local anime model this exact character from its sheet (free, your GPU, about 15-25 minutes; other GPU work waits). It draws pictures first so you can approve them.' }, 'Bake character');
+  const bakeUrl = `/api/characters/${character.id}/bake`;
+  const bakeCall = async (suffix, body) => showBake(await api(`${bakeUrl}${suffix}`, { method: 'POST', body }));
   const showBake = (status) => {
     const job = status.job;
-    if (job?.state === 'running') {
+    const pictures = status.pictures ?? [];
+    bakePanel.hidden = !pictures.length;
+    bakePanel.replaceChildren();
+    if (job?.busy) {
       bakeButton.disabled = true;
       bakeLabel.textContent = `Baking: ${job.stage === 'drawing' ? 'drawing pictures' : 'training'} ${job.total ? `${job.done}/${job.total}` : '…'}`;
-      setTimeout(() => api(`/api/characters/${character.id}/bake`).then(showBake).catch(() => {}), 4000);
-      return;
+      setTimeout(() => api(bakeUrl).then(showBake).catch(() => {}), 4000);
+    } else {
+      bakeButton.disabled = locked || job?.state === 'review';
+      bakeButton.textContent = status.baked ? 'Re-bake character' : 'Bake character';
+      bakeLabel.textContent = job?.state === 'failed' ? `Baking failed: ${job.error}` : job?.state === 'review' ? 'Check the pictures below, then train.'
+        : status.baked ? `Baked ✓ (${new Date(status.baked.bakedAt).toLocaleDateString()})` : '';
     }
-    bakeButton.disabled = locked;
-    bakeButton.textContent = status.baked ? 'Re-bake character' : 'Bake character';
-    bakeLabel.textContent = job?.state === 'failed' ? `Baking failed: ${job.error}` : status.baked ? `Baked ✓ (${new Date(status.baked.bakedAt).toLocaleDateString()})` : '';
+    if (!pictures.length) return;
+    const idle = !job?.busy;
+    const review = status.review;
+    const rejected = pictures.filter((p) => p.approved === false);
+    const approved = pictures.filter((p) => p.approved === true);
+    const mark = (p, ok) => bakeCall('/review', ok ? { approved: [p.index] } : { rejected: [p.index] });
+    bakePanel.append(
+      h('p.muted', {}, 'These pictures are what the character is taught from. Approve the ones that look right (✓), reject wrong hair or eyes, extra limbs or a different outfit (✗). “Flip” also trains the mirrored picture: turn it off for asymmetric costumes.'),
+      h('div.bake-grid', {}, ...pictures.map((p) => h(`figure.bake-picture${p.approved === true ? '.approved' : p.approved === false ? '.rejected' : ''}`, {},
+        h('img', { src: p.url, alt: `Training picture ${p.index + 1}: ${p.framing}`, loading: 'lazy' }),
+        h('figcaption', {}, h('small.muted', {}, p.framing),
+          h('div.key-row', {},
+            h('button.button.small', { disabled: !idle, 'aria-pressed': String(p.approved === true), title: 'Approve', onclick: guard(() => mark(p, true)) }, '✓'),
+            h('button.button.small', { disabled: !idle, 'aria-pressed': String(p.approved === false), title: 'Reject', onclick: guard(() => mark(p, false)) }, '✗'),
+            h('label.muted', { title: 'Also train the mirrored copy of this picture' },
+              h('input', { type: 'checkbox', checked: p.mirror, disabled: !idle, onchange: guard((event) => bakeCall('/review', { mirror: { [p.index]: event.target.checked } })) }), ' Flip')))))),
+      h('div.key-row', {},
+        h('label.muted', {}, h('input', { type: 'checkbox', checked: review?.mirrorOk !== false, disabled: !idle,
+          onchange: guard((event) => bakeCall('/review', { mirrorOk: event.target.checked })) }), ' Symmetric design (train flipped copies)'),
+        h('button.button.secondary.small', { disabled: !idle, onclick: guard(() => bakeCall('/review', { approved: pictures.map((p) => p.index) })) }, 'Approve all'),
+        h('button.button.secondary.small', { disabled: !idle || !rejected.length, onclick: guard(() => bakeCall('/redraw', {})) }, `Redraw rejected (${rejected.length})`),
+        h('button.button.small', { disabled: !idle || approved.length < (review?.minApproved ?? 8), title: `Needs at least ${review?.minApproved ?? 8} approved pictures`,
+          onclick: guard(() => bakeCall('/train', {})) }, `Train on approved (${approved.length})`)));
   };
   bakeButton.onclick = guard(async () => {
     if (!character.references.length) throw new Error('Make a character sheet first; baking learns the character from it.');
-    showBake(await api(`/api/characters/${character.id}/bake`, { method: 'POST', body: {} }));
-    toast('Baking started. It runs on your GPU; you can keep working.');
+    await bakeCall('', {});
+    toast('Drawing training pictures on your GPU. You will review them before it trains.');
   });
-  if (character.kind === 'character') api(`/api/characters/${character.id}/bake`).then(showBake).catch(() => {});
+  if (character.kind === 'character') api(bakeUrl).then(showBake).catch(() => {});
   // A voice for this character's dialogue in storyboards.
   const voices = modelsFor('speech').flatMap(({ provider, model }) => (model.voices?.length ? model.voices : [null])
     .map((voice) => ({ value: JSON.stringify({ provider: provider.id, model: model.id, voice }), label: `${provider.label} · ${model.label}${voice ? ` · ${voice}` : ''}`, ready: provider.ready })));
@@ -149,7 +180,8 @@ function card(character) {
           if (!confirm(`Delete "${character.name}"? Its photos stay in the library.`)) return;
           await api(`/api/characters/${character.id}`, { method: 'DELETE' });
           await loadCharacters();
-        }) }, 'Delete'))));
+        }) }, 'Delete')),
+      character.kind === 'character' ? bakePanel : null));
 }
 
 function renderView() {

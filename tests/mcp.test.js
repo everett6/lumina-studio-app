@@ -23,7 +23,8 @@ test('MCP tools drive a running Lumina app end to end', async () => {
       'create_book', 'list_books', 'get_book', 'update_book', 'draft_bible', 'plan_pages', 'edit_page', 'revise_page', 'generate_illustration',
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
       'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
-      'update_character', 'make_character_sheet', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'inspect_video', 'interpolate_video']) {
+      'update_character', 'make_character_sheet', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'inspect_video', 'interpolate_video',
+      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -274,6 +275,35 @@ test('every MCP tool has a title, annotations and a cost note', async () => {
   assert.equal(by.join_storyboard.openWorldHint, false);
   assert.equal(by.update_shot.idempotentHint, true);
   assert.equal(by.create_project.destructiveHint, false);
+});
+
+test('take, repair, dialogue-revision and export tools call the right routes', async () => {
+  const calls = [];
+  const shot = { id: 's1', position: 1, details: { dialogue: [{ speaker: 'narrator', text: 'One', start: 1, assetId: 'a1', style: '' }, { speaker: 'narrator', text: 'Two', start: null, style: 'calm' }] } };
+  const { client } = await connectStub(null, { call: async (method, route, body) => {
+    calls.push([method, route, body]);
+    if (route === '/api/shots/s1') return method === 'GET' ? { shot } : { shots: [shot], sequence: {} };
+    if (route.endsWith('/takes')) return { position: 1, frames: [{ assetId: 'f1', current: true, source: 'frame', createdAt: 'x', path: '/p' }], clips: [] };
+    if (route.endsWith('/repair-frame')) return { generation: { id: 'g1', status: 'queued', provider: 'fal', model: 'm' } };
+    if (route.endsWith('/rerecord')) return { queued: [{ id: 'g2' }] };
+    if (route.endsWith('/export-project')) return { folder: '/x', files: ['timeline.json'] };
+    return { sequence: { settings: {} }, shots: [shot] };
+  } });
+  const run = (name, args) => client.callTool({ name, arguments: args });
+  assert.equal(parse(await run('list_shot_takes', { shotId: 's1' })).frames[0].assetId, 'f1');
+  await run('select_shot_take', { shotId: 's1', kind: 'clip', assetId: 'c1' });
+  await run('attach_clip_to_shot', { shotId: 's1', assetId: 'v1' });
+  assert.equal(parse(await run('repair_frame', { shotId: 's1', box: [0.1, 0.1, 0.5, 0.5], instruction: 'fix hand' })).generationId, 'g1');
+  assert.deepEqual(parse(await run('rerecord_line', { shotId: 's1', lineIndex: 1, style: 'whisper' })).queued, ['g2']);
+  await run('set_line_timing', { shotId: 's1', lineIndex: 1, start: 2.5 });
+  assert.equal((await run('set_line_timing', { shotId: 's1', lineIndex: 7, start: 1 })).isError, true);
+  assert.deepEqual(parse(await run('export_production', { storyboardId: 'b1' })).files, ['timeline.json']);
+  const by = (route) => calls.find((c) => c[1].endsWith(route));
+  assert.deepEqual(by('/takes/select')[2], { kind: 'clip', assetId: 'c1' });
+  assert.deepEqual(by('/attach-clip')[2], { assetId: 'v1' });
+  assert.deepEqual(by('/dialogue/1/rerecord')[2], { style: 'whisper' });
+  const patch = calls.find((c) => c[0] === 'PATCH');
+  assert.deepEqual(patch[2].details.dialogue.map((l) => l.start), [1, 2.5]);
 });
 
 test('server instructions are present, also for a server built without options (remote endpoint)', async () => {

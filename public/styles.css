@@ -586,3 +586,20 @@ input[type=range] { width: 100%; accent-color: #d6c27a; }
 .sb-mouth-picker img { width: 100%; height: 100%; object-fit: fill; user-select: none; }
 .sb-mouth-box { position: absolute; border: 2px solid var(--lime); background: rgba(212, 245, 121, .15); border-radius: 50%; pointer-events: none; }
 .sb-mouth-hint { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, .7); padding: 3px 10px; border-radius: 6px; font-size: 12px; pointer-events: none; }
+.sb-takes { position: relative; }
+.sb-takes > summary { list-style: none; cursor: pointer; display: inline-block; }
+.sb-takes > summary::-webkit-details-marker { display: none; }
+.sb-takes-list { position: absolute; z-index: 5; top: 100%; left: 0; min-width: 220px; max-height: 260px; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px; background: var(--panel, #fff); border: 1px solid var(--border, #ccc); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .18); }
+.sb-takes-group { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+
+/* Bake review: the drawn training pictures with approve / reject / mirror */
+.bake-review { margin-top: 12px; }
+.bake-review[hidden] { display: none; }
+.bake-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 8px 0; }
+.bake-picture { margin: 0; border: 2px solid var(--line-2); border-radius: 8px; overflow: hidden; }
+.bake-picture.approved { border-color: #3a9d5d; }
+.bake-picture.rejected { border-color: #c0484a; opacity: .55; }
+.bake-picture img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; }
+.bake-picture figcaption { padding: 4px 6px; }
+.bake-picture .key-row { gap: 6px; flex-wrap: wrap; }
+.bake-picture button[aria-pressed="true"] { outline: 2px solid currentColor; }

@@ -7,7 +7,7 @@ process.env.LUMINA_FAKE_BAKE = '1'; // a stand-in trainer: no GPU, writes an emp
 const settle = async (t, id) => {
   for (let i = 0; i < 100; i++) {
     const s = (await t.call('GET', `/api/characters/${id}/bake`)).body;
-    if (s.job?.state !== 'running') return s;
+    if (!s.job?.busy) return s;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error('bake did not finish');
@@ -26,7 +26,7 @@ test('bake character: needs a sheet, records the LoRA and trigger, can be remove
     await t.call('POST', `/api/generations/${sheet.id}/wait`, { timeoutMs: 10_000 });
     for (let i = 0; i < 50 && !(await t.call('GET', '/api/characters')).body.characters.find((c) => c.id === character.id).referenceAssetIds.length; i++) await new Promise((r) => setTimeout(r, 20));
 
-    const started = await t.call('POST', `/api/characters/${character.id}/bake`, {});
+    const started = await t.call('POST', `/api/characters/${character.id}/bake`, { auto: true });
     assert.equal(started.status, 202, JSON.stringify(started.body));
     const done = await settle(t, character.id);
     assert.equal(done.job.state, 'completed');
@@ -35,7 +35,7 @@ test('bake character: needs a sheet, records the LoRA and trigger, can be remove
 
     const removed = (await t.call('DELETE', `/api/characters/${character.id}/bake`)).body;
     assert.equal(removed.baked, null);
-    await t.call('POST', `/api/characters/${character.id}/bake`, {});
+    await t.call('POST', `/api/characters/${character.id}/bake`, { auto: true });
     await settle(t, character.id);
     assert.ok((await t.call('GET', `/api/characters/${character.id}/bake`)).body.baked, 'baked again');
     assert.equal((await t.call('DELETE', `/api/characters/${character.id}`)).status, 200);

@@ -12,11 +12,12 @@ const maxInlineImageBytes = 3 * 1024 * 1024;
 export const LUMINA_INSTRUCTIONS = `Lumina Studio makes images, books and films on the user's own computer and provider accounts.
 
 MAKING A FILM (the usual path)
-1. create_project, then create_character for each cast member (a locked "designTags" block keeps the design stable) and make_character_sheet; bake_character (local LoRA, free, ~15-25 min GPU) keeps anime faces on-model.
+1. create_project, then create_character for each cast member (a locked "designTags" block keeps the design stable) and make_character_sheet; bake_character (local LoRA, free, ~15-25 min GPU; draws pictures first, then you review them: reject bad ones, set mirror off for asymmetric designs, train on the approved) keeps anime faces on-model.
 2. create_storyboard (set look, targetMinutes, characterIds). Under a strict budget use plan=false and import_shot_plan with a plan you write yourself.
 3. Loop: film_next_step -> show its question and preview images to the user -> make the chosen call -> repeat. It proposes one stage at a time (plan, frames, approve frames, animate, review, voices, fix, join) and never spends anything itself.
 4. Look before you pay: preview_storyboard (all frames), preview_shot (one shot, with video samples and dialogue audio), inspect_video. Accept or reject with review_shot; fix with update_shot, trim_shot, move_shot, adjust_shot_look.
 5. join_storyboard makes the final MP4; enhance_video / interpolate_video are optional polish.
+6. Every frame and clip is kept as a take: list_shot_takes, select_shot_take (also undoes a bad revision), repair_frame for one area, rerecord_line / set_line_timing for dialogue, export_production for an editable folder.
 
 MONEY
 - Local work (local image/video models, still shots, lip sync, bake, join, colour grade, previews, estimates) is free. Provider work (frames, clips, speech, writer models, covers, upscales) can spend the user's credits.
@@ -68,6 +69,11 @@ const TOOL_META = {
   film_next_step: ['r', free, 'the tool call in the choice the user picks'], watch_jobs: ['r', free, 'film_next_step'],
   cancel_job: ['d', free, null], film_checklist: ['r', free, null], adjust_shot_look: ['i', free, 'join_storyboard'],
   move_shot: ['', free, 'join_storyboard'], trim_shot: ['i', free, 'join_storyboard'], set_character_voice: ['i', free, 'voice_dialogue'],
+  list_shot_takes: ['r', free, 'select_shot_take'], select_shot_take: ['i', local, 'review_shot'],
+  attach_clip_to_shot: ['i', local, 'review_shot'],
+  repair_frame: ['o', 'Free with a local inpaint model; a paid one (for example fal.ai FLUX.1 Fill pro) may spend credits (budget approvals apply).', 'get_generation, then select_shot_take'],
+  rerecord_line: ['o', 'May spend a little on the voice provider (free with a local voice).', 'get_generation or watch_jobs, then preview_shot'],
+  set_line_timing: ['i', free, 'preview_shot'], set_shot_timing: ['i', free, 'join_storyboard'], export_production: ['', free, null],
 };
 
 export function toolAnnotations(name) {
@@ -680,7 +686,7 @@ export function registerLuminaTools(server, client) {
 
   tool('update_shot', {
     title: 'Edit a storyboard shot',
-    description: 'Change a shot: description, camera move (a camera preset id from list_presets, or "" for none), length, and its continuity details (scene, cast and location ids, action, dialogue, start and end state, what must not change, video or free still shot, per-shot video model, lock). Locked shots refuse story changes unless locked: false is sent.',
+    description: 'Change a shot: description, camera move (a camera preset id from list_presets, or "" for none), length, and its continuity details (scene, cast and location ids, action, dialogue, start and end state, what must not change, video or free still shot, per-shot video model, anime timing: details.timing auto|ones|twos|threes and details.holds [{start, seconds}], see set_shot_timing; lock). Locked shots refuse story changes unless locked: false is sent.',
     inputSchema: {
       shotId: z.string(), description: z.string().max(2000).optional(), camera: z.string().optional(), duration: z.number().int().min(1).max(30).optional(),
       details: z.object({
@@ -689,7 +695,10 @@ export function registerLuminaTools(server, client) {
         dialogue: z.array(z.object({ speaker: z.string().describe('A character id or "narrator"'), text: z.string().max(1000), style: z.string().max(500).optional(), start: z.number().min(0).nullable().optional() })).max(12).optional(),
         method: z.enum(['video', 'still']).optional(), motion: z.string().optional().describe('Still-shot move: push-in, pull-out, pan-left, pan-right, rise, hold'),
         model: z.string().optional().describe('Per-shot video model as "provider|model" ("" = storyboard default)'),
-        interpolate: z.boolean().optional(), trimStart: z.number().min(0).max(10).optional(), muteClipSound: z.boolean().optional(), locked: z.boolean().optional(),
+        interpolate: z.boolean().optional(),
+        timing: z.enum(['auto', 'ones', 'twos', 'threes']).optional().describe('Anime exposure applied when the film is joined: "twos"/"threes" hold each drawing 2/3 frames (the classic anime rhythm, no smoothing), "ones" a new drawing every frame, "auto" leaves the clip as it is (anime storyboards are not auto-smoothed). Not applied to still shots\' camera moves.'),
+        holds: z.array(z.object({ start: z.number().min(0).max(600), seconds: z.number().min(0.04).max(10) })).max(8).optional().describe('Freeze the picture for `seconds` starting `start` seconds into the shot (after the trim); non-overlapping, up to 8. [] clears them.'),
+        trimStart: z.number().min(0).max(10).optional(), muteClipSound: z.boolean().optional(), locked: z.boolean().optional(),
       }).optional(),
     },
   }, safe(async ({ shotId, ...changes }) => ok(text(storyboardSummary(await client.call('PATCH', `/api/shots/${shotId}`, changes))))));
@@ -812,10 +821,23 @@ export function registerLuminaTools(server, client) {
 
   tool('bake_character', {
     title: 'Bake a character (LoRA)',
-    description: 'Train a small LoRA of one character for the local anime image model, from its character sheet and design tags, on the computer running Lumina (free, about 15-25 minutes of GPU time; other GPU work waits). Afterwards every local anime frame with that character uses it, so the face, hair and outfit stay on-model. Make a character sheet first (make_character_sheet). action: "start", "status" (progress; the default) or "remove" (deletes the trained LoRA: ask the user first).',
-    inputSchema: { characterId: z.string(), action: z.enum(['start', 'status', 'remove']).default('status') },
-  }, safe(async ({ characterId, action }) => ok(text(action === 'start' ? await client.call('POST', `/api/characters/${characterId}/bake`, {})
-    : action === 'remove' ? await client.call('DELETE', `/api/characters/${characterId}/bake`) : await client.call('GET', `/api/characters/${characterId}/bake`)))));
+    description: 'Train a small LoRA of one character for the local anime image model, from its character sheet and design tags, on the computer running Lumina (free, about 15-25 minutes of GPU time in all; other GPU work waits). Afterwards every local anime frame with that character uses it, so the face, hair and outfit stay on-model. Make a character sheet first (make_character_sheet). Baking has a REVIEW step so bad pictures are not learned: (1) action "start" draws about 16 training pictures and stops (job.state "drawing", then "review"); (2) action "status" (the default) returns the pictures with index, framing, url (open it with fetch to look at it) and local file path; (3) action "review" with approved:[indexes], rejected:[indexes] and optionally mirror:{index:boolean} or mirrorOk (default true: each picture is also trained flipped; set false for asymmetric costumes, scars, one-sided hair); (4) action "redraw" draws the rejected pictures (or the given indexes) again with new seeds, then review again; (5) action "train" trains on the approved pictures only (at least 8 must be approved; job.state "training", then "completed"). Look at the pictures yourself and reject ones with wrong hair or eye colour, extra limbs, merged characters or a different outfit. action "start" with auto:true skips the review (draws and trains on everything; not recommended). Action "remove" deletes the trained LoRA and any pictures: ask the user first.',
+    inputSchema: {
+      characterId: z.string(), action: z.enum(['start', 'status', 'review', 'redraw', 'train', 'remove']).default('status'),
+      auto: z.boolean().optional().describe('start only: draw and train in one go without the review step'),
+      approved: z.array(z.number().int().min(0)).optional(), rejected: z.array(z.number().int().min(0)).optional(),
+      mirror: z.record(z.string(), z.boolean()).optional().describe('review: per-picture mirror flag, e.g. {"3": false}'),
+      mirrorOk: z.boolean().optional().describe('start/review: false for asymmetric designs (no flipped copies at all)'),
+      indexes: z.array(z.number().int().min(0)).optional().describe('redraw: pictures to draw again (default: every rejected one)'),
+    },
+  }, safe(async ({ characterId, action, auto, approved, rejected, mirror, mirrorOk, indexes }) => {
+    const base = `/api/characters/${characterId}/bake`;
+    if (action === 'start') return ok(text(await client.call('POST', base, { auto, mirrorOk })));
+    if (action === 'review') return ok(text(await client.call('POST', `${base}/review`, { approved, rejected, mirror, mirrorOk })));
+    if (action === 'redraw') return ok(text(await client.call('POST', `${base}/redraw`, { indexes })));
+    if (action === 'train') return ok(text(await client.call('POST', `${base}/train`, {})));
+    return ok(text(await client.call(action === 'remove' ? 'DELETE' : 'GET', base)));
+  }));
 
   tool('lip_sync_shot', {
     title: 'Lip sync a shot',
@@ -1086,6 +1108,74 @@ export function registerLuminaTools(server, client) {
     return ok(text({ movedTo: index() + 1, order: detail.shots.map((s, i) => ({ position: i + 1, id: s.id, description: s.description.slice(0, 60) })) }));
   }));
 
+  // ---------- Takes, repairs, dialogue revision, editable export ----------
+  tool('list_shot_takes', {
+    title: 'List a shot\'s takes',
+    description: 'List every frame and clip a shot has had (newest first), with assetId, path, createdAt and which one is current. Includes repaired frames, attached clips and lip-synced clips. Look at them (inspect_video / preview_shot) and pick one with select_shot_take.',
+    inputSchema: { shotId: z.string() },
+  }, safe(async ({ shotId }) => {
+    const result = await client.call('GET', `/api/shots/${shotId}/takes`);
+    const slim = (t) => ({ assetId: t.assetId, source: t.source, createdAt: t.createdAt, current: t.current || undefined, generationId: t.generationId ?? undefined, path: t.path });
+    return ok(text({ shotId, position: result.position, frames: result.frames.map(slim), clips: result.clips.map(slim) }));
+  }));
+
+  tool('select_shot_take', {
+    title: 'Switch a shot to another take',
+    description: 'Make an earlier (or repaired, or attached) frame or clip the shot\'s current one. This is also how to undo a bad revision: pick the previous take. The shot\'s review goes back to pending and a chosen clip is re-checked (free technical checks). Choosing a frame does not remake the clip. Only assetIds from list_shot_takes are accepted.',
+    inputSchema: { shotId: z.string(), kind: z.enum(['frame', 'clip']), assetId: z.string() },
+  }, safe(async ({ shotId, kind, assetId }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/takes/select`, { kind, assetId }))))));
+
+  tool('attach_clip_to_shot', {
+    title: 'Attach an imported clip to a shot',
+    description: 'Use a video already in the project library (for example from import_video, or made with generate_video) as the shot\'s clip. It becomes a clip take and is selected; the shot\'s review goes back to pending and the free checks run. The video must be in the same project as the storyboard.',
+    inputSchema: { shotId: z.string(), assetId: z.string() },
+  }, safe(async ({ shotId, assetId }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/attach-clip`, { assetId }))))));
+
+  tool('repair_frame', {
+    title: 'Repair part of a shot\'s frame',
+    description: 'Repaint one area of the shot\'s current frame (a hand, a face, a prop) with an inpaint model, leaving the rest alone. box is [x1, y1, x2, y2] as fractions of the frame (0-1, origin top-left); instruction says what should appear there. Starts a job; the result becomes a NEW frame take that is not selected automatically: look at it, then choose it with select_shot_take (kind "frame") and re-animate the shot if the clip should follow. Refuses with a clear message when no inpaint-capable model is ready. Repairing a section of a CLIP is not supported (no replace_clip_section): repair the frame and generate a new clip instead.',
+    inputSchema: {
+      shotId: z.string(), box: z.array(z.number().min(0).max(1)).length(4), instruction: z.string().min(1).max(3000),
+      provider: z.string().optional().describe('Optional: force an inpaint provider'), model: z.string().optional(),
+    },
+  }, safe(async ({ shotId, box, instruction, provider, model }) => {
+    const { generation, alreadyRunning } = await client.call('POST', `/api/shots/${shotId}/repair-frame`, { box, instruction, provider, model });
+    return ok(text({ generationId: generation.id, status: generation.status, provider: generation.provider, model: generation.model, alreadyRunning: alreadyRunning || undefined,
+      note: 'Check with get_generation or watch_jobs; then list_shot_takes and select_shot_take to use the repaired frame.' }));
+  }));
+
+  tool('rerecord_line', {
+    title: 'Re-record one dialogue line',
+    description: 'Re-voice a single dialogue line of a shot (lineIndex counts from 0): its old recording is cleared and only that line is queued, optionally with a new acting direction in style (for example "whispering, tired"). The line\'s timing is kept (see set_line_timing). A lip-synced clip must be lip-synced again afterwards. Costs a little on the voice provider unless the voice is local.',
+    inputSchema: { shotId: z.string(), lineIndex: z.number().int().min(0).max(11), style: z.string().max(500).optional() },
+  }, safe(async ({ shotId, lineIndex, style }) => {
+    const result = await client.call('POST', `/api/shots/${shotId}/dialogue/${lineIndex}/rerecord`, style === undefined ? {} : { style });
+    return ok(text({ queued: result.queued.map((g) => g.id), note: 'Wait with watch_jobs, then preview_shot to hear it.' }));
+  }));
+
+  tool('set_line_timing', {
+    title: 'Set when a dialogue line starts',
+    description: 'Set when dialogue line lineIndex starts, in seconds from the start of the shot (start: null goes back to automatic placement: one line after another from 0.4 s). The recording is kept. This is the same as update_shot with details.dialogue[i].start. Works on locked shots and does not reset the review.',
+    inputSchema: { shotId: z.string(), lineIndex: z.number().int().min(0).max(11), start: z.number().min(0).max(120).nullable() },
+  }, safe(async ({ shotId, lineIndex, start }) => {
+    const { shot } = await client.call('GET', `/api/shots/${shotId}`);
+    const lines = shot?.details?.dialogue ?? [];
+    if (!lines[lineIndex]) throw new Error(`This shot has no dialogue line ${lineIndex} (it has ${lines.length}; lines count from 0).`);
+    const dialogue = lines.map((l, i) => ({ speaker: l.speaker, text: l.text, style: l.style, start: i === lineIndex ? start : l.start }));
+    const detail = await client.call('PATCH', `/api/shots/${shotId}`, { details: { dialogue } });
+    const updated = shotIn(detail, shotId);
+    return ok(text({ shotId, dialogue: updated?.details?.dialogue?.map((l, i) => ({ lineIndex: i, text: l.text.slice(0, 60), start: l.start, recorded: Boolean(l.assetId) })) }));
+  }));
+
+  tool('export_production', {
+    title: 'Export an editable production folder',
+    description: 'Write a folder on the computer running Lumina for finishing in an editor: every shot\'s selected frame and clip (original files), all dialogue recordings, the music/ambience, timeline.json (shot order, in/out, durations, trimStart, dialogue start times), timeline.edl (CMX 3600, 24 fps) and subtitles.srt built from the dialogue. Returns the folder and file list.',
+    inputSchema: { storyboardId: z.string() },
+  }, safe(async ({ storyboardId }) => {
+    const result = await client.call('POST', `/api/storyboards/${storyboardId}/export-project`, {});
+    return ok(text({ folder: result.folder, files: result.files }));
+  }));
+
   tool('trim_shot', {
     title: 'Trim or resize a shot',
     description: 'Cut the start off a shot\'s clip (trimStart, 0-10 seconds skipped from the beginning) and/or change its length (duration, 1-30 whole seconds). The clip itself is not regenerated; a longer duration than the clip may need a new take. Free.',
@@ -1097,9 +1187,23 @@ export function registerLuminaTools(server, client) {
     return ok(text({ shotId, position: shot?.position, duration: shot?.duration, trimStart: shot?.details?.trimStart }));
   }));
 
+  tool('set_shot_timing', {
+    title: 'Set a shot\'s anime timing (exposure)',
+    description: 'Choose how long each drawing stays on screen when the film is joined: timing "twos" or "threes" holds every drawing 2 or 3 frames at the film\'s frame rate (the anime rhythm; frame smoothing is skipped for the shot), "ones" draws a new picture every frame, "auto" (the default) leaves the clip as it is (in an anime storyboard it is not auto-smoothed either). holds freezes the picture for a span: [{start, seconds}] from the start of the shot after the trim (also no smoothing). Applies to the shot\'s drawn clip only, not to the camera move of a free still shot. Works on locked shots, does not reset the review; join_storyboard again to see it. Free.',
+    inputSchema: {
+      shotId: z.string(), timing: z.enum(['auto', 'ones', 'twos', 'threes']).optional(),
+      holds: z.array(z.object({ start: z.number().min(0).max(600), seconds: z.number().min(0.04).max(10) })).max(8).optional().describe('[] clears the holds'),
+    },
+  }, safe(async ({ shotId, timing, holds }) => {
+    if (timing === undefined && holds === undefined) throw new Error('Give timing and/or holds.');
+    const detail = await client.call('PATCH', `/api/shots/${shotId}`, { details: { ...(timing !== undefined ? { timing } : {}), ...(holds !== undefined ? { holds } : {}) } });
+    const shot = shotIn(detail, shotId);
+    return ok(text({ shotId, position: shot?.position, timing: shot?.details?.timing, holds: shot?.details?.holds }));
+  }));
+
   tool('set_character_voice', {
     title: 'Set a character\'s voice',
-    description: 'Choose the speech model and voice for a character (voices from list_models). New dialogue uses it. Lines already recorded keep the OLD voice: Lumina cannot clear a recording through the API, so to re-record a line, edit its text slightly (update_shot with the changed dialogue) and then voice_dialogue. With revoice: true, every line by this character that has no recording yet is queued now in the new voice (costs a little per line); the result lists which recorded lines were left alone.',
+    description: 'Choose the speech model and voice for a character (voices from list_models). New dialogue uses it. Lines already recorded keep the OLD voice: to re-record one, call rerecord_line (shotId, lineIndex). With revoice: true, every line by this character that has no recording yet is queued now in the new voice (costs a little per line); the result lists which recorded lines were left alone.',
     inputSchema: {
       characterId: z.string(), provider: z.string(), model: z.string(), voice: z.string().optional(),
       revoice: z.boolean().optional().describe('Also record this character\'s unrecorded lines now'),
@@ -1119,7 +1223,7 @@ export function registerLuminaTools(server, client) {
           }
         }
       }
-      result.note = result.keptOldVoice.length ? 'Recorded lines listed in keptOldVoice still have the old voice. To re-record one, change its text slightly with update_shot, then call voice_dialogue for that shot.' : undefined;
+      result.note = result.keptOldVoice.length ? 'Recorded lines listed in keptOldVoice still have the old voice. To re-record one, call rerecord_line with its shotId and lineIndex.' : undefined;
     }
     return ok(text(result));
   }));

@@ -1,10 +1,16 @@
 """Lumina Studio local GPU worker: "bake" a character into a small LoRA for the anime image model (Animagine XL 4.0).
 
 Same protocol as the other workers: one JSON request per line on stdin, JSON lines on stdout.
-  request:  {"id", "task": "bake", "refs": [paths], "tags": "1girl, silver hair, ...", "trigger": "lmn_rei",
-             "out": folder, "images"?: 16, "steps"?: 900, "rank"?: 16, "resolution"?: 896, "seed"?: n}
+  request:  {"id", "task": "bake" | "bake-draw" | "bake-redraw" | "bake-train", "refs": [paths],
+             "tags": "1girl, silver hair, ...", "trigger": "lmn_rei", "out": folder, "images"?: 16, "steps"?: 900,
+             "rank"?: 16, "resolution"?: 896, "seed"?: n}
   replies:  {"id", "progress": n, "total": n, "stage": "drawing" | "training"} ... then
             {"id", "done": true, "out": folder, "lora": path, "samples": [paths], "seconds": n} or {"id", "error": message}
+Baking with a review step (the user throws out bad pictures before they are learned):
+  bake-draw:   draws the pictures, writes <out>/pictures.json [{"file", "framing"}], replies {"done", "pictures": [...]}.
+  bake-redraw: {"indexes": [i], "seeds"?: [n]} draws those pictures again (new seeds), same reply.
+  bake-train:  {"pictures": [{"file", "framing", "mirror"?: bool}]} trains on exactly those pictures; "mirror" adds the
+               flipped copy (default true). "bake" does draw + train on everything in one go.
 
 1. Drawing: the character is drawn in varied framings, angles and expressions by Animagine itself, steered by the
    character sheet through IP-Adapter Plus (the same look the app already uses), so the training pictures are
@@ -60,8 +66,9 @@ def send(message):
     out.flush()
 
 
-def drawing(request, rid):
+def drawing(request, rid, only=None, seeds=None):
     # The training pictures, steered by the sheet; the pipeline is freed afterwards.
+    # `only` redraws just those picture numbers (with `seeds`, same order); the rest of the folder stays as it is.
     count = max(8, min(len(VARIETY), int(request.get("images") or 16)))
     folder = os.path.join(request["out"], "pictures")
     os.makedirs(folder, exist_ok=True)
@@ -78,20 +85,37 @@ def drawing(request, rid):
     pipe.vae.enable_tiling()
     seed = int(request.get("seed") or 0)
     pictures = []
-    for index, framing in enumerate(VARIETY[:count]):
+    wanted = list(range(count)) if only is None else [i for i in only if 0 <= i < count]
+    for done, index in enumerate(wanted):
+        framing = VARIETY[index]
         prompt = f"solo, {request['tags']}, {framing}, anime screencap, {QUALITY}"
         with torch.no_grad():
             image = pipe(prompt=prompt, negative_prompt=NEGATIVE, width=896, height=1152 if "full body" in framing else 1024 if "upper" in framing or "cowboy" in framing else 896,
-                         num_inference_steps=28, guidance_scale=5.0, generator=torch.Generator("cuda").manual_seed(seed + index), **extra).images[0]
+                         num_inference_steps=28, guidance_scale=5.0, generator=torch.Generator("cuda").manual_seed(int(seeds[done]) if seeds and done < len(seeds) else seed + index), **extra).images[0]
         path = os.path.join(folder, f"{index:02d}.png")
         image.save(path)
         pictures.append((path, framing))
-        send({"id": rid, "progress": index + 1, "total": count, "stage": "drawing"})
+        send({"id": rid, "progress": done + 1, "total": len(wanted), "stage": "drawing"})
         ease_off()
     del pipe
     gc.collect()
     torch.cuda.empty_cache()
     return pictures
+
+
+def write_pictures(request, drawn):
+    # pictures.json is the list the app shows for review; a redraw replaces only the entries it drew.
+    listing = os.path.join(request["out"], "pictures.json")
+    entries = {}
+    if os.path.exists(listing):
+        with open(listing, encoding="utf8") as handle:
+            entries = {os.path.basename(e["file"]): e for e in json.load(handle)}
+    for path, framing in drawn:
+        entries[os.path.basename(path)] = {"file": path, "framing": framing}
+    merged = [entries[name] for name in sorted(entries)]
+    with open(listing, "w", encoding="utf8") as handle:
+        json.dump(merged, handle)
+    return merged
 
 
 def encode_prompts(pipe, captions):
@@ -104,7 +128,7 @@ def encode_prompts(pipe, captions):
     return results
 
 
-def prepare(request, pictures, rid):
+def prepare(request, pictures, rid, mirrors=None):
     size = int(request.get("resolution") or 896) // 64 * 64
     pipe = StableDiffusionXLPipeline.from_pretrained(MODEL, torch_dtype=torch.float16, local_files_only=True)
     pipe.text_encoder.to("cuda"), pipe.text_encoder_2.to("cuda")
@@ -114,12 +138,14 @@ def prepare(request, pictures, rid):
     vae = pipe.vae.to("cuda", dtype=torch.float32)  # the SDXL VAE overflows in fp16
     samples = []
     with torch.no_grad():
-        for (path, _), (embeds, pooled) in zip(pictures, texts):
+        for (path, _), (embeds, pooled), mirror in zip(pictures, texts, mirrors or [True] * len(pictures)):
             image = Image.open(path).convert("RGB")
             scale = size / min(image.size)
             w, h = int(image.width * scale) // 64 * 64, int(image.height * scale) // 64 * 64
             image = image.resize((max(w, size), max(h, size)), Image.LANCZOS)
-            for flip in (False, True):  # mirrored copies double the data; anime designs are mostly symmetric
+            # Mirrored copies double the data; anime designs are mostly symmetric, but an asymmetric costume
+            # (one pauldron, a scar) must not be flipped, so each picture says whether its mirror is allowed.
+            for flip in ((False, True) if mirror else (False,)):
                 picture = image.transpose(Image.FLIP_LEFT_RIGHT) if flip else image
                 pixels = torch.from_numpy(np.asarray(picture).copy()).permute(2, 0, 1).float().div(127.5).sub(1)[None].to("cuda")
                 latents = vae.encode(pixels).latent_dist.sample() * vae.config.scaling_factor
@@ -192,9 +218,24 @@ def train(request, unet, scheduler, samples, rid):
 def run(request):
     rid = request["id"]
     started = time.time()
+    task = request.get("task") or "bake"
     os.makedirs(request["out"], exist_ok=True)
-    pictures = drawing(request, rid)
-    unet, scheduler, samples = prepare(request, pictures, rid)
+    if task in ("bake-draw", "bake-redraw"):
+        drawn = drawing(request, rid, request.get("indexes") if task == "bake-redraw" else None, request.get("seeds"))
+        listing = write_pictures(request, drawn)
+        send({"id": rid, "done": True, "out": request["out"], "pictures": listing, "seconds": round(time.time() - started, 1)})
+        return
+    mirrors = None
+    if task == "bake-train":
+        chosen = request.get("pictures") or []
+        if len(chosen) < 8:
+            raise ValueError("Training needs at least 8 approved pictures.")
+        pictures = [(e["file"], e.get("framing", "")) for e in chosen]
+        mirrors = [e.get("mirror", True) is not False for e in chosen]
+    else:
+        pictures = drawing(request, rid)
+        mirrors = [request.get("mirror", True) is not False] * len(pictures)  # one-shot bake: whole-character switch
+    unet, scheduler, samples = prepare(request, pictures, rid, mirrors)
     lora = train(request, unet, scheduler, samples, rid)
     del unet
     gc.collect()
