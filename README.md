@@ -146,6 +146,6 @@ For the `.deb`, use `/opt/Lumina Studio/lumina-studio` as the command. The helpe
 
 New installs enable the strict $12 budget by default. Explicit existing settings and spending history are preserved; check `budget_status` after upgrading if you previously disabled enforcement. The local remaining budget is not a provider credit balance. MCP `inspect_video` returns bounded timestamped thumbnails and technical metadata for clip review before accepting or purchasing another take.
 
-Local voices (Kokoro and Chatterbox) install with `scripts/setup-voices.sh`; see [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md#local-voices).
+Local voices (Kokoro and Chatterbox) install with `scripts/setup-voices.sh`, and the anime extras (Animagine, character sheets, Bake character, lip sync) with `scripts/setup-anime.sh`; see [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md#local-voices).
 
 Finishing measures recorded dialogue from the audio file and pauses if it exceeds its shot, retaining both audio and source clips. Revise the line or extend the shot before resuming; it does not silently cut speech.

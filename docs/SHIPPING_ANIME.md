@@ -88,7 +88,7 @@ Finishing now measures recorded dialogue directly and pauses on overrun instead 
 
 Two open-weight voice models run on this computer, free and offline:
 
-- **Kokoro 82M** (Apache 2.0): 33 preset voices (American, British, Japanese), on the CPU, faster than real time.
+- **Kokoro 82M** (Apache 2.0): American and British preset voices, on the CPU, faster than real time.
 - **Chatterbox** (MIT): acts the line in the chosen voice on the GPU (about 3.5 GB); the line's style text sets the intensity (for example "furious" or "calm"). It adds Resemble AI's inaudible watermark marking the audio as AI-made.
 
 Set them up once (about 3.6 GB of model files from Hugging Face, plus Python packages; no sudo):
@@ -102,3 +102,16 @@ They get their own Python environment in `~/.local/share/lumina-studio/voice-env
 Verified 2026-10-13 on the RTX 5070: a fresh environment built by the script spoke with both engines, and a two-shot storyboard with a Chatterbox character, a Kokoro character and a Kokoro narrator joined into an 11-second film whose Whisper transcript matched every line, in the right shot.
 
 Anime dialogue and voices are English only: the writer is told to write English, and the voice menus list only the American and British voices.
+
+## Anime extras: character sheets, Bake character, lip sync
+
+```bash
+scripts/setup-anime.sh
+```
+
+Run it after `scripts/setup-voices.sh`. It downloads Animagine XL 4.0 (about 7 GB, the anime image model), IP-Adapter Plus SDXL (about 3.2 GB, Apache-2.0) and installs the anime face detector (hysts/anime-face-detector, MIT, about 0.3 GB) into the voice environment. No sudo.
+
+- **Character sheet** (Characters tab): a front/side/back turnaround made from the character's **design tags** (a fixed tag block such as `1girl, silver hair, red eyes, black coat`). It becomes the character's first reference, and every local anime frame with that character follows it (IP-Adapter at 0.4: the look carries over, the shot keeps its own pose and scene).
+- **Bake character**: trains a small LoRA of the character on your GPU from its sheet (16 on-model pictures, then about 900 training steps; 9 minutes on an RTX 5070, about 7.5 GB of GPU memory). Afterwards that character stays on-model in every local anime frame. Other GPU work waits while it bakes; avoid running other heavy programs at the same time.
+- **Lip sync** is **off by default**. Turn it on per storyboard (Settings → *Lip sync (anime mouth movement)*). Five mouth shapes (closed, small, open "a", wide "i/e", round "u/o") are drawn in the shot's style and switched in time with the words, held two to three frames like theatrical anime, and follow the face when the head moves. Shots that will be lip-synced tell the video model to keep mouths still.
+
