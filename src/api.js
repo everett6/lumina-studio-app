@@ -400,8 +400,9 @@ export function createApiServer(ctx) {
         fields.voice = { provider, model, voice: found.voices?.includes(voice) ? voice : found.voices?.[0] ?? null };
       }
     }
+    if (body.designTags !== undefined) fields.designTags = String(body.designTags ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
     if (body.locked !== undefined) fields.locked = body.locked === true;
-    const changesLook = ['name', 'kind', 'description', 'referenceAssetIds'].some((key) => key in fields);
+    const changesLook = ['name', 'kind', 'description', 'referenceAssetIds', 'designTags'].some((key) => key in fields);
     if (existing?.locked && fields.locked !== false && changesLook) {
       throw new RequestError(409, `${existing.name} is locked (approved). Unlock it first if you really mean to change the look.`);
     }
@@ -417,13 +418,44 @@ export function createApiServer(ctx) {
     needCharacter(id);
     return { character: withReferences(repo.characters.update(id, characterFields(await readBody(req, 16_384), needCharacter(id)))) };
   });
+  // Character sheet: one turnaround (or expression) sheet generation whose result becomes the character's first reference.
+  const stableSeed = (id) => {
+    let hash = 2166136261;
+    for (const ch of id) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619) >>> 0;
+    return hash % 2147483646;
+  };
+  route('POST', `/api/characters/${uuid}/sheet`, async (req, [id]) => {
+    const body = await readBody(req, 16_384);
+    const character = needCharacter(id);
+    if (character.locked) throw new RequestError(409, `${character.name} is locked (approved). Unlock it first to add a new sheet.`);
+    const tags = character.designTags || character.description.replace(/\s+/g, ' ').slice(0, 600);
+    const views = body.expressions === true
+      ? 'expression sheet, multiple views, portrait, smile, angry, sad, surprised, closed eyes, open mouth'
+      : 'character sheet, reference sheet, multiple views, turnaround, front view, side view, from behind, full body, standing, same character, simple background, white background';
+    const animagine = providers.get('local')?.modelAvailable?.('animagine-xl-4') && providers.model('local', 'animagine-xl-4');
+    const [provider, modelId] = animagine && !body.provider ? ['local', 'animagine-xl-4'] : [body.provider, body.model];
+    const model = providers.model(provider, modelId);
+    const size = model?.sizes?.find((s) => s === '1344x768') ?? model?.sizes?.find((s) => { const [w, h] = s.split('x').map(Number); return w > h; });
+    const generation = generations.submit({
+      projectId: body.projectId, operation: 'generate', provider, model: modelId, prompt: [views, tags].filter(Boolean).join(', '),
+      size, seed: stableSeed(character.id),
+    });
+    // Attach the finished sheet in the background; the character may have been deleted or locked meanwhile.
+    jobs.waitFor(generation.id).then((done) => {
+      if (done?.status !== 'completed' || !done.assetId) return;
+      const current = repo.characters.get(character.id);
+      if (!current || current.locked) return;
+      repo.characters.update(character.id, { referenceAssetIds: [done.assetId, ...current.referenceAssetIds.filter((a) => a !== done.assetId)].slice(0, 4) });
+    }).catch(() => {});
+    return { status: 202, body: { generation } };
+  });
   route('DELETE', `/api/characters/${uuid}`, (req, [id]) => {
     needCharacter(id);
     return { deleted: repo.characters.remove(id) };
   });
 
   // ---------- Storyboards ----------
-  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings(), lipSync: process.env.LUMINA_EXPERIMENTAL_LIPSYNC === '1', maxShots, maxTargetSeconds, stillMotions }));
+  route('GET', '/api/storyboard-options', async () => ({ ffmpeg: await hasFfmpeg(), defaults: cleanSequenceSettings(), lipSync: true, maxShots, maxTargetSeconds, stillMotions }));
   route('GET', `/api/projects/${uuid}/storyboards`, (req, [projectId]) => {
     needProject(projectId);
     return { storyboards: repo.sequences.listByProject(projectId) };
@@ -556,7 +588,9 @@ export function createApiServer(ctx) {
   route('POST', `/api/shots/${uuid}/still`, (req, [id]) => sequences.renderStillShot(id));
   // Lip sync a shot's clip to its recorded dialogue (local and free). `box`: the mouth, as fractions of the frame.
   route('POST', `/api/shots/${uuid}/lipsync`, async (req, [id]) => {
-    if (process.env.LUMINA_EXPERIMENTAL_LIPSYNC !== '1') throw new RequestError(501, 'Lip sync is excluded from this release.');
+    // Anime lip sync (drawn mouth shapes) is on; the live-action model (MuseTalk) is still experimental.
+    const anime = sequences.needSequence(sequences.needShot(id).sequenceId).settings.look === 'anime';
+    if (!anime && process.env.LUMINA_EXPERIMENTAL_LIPSYNC !== '1') throw new RequestError(501, 'Lip sync works on anime storyboards (Look: anime). Live-action lip sync is still experimental.');
     const body = await readBody(req, 4096);
     try {
       return await sequences.lipSyncShot(id, { box: Array.isArray(body.box) ? body.box.slice(0, 4).map(Number) : null });

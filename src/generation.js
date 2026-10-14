@@ -84,7 +84,7 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
     const places = chosen.filter((c) => c.kind === 'location');
     const note = [
       people.length ? `Characters (keep each one exactly as described${shown}: same face, hair, body, clothes and colours): ${
-        people.map((c) => `${c.name} — ${c.description || 'as shown in the reference image'}`).join('; ')}.` : '',
+        people.map((c) => `${c.name} — ${[c.designTags, c.description].filter(Boolean).join('; ') || 'as shown in the reference image'}`).join('; ')}.` : '',
       places.length ? `Location (keep the layout, architecture, props and lighting exactly as described${shown}): ${
         places.map((c) => `${c.name} — ${c.description || 'as shown in the reference image'}`).join('; ')}.` : '',
     ].filter(Boolean).join('\n').slice(0, 3500);
@@ -162,8 +162,9 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
       if (media === 'video') Object.assign(params, applyCharacters(input, { model, inputAssetIds, canTakeImages: false }));
     } else {
       if (inputAssetIds.length > model.maxReferences) throw new RequestError(400, `${model.label} accepts at most ${model.maxReferences} input image(s).`);
-      const characters = applyCharacters(input, { model, inputAssetIds, canTakeImages: model.operations.includes('edit') });
-      operation = inputAssetIds.length ? (input.operation === 'variation' ? 'variation' : 'edit') : 'generate';
+      // `styleReferences`: the model takes pictures only as a look to follow (IP-Adapter), never as an image to edit.
+      const characters = applyCharacters(input, { model, inputAssetIds, canTakeImages: model.operations.includes('edit') || Boolean(model.styleReferences) });
+      operation = inputAssetIds.length && !model.styleReferences ? (input.operation === 'variation' ? 'variation' : 'edit') : 'generate';
       const needed = operation === 'generate' ? 'generate' : 'edit';
       if (!model.operations.includes(needed)) {
         throw new RequestError(400, needed === 'edit' ? `${model.label} cannot take input images. Choose an editing model.` : `${model.label} needs an input image.`);

@@ -130,16 +130,17 @@ export function registerLuminaTools(server, client) {
     title: 'List characters',
     description: 'List saved characters and products (name, look description, reference photo asset ids). Pass their ids as characterIds to generate_image, generate_video or create_storyboard to keep them consistent.',
     inputSchema: {},
-  }, safe(async () => ok(text((await client.call('GET', '/api/characters')).characters.map(({ id, name, kind, description, referenceAssetIds, voice, locked }) => ({ id, name, kind, description, referenceAssetIds, voice, locked }))))));
+  }, safe(async () => ok(text((await client.call('GET', '/api/characters')).characters.map(characterView)))));
 
   const characterSchema = {
     description: z.string().max(2500).optional().describe('What must never change: face, hair, build, clothing, colours (for a location: layout, architecture, props, light)'),
     kind: z.enum(['character', 'product', 'location']).optional(),
     referenceAssetIds: z.array(z.string()).max(6).optional().describe('Up to 6 reference images (front, side, three-quarter, back, close-up, full body)'),
     voice: z.object({ provider: z.string(), model: z.string(), voice: z.string().optional() }).nullable().optional().describe('Speech model for this character\'s dialogue'),
+    designTags: z.string().max(400).optional().describe('Locked anime tag block for consistent design, e.g. "1girl, silver hair, long hair, red eyes, black coat, red lining"'),
     locked: z.boolean().optional().describe('Locked (approved) looks cannot change until unlocked with locked: false'),
   };
-  const characterView = ({ id, name, kind, description, referenceAssetIds, voice, locked }) => ({ id, name, kind, description, referenceAssetIds, voice, locked });
+  const characterView = ({ id, name, kind, description, referenceAssetIds, voice, locked, designTags }) => ({ id, name, kind, description, designTags, referenceAssetIds, voice, locked });
   server.registerTool('create_character', {
     title: 'Create character or location',
     description: 'Save a reusable character, product or location: a name, a description of what must stay the same, and reference image asset ids from list_assets. Used in each shot to guide consistent appearances; generated results still need review.',
@@ -151,6 +152,12 @@ export function registerLuminaTools(server, client) {
     description: 'Change a saved character, product or location (look, references, voice, lock). A locked look is refused unless locked: false is sent in the same call.',
     inputSchema: { characterId: z.string(), name: z.string().min(1).max(80).optional(), ...characterSchema },
   }, safe(async ({ characterId, ...changes }) => ok(text(characterView((await client.call('PATCH', `/api/characters/${characterId}`, changes)).character)))));
+
+  server.registerTool('make_character_sheet', {
+    title: 'Make character sheet',
+    description: 'Generate a turnaround model sheet (front, side, back) or, with expressions: true, an expression sheet for a saved character from its designTags (or description), and add it as the character\'s first reference image when done. Uses the default anime model on this computer when installed, else the given or default provider (may cost money). Returns the queued generation; poll get_generation.',
+    inputSchema: { characterId: z.string(), projectId: z.string(), expressions: z.boolean().optional(), provider: z.string().optional(), model: z.string().optional() },
+  }, safe(async ({ characterId, ...rest }) => ok(text((await client.call('POST', `/api/characters/${characterId}/sheet`, rest)).generation))));
 
   server.registerTool('enhance_image', {
     title: 'Upscale or remove background',
@@ -664,9 +671,9 @@ export function registerLuminaTools(server, client) {
     return ok(text(await client.call('POST', `/api/assets/${assetId}/enhance`, { mode, height })));
   }));
 
-  if (process.env.LUMINA_EXPERIMENTAL_LIPSYNC === '1') server.registerTool('lip_sync_shot', {
+  server.registerTool('lip_sync_shot', {
     title: 'Lip sync a shot',
-    description: 'Make a storyboard shot\'s mouth move with its recorded dialogue, on the computer running Lumina (free). Anime look: three mouths are drawn in the shot\'s own style and switched with the voice (mouth flaps); live action: MuseTalk. Record the dialogue first (voice_dialogue). The mouth is found automatically; if that fails, pass mouthBox as fractions of the frame [x1, y1, x2, y2].',
+    description: 'Make a storyboard shot\'s mouth move with its recorded dialogue, on the computer running Lumina (free). Anime look (storyboard Look: anime): five mouth shapes (closed, small, open a, wide i/e, round u/o) are drawn in the shot\'s own style and switched in time with the words like theatrical anime: shapes follow the vowels, close on m/b/p and at pauses, held two frames or more, and follow the face as it moves. Live-action lip sync is experimental. Record the dialogue first (voice_dialogue). The mouth is found automatically; if that fails, pass mouthBox as fractions of the frame [x1, y1, x2, y2].',
     inputSchema: { shotId: z.string(), mouthBox: z.array(z.number().min(0).max(1)).length(4).optional() },
   }, safe(async ({ shotId, mouthBox }) => ok(text(storyboardSummary(await client.call('POST', `/api/shots/${shotId}/lipsync`, { box: mouthBox }))))));
 

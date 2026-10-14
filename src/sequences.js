@@ -552,7 +552,9 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       }
       const out = path.join(dir, 'synced.mp4');
       const mouths = mode === 'flaps' ? await drawMouths({ image: first, box: pixels, seed: sequence.settings.seed ?? 0, out: path.join(dir, 'mouths') }) : null;
-      await lipSync({ video, audio: voice, mode, box: mode === 'flaps' ? pixels : [pixels[0] - (pixels[2] - pixels[0]), pixels[1] - 2 * (pixels[3] - pixels[1]), pixels[2] + (pixels[2] - pixels[0]), pixels[3] + (pixels[3] - pixels[1])], mouths, out });
+      // The words and where they sit in the shot: the mouth shapes follow the vowels (a / i-e / u-o, closed on m-b-p).
+      const spoken = lines.map((line, i) => ({ text: line.text, at: times[i], seconds: lengths[i] }));
+      await lipSync({ lines: spoken, video, audio: voice, mode, box: mode === 'flaps' ? pixels : [pixels[0] - (pixels[2] - pixels[0]), pixels[1] - 2 * (pixels[3] - pixels[1]), pixels[2] + (pixels[2] - pixels[0]), pixels[3] + (pixels[3] - pixels[1])], mouths, out });
       const bytes = still
         ? await renderStill(out, { duration, motion: shot.details.motion, width: size.width, height: size.height, video: true })
         : await readFile(out);

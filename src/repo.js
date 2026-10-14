@@ -396,18 +396,18 @@ export function createRepo(db) {
   const characters = {
     get: (id) => toCharacter(db.prepare('SELECT * FROM characters WHERE id = ?').get(id)),
     list: () => db.prepare('SELECT * FROM characters ORDER BY name COLLATE NOCASE').all().map(toCharacter),
-    create({ name, kind = 'character', description = '', referenceAssetIds = [], voice = null }) {
+    create({ name, kind = 'character', description = '', referenceAssetIds = [], voice = null, designTags = '' }) {
       const id = randomUUID();
-      db.prepare('INSERT INTO characters (id, name, kind, description, reference_asset_ids, voice, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(id, cleanName(name, 'Unnamed'), kind, description, JSON.stringify(referenceAssetIds), voice ? JSON.stringify(voice) : null, now(), now());
+      db.prepare('INSERT INTO characters (id, name, kind, description, reference_asset_ids, voice, design_tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, cleanName(name, 'Unnamed'), kind, description, JSON.stringify(referenceAssetIds), voice ? JSON.stringify(voice) : null, designTags, now(), now());
       return characters.get(id);
     },
-    update(id, { name, kind, description, referenceAssetIds, voice, locked }) {
+    update(id, { name, kind, description, referenceAssetIds, voice, locked, designTags }) {
       const c = characters.get(id);
-      db.prepare('UPDATE characters SET name = ?, kind = ?, description = ?, reference_asset_ids = ?, voice = ?, locked = ?, updated_at = ? WHERE id = ?')
+      db.prepare('UPDATE characters SET name = ?, kind = ?, description = ?, reference_asset_ids = ?, voice = ?, locked = ?, design_tags = ?, updated_at = ? WHERE id = ?')
         .run(name === undefined ? c.name : cleanName(name, c.name), kind ?? c.kind, description ?? c.description,
           JSON.stringify(referenceAssetIds ?? c.referenceAssetIds), JSON.stringify(voice === undefined ? c.voice : voice),
-          locked === undefined ? (c.locked ? 1 : 0) : (locked ? 1 : 0), now(), id);
+          locked === undefined ? (c.locked ? 1 : 0) : (locked ? 1 : 0), designTags ?? c.designTags, now(), id);
       return characters.get(id);
     },
     remove: (id) => db.prepare('DELETE FROM characters WHERE id = ?').run(id).changes > 0,
@@ -494,7 +494,7 @@ export function createRepo(db) {
 
 const toCharacter = (r) => r && {
   id: r.id, name: r.name, kind: r.kind, description: r.description, referenceAssetIds: parse(r.reference_asset_ids, []),
-  voice: parse(r.voice, null), locked: Boolean(r.locked),
+  voice: parse(r.voice, null), locked: Boolean(r.locked), designTags: r.design_tags ?? '',
   createdAt: r.created_at, updatedAt: r.updated_at,
 };
 const toSequence = (r) => r && {

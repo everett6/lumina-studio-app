@@ -63,6 +63,37 @@ function card(character) {
     rows: 4, maxLength: 2500, value: character.description, disabled: locked, 'aria-label': 'Look', placeholder: placeholders[character.kind] ?? placeholders.character,
     onchange: () => save({ description: description.value }),
   });
+  const designTags = h('input', {
+    type: 'text', value: character.designTags ?? '', maxLength: 400, disabled: locked, 'aria-label': 'Design tags (anime)',
+    placeholder: '1girl, silver hair, long hair, red eyes, black coat, red lining', onchange: () => save({ designTags: designTags.value }),
+  });
+  // Character sheet: queue one generation, poll it, and the server adds the result as the first reference photo.
+  const sheetButtons = [];
+  const makeSheet = (expressions) => guard(async () => {
+    const projectId = state.project?.id;
+    if (!projectId) throw new Error('Open a project first.');
+    // The anime model on this computer is the server's default; otherwise use the first ready text-to-image model.
+    const options = modelsFor('generate').filter(({ provider }) => provider.ready);
+    const anime = options.find(({ provider, model }) => provider.id === 'local' && model.id === 'animagine-xl-4');
+    const choice = anime ? {} : { provider: options[0]?.provider.id, model: options[0]?.model.id };
+    if (!anime && !choice.provider) throw new Error('Add an image provider key (or install the local anime model) first.');
+    sheetButtons.forEach((b) => { b.disabled = true; });
+    try {
+      const { generation } = await api(`/api/characters/${character.id}/sheet`, { method: 'POST', body: { projectId, expressions, ...choice } });
+      toast(expressions ? 'Making the expression sheet…' : 'Making the character sheet…');
+      let current = generation;
+      while (['queued', 'running'].includes(current.status)) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        current = (await api(`/api/generations/${generation.id}`)).generation;
+      }
+      if (current.status !== 'completed') throw new Error(current.userError || 'The sheet could not be made.');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await loadCharacters();
+      toast('Sheet added to the references.');
+    } finally {
+      sheetButtons.forEach((b) => { b.disabled = false; });
+    }
+  })();
   // A voice for this character's dialogue in storyboards.
   const voices = modelsFor('speech').flatMap(({ provider, model }) => (model.voices?.length ? model.voices : [null])
     .map((voice) => ({ value: JSON.stringify({ provider: provider.id, model: model.id, voice }), label: `${provider.label} · ${model.label}${voice ? ` · ${voice}` : ''}`, ready: provider.ready })));
@@ -81,11 +112,16 @@ function card(character) {
     h('div.character-fields', {},
       h('div.character-head', {}, name, kind),
       h('label', {}, h('span.field-label', {}, 'LOOK (SENT WITH EVERY PROMPT)'), description),
+      character.kind === 'character' ? h('label', {}, h('span.field-label', {}, 'DESIGN TAGS (ANIME)'), designTags,
+        h('small.muted', {}, 'A fixed tag block (hair, eyes, outfit) reused for every sheet and anime frame so the design stays the same.')) : null,
       character.kind === 'location' ? null : h('label', {}, h('span.field-label', {}, 'VOICE (FOR DIALOGUE)'), voice),
       h('div.key-row', {},
         h('button.button.secondary.small', { onclick: () => { local.selected.add(character.id); emit('characters-selected'); emit('open-tab', 'create'); } }, 'Use in Create'),
         h('button.button.secondary.small', { title: locked ? 'Unlock to change the look on purpose' : 'Freeze the look (name, description, photos) so it cannot change by accident',
           onclick: () => save({ locked: !locked }) }, locked ? '🔒 Locked — unlock' : 'Lock look'),
+        character.kind === 'character' ? sheetButtons.push(
+          h('button.button.secondary.small', { disabled: locked, title: 'Front, side and back views on one sheet', onclick: () => makeSheet(false) }, 'Make character sheet'),
+          h('button.button.secondary.small', { disabled: locked, title: 'Smiling, angry, sad, surprised…', onclick: () => makeSheet(true) }, 'Expression sheet')) && sheetButtons : null,
         h('span.muted', {}, `${character.references.length}/${maxPhotos} reference photos`),
         h('button.text-button.danger', { onclick: guard(async () => {
           if (!confirm(`Delete "${character.name}"? Its photos stay in the library.`)) return;

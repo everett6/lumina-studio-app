@@ -211,6 +211,7 @@ const migrations = [
    ALTER TABLE sequences ADD COLUMN screenplay TEXT NOT NULL DEFAULT '';
    ALTER TABLE characters ADD COLUMN voice TEXT;
    ALTER TABLE characters ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;`,
+  `ALTER TABLE characters ADD COLUMN design_tags TEXT NOT NULL DEFAULT '';`,
 ];
 
 function migrate(db) {

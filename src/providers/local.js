@@ -208,11 +208,11 @@ export async function findMouth(image) {
 }
 export async function drawMouths({ image, box, prompt, seed, out }) {
   await gpu('anime', { task: 'mouths', image, box, prompt, seed: seed ?? 0, out });
-  return { closed: path.join(out, 'closed.png'), half: path.join(out, 'half.png'), open: path.join(out, 'open.png') };
+  return Object.fromEntries(['closed', 'small', 'a', 'i', 'u'].map((name) => [name, path.join(out, `${name}.png`)]));
 }
-export async function lipSync({ video, audio, mode, box, mouths, out }) {
+export async function lipSync({ video, audio, mode, box, mouths, lines = [], out }) {
   const flaps = mode !== 'musetalk';
-  await gpu('lipsync', { task: 'lipsync', mode: flaps ? 'flaps' : 'musetalk', video, audio, box, mouths, out }, null, { exclusive: !flaps });
+  await gpu('lipsync', { task: 'lipsync', mode: flaps ? 'flaps' : 'musetalk', video, audio, box, mouths, lines, out }, null, { exclusive: !flaps });
   return out;
 }
 process.once('exit', () => Object.values(workers).forEach((w) => { w.stop().catch(() => {}); }));
@@ -290,7 +290,7 @@ export default {
     },
     {
       id: 'animagine-xl-4', label: 'Animagine XL 4.0 · anime frames (your GPU)', operations: ['generate'],
-      sizes: ['1344x768', '768x1344', '1024x1024'], qualities: [], maxReferences: 0, seed: true,
+      sizes: ['1344x768', '768x1344', '1024x1024'], qualities: [], maxReferences: 2, styleReferences: true, seed: true,
       note: 'Anime still frames on this computer (SDXL fine-tune, OpenRAIL++): about half a minute each. Use them as start frames for Wan clips. Download: hf download cagliostrolab/animagine-xl-4.0 (7 GB).',
     },
     {
@@ -307,14 +307,22 @@ export default {
   },
   // A still frame: Animagine XL for anime frames, otherwise Wan generating a single frame.
   cancellable: true,
-  async run({ prompt, size, seed, model, onProgress, signal }) {
+  async run({ prompt, size, seed, model, images = [], onProgress, signal }) {
     const anime = model === 'animagine-xl-4';
     if (anime && !animeModelInstalled()) throw new ProviderError('provider', `Animagine XL 4.0 is not downloaded yet: hf download ${animeRepo} (7 GB).`);
     if (!anime && !modelInstalled()) throw new ProviderError('provider', `Wan 2.2 is not downloaded yet: hf download ${repoId} (34 GB).`);
     const [width, height] = anime ? animeSizeFor(size) : sizeFor(size);
     return inTemp(async (dir) => {
       const out = path.join(dir, 'frame.png');
-      if (anime) await gpu('anime', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 28, out }, log('anime frame', onProgress), { signal });
+      // Character sheets / reference pictures steer the anime model's character look (IP-Adapter, when downloaded).
+      const refs = [];
+      for (const [index, image] of images.slice(0, 2).entries()) {
+        if (!image?.bytes) continue;
+        const file = path.join(dir, `ref-${index}.png`);
+        await writeFile(file, image.bytes);
+        refs.push(file);
+      }
+      if (anime) await gpu('anime', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 28, out, refs }, log('anime frame', onProgress), { signal });
       else await gpu('wan', { task: 'image', prompt, width, height, seed: seed ?? 0, steps: 40, out }, log('frame', onProgress), { signal });
       return { bytes: await readFile(out), usage: { local: true, cost: 0 } };
     });
