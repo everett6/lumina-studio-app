@@ -143,37 +143,49 @@ MOUTHS = [("closed", "closed mouth, :|", 1.0, 1.0), ("small", "parted lips, smal
 
 
 def mouths(request):
-    # Redraw only the mouth (a soft ellipse): the mouth box is first painted over with clean skin, then each shape is
-    # drawn on that inside its own area (film anime keeps mouths small), at full strength so the shapes really differ.
-    # The rest of the picture is pasted back untouched; the same seed keeps the drawing style the same.
+    # Redraw only the mouth, the way a "face detailer" works: the area around the mouth is cut out and enlarged to
+    # 1024 px so the model draws crisp line art even when the face is small in the frame (a wide Wan shot), then shrunk
+    # back and pasted in. The mouth box is first painted over with clean skin, then each shape is drawn on that inside
+    # its own area (film anime keeps mouths small), at full strength so the shapes really differ; the same seed keeps
+    # the drawing style the same. Outside the mouth the picture is untouched.
     p = load()
     use_ip_adapter(p, False)
     inpaint = StableDiffusionXLInpaintPipeline(**{k: v for k, v in p.components.items() if k not in ("image_encoder", "feature_extractor")})
-    image = Image.open(request["image"]).convert("RGB")
+    full = Image.open(request["image"]).convert("RGB")
     x1, y1, x2, y2 = [int(v) for v in request["box"]]
+    # The crop: a square about four mouths wide around the mouth (enough face for the model to see whose mouth it is).
+    side = int(min(max(full.size), max(256, 4 * max(x2 - x1, y2 - y1))))
     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    left = int(min(max(0, cx - side / 2), max(0, full.width - side)))
+    top = int(min(max(0, cy - side / 2), max(0, full.height - side)))
+    crop = full.crop((left, top, left + side, top + side))
+    size = 1024
+    k = size / side
+    image = crop.resize((size, size), Image.LANCZOS)
+    bx1, by1, bx2, by2 = (x1 - left) * k, (y1 - top) * k, (x2 - left) * k, (y2 - top) * k
+    mx, my = (bx1 + bx2) / 2, (by1 + by2) / 2
 
     def mask_for(fw, fh):
-        # The whole box is repainted (so the old mouth is gone) but the new shape can only grow inside fw x fh of it.
         mask = Image.new("L", image.size, 0)
-        ImageDraw.Draw(mask).ellipse((cx - (x2 - x1) * fw / 2, cy - (y2 - y1) * fh / 2, cx + (x2 - x1) * fw / 2, cy + (y2 - y1) * fh / 2), fill=255)
-        return mask.filter(ImageFilter.GaussianBlur(max(2, (x2 - x1) // 60)))
-    width, height = (image.width // 8) * 8, (image.height // 8) * 8
-    started = time.time()
-    os.makedirs(request["out"], exist_ok=True)
+        ImageDraw.Draw(mask).ellipse((mx - (bx2 - bx1) * fw / 2, my - (by2 - by1) * fh / 2, mx + (bx2 - bx1) * fw / 2, my + (by2 - by1) * fh / 2), fill=255)
+        return mask.filter(ImageFilter.GaussianBlur(max(2, (bx2 - bx1) // 40)))
+
     def draw(base, tags, mask, negative=""):
         with torch.no_grad():
             drawn = inpaint(prompt=f"{tags}, {request.get('prompt') or 'anime screencap, face focus'}, {QUALITY}", negative_prompt=NEGATIVE + ", realistic lips, extra teeth" + negative,
-                            image=base.resize((width, height)), mask_image=mask.resize((width, height)), strength=1.0, num_inference_steps=28,
-                            guidance_scale=5.0, width=width, height=height,
+                            image=base, mask_image=mask, strength=1.0, num_inference_steps=28, guidance_scale=5.0, width=size, height=size,
                             generator=torch.Generator("cuda").manual_seed(int(request.get("seed") or 0) % (2**31))).images[0]
-        return Image.composite(drawn.resize(image.size), base, mask)
+        return Image.composite(drawn, base, mask)
 
-    # A face without a mouth first (the old mouth fully gone), then every shape on it inside its own area.
+    started = time.time()
+    os.makedirs(request["out"], exist_ok=True)
     blank = draw(image, "no mouth, blank face", mask_for(1.0, 1.0), ", mouth, lips")
+    paste_mask = mask_for(1.05, 1.05).resize((side, side), Image.LANCZOS)
     for index, (name, tags, fw, fh) in enumerate(MOUTHS):
-        result = draw(blank, tags, mask_for(fw, fh))
-        result.save(os.path.join(request["out"], f"{name}.png"))
+        result = draw(blank, tags, mask_for(fw, fh)).resize((side, side), Image.LANCZOS)
+        picture = full.copy()
+        picture.paste(result, (left, top), paste_mask)
+        picture.save(os.path.join(request["out"], f"{name}.png"))
         send({"id": request["id"], "progress": index + 1, "total": len(MOUTHS)})
     torch.cuda.empty_cache()
     send({"id": request["id"], "done": True, "out": request["out"], "seconds": round(time.time() - started, 1)})

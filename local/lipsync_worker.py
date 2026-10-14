@@ -613,7 +613,7 @@ def flaps(request):
     # Anime lip sync: five drawn mouths (closed, small, a, i, u; the start frame redrawn by the anime image model) are
     # switched on a timeline built from the spoken text (or the voice's vowel colour), with film timing: the shape
     # leads the sound by a frame and is held two to three frames. The mouth patch follows the face (landmarks, else
-    # template matching), scaled with the head. Frames outside the spoken lines keep the original drawing.
+    # template matching), scaled with the head. Frames outside the spoken lines get the closed mouth.
     started = time.time()
     frames, fps = read_frames(request["video"])
     if not frames:
@@ -632,9 +632,10 @@ def flaps(request):
         shapes[name] = cv2.resize(image, (w, h), interpolation=cv2.INTER_AREA)
     x1, y1, x2, y2 = [int(v * s) for v, s in zip(request["box"], (sx, sy, sx, sy))]
     # A margin around the drawn mouth, so the original mouth stays covered when the face shifts a little.
+    # Extra room below: a generated clip may drop the jaw open by itself, and that mouth must be covered too.
     grow = 0.15
     gx, gy = grow * (x2 - x1), grow * (y2 - y1)
-    x1, y1, x2, y2 = max(0, int(x1 - gx)), max(0, int(y1 - gy)), min(w, int(x2 + gx)), min(h, int(y2 + gy))
+    x1, y1, x2, y2 = max(0, int(x1 - gx)), max(0, int(y1 - gy)), min(w, int(x2 + gx)), min(h, int(y2 + 3 * gy))
     mw, mh = x2 - x1, y2 - y1
     box_centre = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
     tracked, face_frames = landmark_track(frames)
@@ -652,20 +653,22 @@ def flaps(request):
         method = "template"
     mask = np.zeros((mh, mw), np.float32)
     cv2.ellipse(mask, (mw // 2, mh // 2), (mw // 2 - 1, mh // 2 - 1), 0, 0, 360, 1.0, -1)
-    mask = cv2.GaussianBlur(mask, (0, 0), max(1.5, mw / 40))
+    # Opaque inside, feathered only at the rim: the clip's own mouth must not show through the drawing.
+    mask = np.clip(cv2.GaussianBlur(mask, (0, 0), max(1.5, mw / 40)) * 1.6 - 0.3, 0, 1)
     patches = {name: image[y1:y2, x1:x2].astype(np.float32) for name, image in shapes.items()}
     states = mouth_timeline(request["audio"], fps, len(frames), request.get("lines"))
     sys.stderr.write(f"flaps timeline ({method}, {face_frames} face frames): {timeline_string(states)}\n")
     result = [frame.copy() for frame in frames]
     synced = 0
     for i, frame in enumerate(result):
-        if states[i] is None:
-            continue
+        # Outside the lines the closed drawing is used too: a generated clip moves the mouth by itself, and that
+        # movement must never show as talking while nobody speaks.
+        state = states[i] or "closed"
         s, (cx, cy) = float(scale[i]), centres[i]
         dw, dh = int(math.ceil(mw * s)) + 4, int(math.ceil(mh * s)) + 4
         ox, oy = int(round(cx - dw / 2)), int(round(cy - dh / 2))
         matrix = np.float32([[s, 0, (cx - ox) - s * mw / 2], [0, s, (cy - oy) - s * mh / 2]])
-        patch = cv2.warpAffine(patches[states[i]], matrix, (dw, dh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        patch = cv2.warpAffine(patches[state], matrix, (dw, dh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
         alpha = cv2.warpAffine(mask, matrix, (dw, dh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)[..., None]
         fx1, fy1, fx2, fy2 = max(0, ox), max(0, oy), min(w, ox + dw), min(h, oy + dh)
         if fx2 <= fx1 or fy2 <= fy1:

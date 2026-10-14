@@ -416,6 +416,9 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       looks[sequence.settings.look] ?? '',
       sequence.settings.lookBible,
       kind === 'clip' ? 'Keep every person exactly as in the start frame: same face, hair, clothes and colours; same set and lighting.' : '',
+      // Anime lip sync draws the mouth afterwards: a clip that animates talking by itself would fight the drawn mouth.
+      kind === 'clip' && sequence.settings.look === 'anime' && sequence.settings.lipSync !== false && d.dialogue.length
+        ? 'Mouths stay closed and still (the dialogue is added afterwards); move the head, eyes, hair and body instead.' : '',
       d.forbidden ? `Must not change: ${d.forbidden}` : '',
       ...d.themes.map((name) => themeVisual(sequence.settings.themes, name)).filter(Boolean),
       consistency,
