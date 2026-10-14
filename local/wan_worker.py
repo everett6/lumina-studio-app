@@ -85,7 +85,7 @@ def load():
 
     def prepare_then_free(*args, **kwargs):
         result = prepare(*args, **kwargs)
-        if not low_vram:  # in low-memory mode the VAE already lives in main memory
+        if not low_vram and not streaming:  # in the other modes the VAE already returns to main memory by itself
             i2v.vae.to("cpu")
         torch.cuda.empty_cache()
         return result
@@ -97,7 +97,7 @@ def load():
 
 
 def write_video(frames, path, fps):
-    # frames: float array [T, H, W, 3] in 0..1 → H.264, near-lossless (CRF 10), so later steps lose nothing.
+    # frames: uint8 [T, H, W, 3] (or float in 0..1) → H.264, near-lossless (CRF 10), so later steps lose nothing.
     t, h, w, _ = frames.shape
     encoder = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
@@ -105,7 +105,7 @@ def write_video(frames, path, fps):
         stdin=subprocess.PIPE,
     )
     for frame in frames:
-        encoder.stdin.write((frame.clip(0, 1) * 255 + 0.5).astype("uint8").tobytes())
+        encoder.stdin.write((frame if frame.dtype == "uint8" else (frame.clip(0, 1) * 255 + 0.5).astype("uint8")).tobytes())
     encoder.stdin.close()
     if encoder.wait() != 0:
         raise RuntimeError("ffmpeg could not encode the clip")
@@ -126,15 +126,36 @@ def use_streaming():
     global streaming
     if streaming:
         return
+    from diffusers.hooks import apply_group_offloading
+
+    gpu, cpu = torch.device("cuda"), torch.device("cpu")
     t2v = pipes["t2v"]
     for pipe in pipes.values():
         pipe.remove_all_hooks()
-        pipe._exclude_from_cpu_offload = ["transformer"]
-    t2v.transformer.to("cpu")
+    for module in (t2v.text_encoder, t2v.transformer, t2v.vae):
+        module.to(cpu)
     torch.cuda.empty_cache()
-    t2v.transformer.enable_group_offload(onload_device=torch.device("cuda"), offload_device=torch.device("cpu"),
-                                         offload_type="block_level", num_blocks_per_group=1, use_stream=True,
-                                         record_stream=True, low_cpu_mem_usage=True)
+    t2v.transformer.enable_group_offload(onload_device=gpu, offload_device=cpu, offload_type="block_level", num_blocks_per_group=1,
+                                         use_stream=True, record_stream=True, low_cpu_mem_usage=True)
+    # The text encoder has no top-level block list, so at block level it moves to the GPU whole when it runs and back
+    # afterwards: the same turn-taking as before (diffusers cannot mix that offload with streaming).
+    apply_group_offloading(t2v.text_encoder, onload_device=gpu, offload_device=cpu, offload_type="block_level", num_blocks_per_group=1)
+    # The VAE (2.7 GB) comes to the GPU whole for its two moments, encoding the start frame and decoding the result,
+    # and leaves right after: never next to the text encoder. (Group offloading would copy the decoder over again for
+    # every tile of every frame: measured, a 5 s decode then took over 10 minutes instead of seconds.)
+    vae = t2v.vae
+
+    def on_gpu(method):
+        def call(x, *args, **kwargs):
+            vae.to(gpu)
+            try:
+                return method(x.to(gpu), *args, **kwargs)
+            finally:
+                vae.to(cpu)
+                torch.cuda.empty_cache()
+        return call
+
+    vae.encode, vae.decode = on_gpu(vae.encode), on_gpu(vae.decode)
     streaming = True
 
 
@@ -143,7 +164,7 @@ def use_main_memory():
     # to the GPU just before it runs, overlapped with the work on a separate CUDA stream.
     global low_vram, offloaded
     low_vram = True
-    if offloaded:
+    if offloaded or streaming:  # streaming already keeps the whole model in main memory
         return
     from diffusers.hooks import apply_group_offloading
 
@@ -174,7 +195,8 @@ def run(request):
     else:
         if STREAM and task == "video":
             use_streaming()  # clips: the transformer streams block by block (see use_streaming)
-        pipe.enable_model_cpu_offload()  # one part on the GPU at a time: text encoder, (transformer), then VAE
+        if not streaming:
+            pipe.enable_model_cpu_offload()  # one part on the GPU at a time: text encoder, then transformer, then VAE
     steps = int(request.get("steps") or 50)
     rid = request["id"]
 
@@ -195,7 +217,12 @@ def run(request):
     else:
         if request.get("image"):
             args["image"] = Image.open(request["image"]).convert("RGB")
-        frames = pipe(num_frames=int(request.get("frames") or 121), output_type="np", **args).frames[0]
+        # The frames stay on the GPU until they are 8-bit pixels: 121 frames at 1280x704 are ~0.3 GB that way, against
+        # several GB of float copies in main memory (which, next to the model, could exhaust a 29 GB machine).
+        video = pipe(num_frames=int(request.get("frames") or 121), output_type="pt", **args).frames[0]
+        frames = (video.clamp(0, 1) * 255 + 0.5).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        del video
+        torch.cuda.empty_cache()
         write_video(frames, request["out"], int(request.get("fps") or 24))
     torch.cuda.empty_cache()
     send({"id": rid, "done": True, "out": request["out"], "seconds": round(time.time() - started, 1)})
@@ -203,8 +230,8 @@ def run(request):
 
 def release():
     # After a failure, put every part of the model back in main memory so the GPU is free again.
-    if not offloaded:
-        for part in ("text_encoder", "vae") if streaming else ("text_encoder", "transformer", "vae"):
+    if not offloaded and not streaming:  # offloaded and streamed parts return to main memory by themselves
+        for part in ("text_encoder", "transformer", "vae"):
             module = getattr(pipes.get("t2v"), part, None)
             if module is not None:
                 module.to("cpu")
@@ -227,8 +254,8 @@ for line in sys.stdin:
             out_of_memory = isinstance(error, torch.cuda.OutOfMemoryError) or (
                 isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
             )
+            traceback.print_exc()  # also for out-of-memory: where it ran out matters
             if not out_of_memory:
-                traceback.print_exc()
                 send({"id": request.get("id"), "error": f"{type(error).__name__}: {error}"})
         if not failed:
             break
