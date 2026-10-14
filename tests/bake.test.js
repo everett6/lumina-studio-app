@@ -35,6 +35,11 @@ test('bake character: needs a sheet, records the LoRA and trigger, can be remove
 
     const removed = (await t.call('DELETE', `/api/characters/${character.id}/bake`)).body;
     assert.equal(removed.baked, null);
+    await t.call('POST', `/api/characters/${character.id}/bake`, {});
+    await settle(t, character.id);
+    assert.ok((await t.call('GET', `/api/characters/${character.id}/bake`)).body.baked, 'baked again');
+    assert.equal((await t.call('DELETE', `/api/characters/${character.id}`)).status, 200);
+    assert.equal(t.app.repo.settings.get(`bake:${character.id}`, null), null, 'deleting the character removes its LoRA record');
     assert.equal((await t.call('POST', `/api/characters/${'0'.repeat(8)}-0000-0000-0000-${'0'.repeat(12)}/bake`, {})).status, 404);
   } finally {
     await t.close();

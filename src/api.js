@@ -456,9 +456,12 @@ export function createApiServer(ctx) {
     }).catch(() => {});
     return { status: 202, body: { generation } };
   });
-  route('DELETE', `/api/characters/${uuid}`, (req, [id]) => {
+  route('DELETE', `/api/characters/${uuid}`, async (req, [id]) => {
     needCharacter(id);
-    return { deleted: repo.characters.remove(id) };
+    const deleted = repo.characters.remove(id);
+    // Its baked LoRA goes too (a bake still running cleans up after itself when it finishes).
+    if (bake.status(id).job?.state !== 'running') await bake.remove(id);
+    return { deleted };
   });
 
   // ---------- Storyboards ----------
