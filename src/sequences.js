@@ -3,7 +3,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { extractJson } from './books.js';
-import { confirmSpend, nearestDuration, RequestError } from './generation.js';
+import { confirmSpend, nearestDuration, providerPrompt, RequestError } from './generation.js';
 import { presets } from './presets.js';
 import { priceFor } from './pricing.js';
 import { colourStats, curveFilter, matchCurve } from './grade.js';
@@ -200,6 +200,7 @@ export function skipsSmoothing(details, look, wanted = false) {
 
 export function cleanShotDetails(input = {}, base = {}) {
   const str = (key, max) => (typeof input[key] === 'string' ? input[key].slice(0, max) : base[key] ?? '');
+  const directorText = (key) => input[key] === null ? null : typeof input[key] === 'string' ? input[key] : base[key] ?? null;
   const ids = (key, max) => (Array.isArray(input[key]) ? [...new Set(input[key].filter((id) => typeof id === 'string'))].slice(0, max) : base[key] ?? []);
   const dialogue = Array.isArray(input.dialogue)
     ? input.dialogue.slice(0, 12).map((line, i) => {
@@ -215,6 +216,9 @@ export function cleanShotDetails(input = {}, base = {}) {
     }).filter((line) => line.text)
     : base.dialogue ?? [];
   return {
+    directorFramePrompt: directorText('directorFramePrompt'), directorClipPrompt: directorText('directorClipPrompt'),
+    directorNegative: directorText('directorNegative'),
+    directorKeepAutomatic: typeof input.directorKeepAutomatic === 'boolean' ? input.directorKeepAutomatic : base.directorKeepAutomatic ?? true,
     scene: str('scene', 80), locationId: typeof input.locationId === 'string' || input.locationId === null ? input.locationId : base.locationId ?? null,
     characterIds: ids('characterIds', 6), action: str('action', 1000), dialogue,
     themes: Array.isArray(input.themes) ? [...new Set(input.themes.filter((t) => typeof t === 'string').map((t) => t.trim().slice(0, 60)).filter(Boolean))].slice(0, 4) : base.themes ?? [],
@@ -419,7 +423,8 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   // Shot edits. Locked shots keep their story (description, dialogue, start/end state) until unlocked on purpose.
   function updateShot(shotId, body) {
     const shot = needShot(shotId);
-    const story = ['description', 'scene', 'locationId', 'characterIds', 'action', 'dialogue', 'startState', 'endState', 'forbidden', 'method', 'themes'];
+    const story = ['description', 'scene', 'locationId', 'characterIds', 'action', 'dialogue', 'startState', 'endState', 'forbidden', 'method', 'themes',
+      'directorFramePrompt', 'directorClipPrompt', 'directorNegative', 'directorKeepAutomatic'];
     // Moving a dialogue line in time (only `start` differs) is not a story change: no lock, no review reset.
     const sameWords = Array.isArray(body.details?.dialogue) && body.details.dialogue.length === shot.details.dialogue.length
       && body.details.dialogue.every((l, i) => l?.text?.trim() === shot.details.dialogue[i].text && (l.speaker ?? 'narrator') === shot.details.dialogue[i].speaker && (l.style ?? shot.details.dialogue[i].style ?? '') === (shot.details.dialogue[i].style ?? ''));
@@ -467,8 +472,10 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   // The words every frame and clip prompt shares, in a fixed order, so nothing about the look is left to chance.
   function promptFor(sequence, shot, kind) {
     const d = shot.details;
+    const directed = d[kind === 'frame' ? 'directorFramePrompt' : 'directorClipPrompt'];
+    if (directed !== null && directed !== undefined && d.directorKeepAutomatic === false) return directed;
     const location = d.locationId ? repo.characters.get(d.locationId) : null;
-    return [
+    const automatic = [
       kind === 'frame' ? 'Film still, the opening frame of this shot.' : '',
       shot.description,
       d.action ? `Action: ${d.action}` : '',
@@ -485,6 +492,53 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       ...d.themes.map((name) => themeVisual(sequence.settings.themes, name)).filter(Boolean),
       consistency,
     ].filter(Boolean).join('\n').slice(0, 3900);
+    const prompt = directed == null ? automatic : [
+      directed,
+      looks[sequence.settings.look] ?? '', sequence.settings.lookBible,
+      kind === 'clip' ? 'Keep every person exactly as in the start frame: same face, hair, clothes and colours; same set and lighting.' : '',
+      consistency,
+    ].filter(Boolean).join('\n');
+    // The provider/job interface has no negative channel: exclusions travel as plain prompt instructions.
+    const composed = d.directorNegative ? `${prompt}\nAvoid: ${d.directorNegative}` : prompt;
+    if (composed.length > 4000) throw new RequestError(400, `The ${kind} prompt plus automatic blocks exceeds 4000 characters. Shorten the direction or use keepAutomatic: false.`);
+    return composed;
+  }
+
+  const verbatim = (shot, kind) => shot.details.directorKeepAutomatic === false
+    && shot.details[kind === 'frame' ? 'directorFramePrompt' : 'directorClipPrompt'] != null;
+  const promptPresets = (sequence, shot, kind) => verbatim(shot, kind) ? []
+    : [kind === 'clip' ? shot.camera : null, sequence.settings.style].filter(Boolean);
+  const promptCast = (sequence, shot, kind) => verbatim(shot, kind) ? [] : shotCast(sequence, shot);
+
+  // Read-only counterpart of generation.applyCharacters: mirror its identity note, including whether the selected
+  // image model can attach reference images. providerPrompt supplies the same camera/style fragments as jobs use.
+  // No job is submitted, no references are read from disk, and no writer or provider is called.
+  function composedPrompts(shotId, changes = {}) {
+    const current = needShot(shotId);
+    // Optional proposed edits let the director route validate a batch without writing any of it.
+    const shot = { ...current, ...changes, details: cleanShotDetails(changes.details ?? {}, current.details) };
+    const sequence = needSequence(shot.sequenceId);
+    const compose = (kind) => {
+      const chosen = [...new Set(promptCast(sequence, shot, kind))].map((id) => repo.characters.get(id));
+      if (chosen.some((c) => !c)) throw new RequestError(404, 'A character no longer exists.');
+      chosen.sort((a, b) => (a.kind === 'location') - (b.kind === 'location'));
+      const refs = [...new Set(chosen.flatMap((c) => c.referenceAssetIds))]
+        .filter((id) => asset(id)?.mimeType?.startsWith('image/'));
+      const model = kind === 'frame' ? providers?.model(sequence.settings.imageProvider, sequence.settings.imageModel) : null;
+      const attached = kind === 'frame' && (model?.operations.includes('edit') || model?.styleReferences)
+        ? refs.slice(0, model.maxReferences).length : 0;
+      const shown = attached ? ' and as shown in the reference image(s)' : '';
+      const people = chosen.filter((c) => c.kind !== 'location');
+      const places = chosen.filter((c) => c.kind === 'location');
+      const characterNote = [
+        people.length ? `Characters (keep each one exactly as described${shown}: same face, hair, body, clothes and colours): ${
+          people.map((c) => `${c.name} — ${[c.designTags, c.description].filter(Boolean).join('; ') || 'as shown in the reference image'}`).join('; ')}.` : '',
+        places.length ? `Location (keep the layout, architecture, props and lighting exactly as described${shown}): ${
+          places.map((c) => `${c.name} — ${c.description || 'as shown in the reference image'}`).join('; ')}.` : '',
+      ].filter(Boolean).join('\n').slice(0, 3500);
+      return providerPrompt({ prompt: promptFor(sequence, shot, kind).trim(), params: { presets: promptPresets(sequence, shot, kind), characterNote } });
+    };
+    return { shotId: shot.id, framePrompt: compose('frame'), clipPrompt: compose('clip') };
   }
 
   // A job already queued or running for this shot is returned instead of starting (and paying for) another.
@@ -502,8 +556,8 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     return {
       generation: generations.submit({
         projectId: sequence.projectId, prompt: promptFor(sequence, shot, 'frame'), ...choice(sequence, 'image', override),
-        size: aspects[sequence.settings.aspect], quality: 'high', presets: sequence.settings.style ? [sequence.settings.style] : [],
-        characterIds: shotCast(sequence, shot), seed: sequence.settings.seed ?? undefined, bookTarget: `shot-image:${shot.id}`,
+        size: aspects[sequence.settings.aspect], quality: 'high', presets: promptPresets(sequence, shot, 'frame'),
+        characterIds: promptCast(sequence, shot, 'frame'), seed: sequence.settings.seed ?? undefined, bookTarget: `shot-image:${shot.id}`,
         idempotencyKey: override.idempotencyKey,
       }),
     };
@@ -546,7 +600,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       generation: generations.submit({
         projectId: sequence.projectId, operation: 'video', prompt: promptFor(sequence, shot, 'clip'), provider, model,
         duration: shot.duration, aspect: sequence.settings.aspect, resolution: override.resolution, inputAssetIds: start ? [start] : [], endFrameAssetId,
-        presets: [shot.camera, sequence.settings.style].filter(Boolean), characterIds: shotCast(sequence, shot), seed: sequence.settings.seed ?? undefined,
+        presets: promptPresets(sequence, shot, 'clip'), characterIds: promptCast(sequence, shot, 'clip'), seed: sequence.settings.seed ?? undefined,
         bookTarget: `shot-video:${shot.id}`, idempotencyKey: override.idempotencyKey,
       }),
     };
@@ -1324,7 +1378,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
 
   return {
     subtitleCues: (id) => subtitleCues(shotsOf(needSequence(id).id)), filmCredits, srtTime,
-    detail, create, update, plan, importPlan, updateShot, review, approveFrame, generateFrame, animate, renderStillShot, runChecks, makeDialogue, rerecordLine, lipSyncShot, takes, selectTake, attachClip, repairFrame, exportProject,
+    detail, create, update, plan, importPlan, updateShot, review, approveFrame, composedPrompts, generateFrame, animate, renderStillShot, runChecks, makeDialogue, rerecordLine, lipSyncShot, takes, selectTake, attachClip, repairFrame, exportProject,
     stitch, produce, stopProduction, stopAllProductions, onGenerationUpdate, idle, needShot, needSequence, outputSize, shotFingerprint,
   };
 }
