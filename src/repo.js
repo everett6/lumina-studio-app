@@ -504,6 +504,8 @@ export function createRepo(db) {
   };
 
   const filmEvents = {
+    append: (filmId, revision, kind, data) => db.prepare('INSERT INTO film_events (film_id, revision, at, kind, data) VALUES (?, ?, ?, ?, ?)')
+      .run(filmId, revision, now(), kind, JSON.stringify(data)),
     list: (filmId) => db.prepare('SELECT * FROM film_events WHERE film_id = ? ORDER BY id').all(filmId).map((r) => ({
       id: r.id, filmId: r.film_id, revision: r.revision, at: r.at, kind: r.kind, data: parse(r.data, {}),
     })),
@@ -564,7 +566,50 @@ export function createRepo(db) {
     },
   };
 
-  return { transaction: (fn) => transaction(db, fn), projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth, characters, sequences, shots, canvasTemplates, spend, approvals, films, filmEvents };
+  // Canon accessors never expose updates to historical documents or job snapshots.
+  const canonHeads = {
+    get: (id) => {
+      const r = db.prepare('SELECT * FROM film_canons WHERE sequence_id = ?').get(id);
+      return r && { storyboardId: r.sequence_id, revision: r.revision, locked: Boolean(r.locked), lockReason: r.lock_reason, createdAt: r.created_at, updatedAt: r.updated_at };
+    },
+    create(id) {
+      db.prepare('INSERT INTO film_canons (sequence_id, revision, created_at, updated_at) VALUES (?, 1, ?, ?)').run(id, now(), now());
+    },
+    advance: (id, expectedRevision) => db.prepare('UPDATE film_canons SET revision = revision + 1, updated_at = ? WHERE sequence_id = ? AND revision = ? AND locked = 0')
+      .run(now(), id, expectedRevision).changes > 0,
+    lock: (id, locked, reason) => db.prepare('UPDATE film_canons SET locked = ?, lock_reason = ?, updated_at = ? WHERE sequence_id = ?')
+      .run(locked ? 1 : 0, reason, now(), id),
+  };
+  const canonRevisions = {
+    get: (id, revision) => {
+      const r = db.prepare('SELECT * FROM canon_revisions WHERE sequence_id = ? AND revision = ?').get(id, revision);
+      return r && { storyboardId: r.sequence_id, revision: r.revision, canon: parse(r.document, {}), globals: parse(r.globals, {}), referenceRevisions: parse(r.reference_revisions, []), source: r.source, createdAt: r.created_at };
+    },
+    insert(id, revision, { canon, globals, referenceRevisions, source }) {
+      db.prepare('INSERT INTO canon_revisions (sequence_id, revision, document, globals, reference_revisions, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, revision, JSON.stringify(canon), JSON.stringify(globals), JSON.stringify(referenceRevisions), source, now());
+    },
+  };
+  const canonEvents = {
+    append(id, revision, action, data) {
+      db.prepare('INSERT INTO canon_events (sequence_id, revision, action, data, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(id, revision, action, JSON.stringify(data), now());
+    },
+    list: (id) => db.prepare('SELECT * FROM canon_events WHERE sequence_id = ? ORDER BY id').all(id).map((r) => ({ id: r.id, revision: r.revision, action: r.action, data: parse(r.data, {}), createdAt: r.created_at })),
+  };
+  const canonSnapshots = {
+    get: (id) => {
+      const r = db.prepare('SELECT * FROM canon_snapshots WHERE id = ?').get(id);
+      return r && { id: r.id, storyboardId: r.sequence_id, revision: r.revision, hash: r.hash, ...parse(r.payload, {}), createdAt: r.created_at };
+    },
+    insert({ id, storyboardId, revision, hash, ...payload }) {
+      db.prepare('INSERT INTO canon_snapshots (id, sequence_id, revision, hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, storyboardId, revision, hash, JSON.stringify(payload), now());
+      return canonSnapshots.get(id);
+    },
+  };
+
+  return { transaction: (fn) => transaction(db, fn), projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth, characters, sequences, shots, canvasTemplates, spend, approvals, films, filmEvents, canonHeads, canonRevisions, canonEvents, canonSnapshots };
 }
 
 const toCharacter = (r) => r && {

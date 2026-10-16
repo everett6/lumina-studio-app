@@ -249,6 +249,58 @@ const migrations = [
    CREATE TRIGGER film_events_no_update BEFORE UPDATE ON film_events
      BEGIN SELECT RAISE(ABORT, 'film_events is append-only'); END;
    -- Events are never edited; they go only with their film (deleting a storyboard cascades).`,
+  // Film canon documents, source baselines and job snapshots are immutable; only the head/lock is mutable.
+  `CREATE TABLE film_canons (
+     sequence_id TEXT PRIMARY KEY REFERENCES sequences(id) ON DELETE CASCADE,
+     revision INTEGER NOT NULL CHECK(revision >= 1),
+     locked INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0, 1)),
+     lock_reason TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE TABLE canon_revisions (
+     sequence_id TEXT NOT NULL REFERENCES film_canons(sequence_id) ON DELETE CASCADE,
+     revision INTEGER NOT NULL CHECK(revision >= 1),
+     document TEXT NOT NULL CHECK(json_valid(document)),
+     globals TEXT NOT NULL CHECK(json_valid(globals)),
+     reference_revisions TEXT NOT NULL CHECK(json_valid(reference_revisions)),
+     source TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     PRIMARY KEY(sequence_id, revision)
+   );
+   CREATE TABLE canon_events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     sequence_id TEXT NOT NULL REFERENCES film_canons(sequence_id) ON DELETE CASCADE,
+     revision INTEGER NOT NULL,
+     action TEXT NOT NULL,
+     data TEXT NOT NULL CHECK(json_valid(data)),
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX canon_events_sequence ON canon_events(sequence_id, id);
+   CREATE TABLE canon_snapshots (
+     id TEXT PRIMARY KEY,
+     sequence_id TEXT NOT NULL REFERENCES film_canons(sequence_id) ON DELETE CASCADE,
+     revision INTEGER NOT NULL,
+     hash TEXT NOT NULL,
+     payload TEXT NOT NULL CHECK(json_valid(payload)),
+     created_at TEXT NOT NULL,
+     FOREIGN KEY(sequence_id, revision) REFERENCES canon_revisions(sequence_id, revision)
+   );
+   CREATE TRIGGER canon_revisions_no_update BEFORE UPDATE ON canon_revisions
+     BEGIN SELECT RAISE(ABORT, 'canon revisions are immutable'); END;
+   CREATE TRIGGER canon_revisions_no_delete BEFORE DELETE ON canon_revisions
+     WHEN EXISTS (SELECT 1 FROM film_canons WHERE sequence_id = OLD.sequence_id)
+     BEGIN SELECT RAISE(ABORT, 'canon revisions are immutable'); END;
+   CREATE TRIGGER canon_snapshots_no_update BEFORE UPDATE ON canon_snapshots
+     BEGIN SELECT RAISE(ABORT, 'canon snapshots are immutable'); END;
+   CREATE TRIGGER canon_snapshots_no_delete BEFORE DELETE ON canon_snapshots
+     WHEN EXISTS (SELECT 1 FROM film_canons WHERE sequence_id = OLD.sequence_id)
+     BEGIN SELECT RAISE(ABORT, 'canon snapshots are immutable'); END;
+   CREATE TRIGGER canon_events_no_update BEFORE UPDATE ON canon_events
+     BEGIN SELECT RAISE(ABORT, 'canon events are append-only'); END;
+   CREATE TRIGGER canon_events_no_delete BEFORE DELETE ON canon_events
+     WHEN EXISTS (SELECT 1 FROM film_canons WHERE sequence_id = OLD.sequence_id)
+     BEGIN SELECT RAISE(ABORT, 'canon events are append-only'); END;`,
 ];
 
 function migrate(db) {
