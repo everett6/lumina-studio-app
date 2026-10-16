@@ -78,6 +78,10 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       cancelled();
       if (allowanceKey !== null && key !== allowanceKey) throw Object.assign(new Error('The OpenRouter key changed during preflight. No paid request was submitted; check the new key allowance before retrying.'), { category: 'credit_limit' });
       const { params } = job;
+      const submission = {
+        resumeJob: job.providerJob ?? null,
+        onSubmitted: (info) => repo.generations.update(id, { providerJob: { ...info, submittedAt: new Date().toISOString() } }),
+      };
       let output;
       if (toolOperations.includes(job.operation)) {
         if (typeof provider.tool !== 'function') throw Object.assign(new Error('This provider has no image tools'), { category: 'invalid_request' });
@@ -85,7 +89,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         if (params.maskAssetId && !maskAsset) throw Object.assign(new Error('The mask was deleted.'), { category: 'invalid_request' });
         output = await provider.tool({
           key, model: job.model, operation: job.operation, image: images[0], prompt, scale: params.scale,
-          mask: maskAsset ? await assetStore.read(maskAsset) : null, onProgress, signal,
+          mask: maskAsset ? await assetStore.read(maskAsset) : null, onProgress, signal, ...submission,
         });
       } else if (job.operation === 'speech') {
         output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style, onProgress, signal });
@@ -95,15 +99,14 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
         output = await provider.video({
           key, model: job.model, prompt, image: images[0] ?? null, endImage: endAsset ? await assetStore.read(endAsset) : null, seed: params.seed,
           duration: params.duration, aspect: params.aspect, resolution: params.resolution,
-          resumeJob: job.providerJob ?? null, onProgress, signal,
-          onSubmitted: (info) => repo.generations.update(id, { providerJob: { ...info, submittedAt: new Date().toISOString() } }),
+          onProgress, signal, ...submission,
         });
       } else {
         // Characters baked into a LoRA (src/bake.js) travel with the job; providers without LoRA support ignore them.
         // 0.6 keeps the character without overcooking it; bakes recorded with the old 0.8 default are read as 0.6.
         const loras = (params.characterIds ?? []).map((cid) => repo.settings.get(`bake:${cid}`, null)).filter(Boolean)
           .map((lora) => (lora.scale === 0.8 ? { ...lora, scale: 0.6 } : lora));
-        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, loras, onProgress, signal });
+        output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, loras, onProgress, signal, ...submission });
       }
       cancelled();
       cancellers.delete(id); // saving the result: too late to cancel
@@ -153,15 +156,15 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
   return {
     events,
     progress: progressOf,
-    // Stop a job: a queued one never starts (any provider); a running one only when it runs on this computer.
+    // Queued jobs may already be submitted after recovery; cancelling cannot undo that paid work.
     cancel(id) {
       const job = repo.generations.get(id);
       if (!job) return { ok: false, status: 404, reason: 'Generation not found.' };
       if (job.status === 'queued') {
         const at = queue.indexOf(id);
         if (at >= 0) queue.splice(at, 1);
-        const ledger = budget?.settle(job, { outcome: 'refused' });
-        repo.generations.update(id, { status: 'failed', errorCategory: 'cancelled', userError: 'Cancelled before it started.', completedAt: new Date().toISOString(),
+        const ledger = budget?.settle(job, { outcome: job.providerJob ? 'unknown' : 'refused' });
+        repo.generations.update(id, { status: 'failed', errorCategory: 'cancelled', userError: job.providerJob ? 'Stopped tracking this job; the provider may still run and charge it.' : 'Cancelled before it started.', completedAt: new Date().toISOString(),
           billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : job.billing });
         const final = repo.generations.get(id);
         events.emit('update', final);

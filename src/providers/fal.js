@@ -52,12 +52,12 @@ export default {
     { id: 'fal-ai/kling-video/v3/pro/image-to-video', label: 'Kling 3 Pro (image to video)', operations: ['video'], sizes: [], qualities: [], maxReferences: 1, requiresImage: true, durations: [5, 10], aspects: [], note: 'Animate a still image' },
   ],
   // Image tools. Each endpoint has its own input shape and returns either `image` or `images[0]`.
-  async tool({ key, model, operation, image, mask, prompt, scale }) {
+  async tool({ key, model, operation, image, mask, prompt, scale, resumeJob, onSubmitted }) {
     const image_url = toDataUrl(image);
     const input = operation === 'upscale' ? { image_url, scale, output_format: 'png' }
       : operation === 'remove-background' ? { image_url, output_format: 'png' }
         : { image_url, mask_url: toDataUrl(mask), prompt, output_format: 'png' };
-    const result = await queued({ key, model, input, timeoutMs: 300_000 });
+    const result = await queued({ key, model, input, timeoutMs: 300_000, resumeJob, onSubmitted });
     const url = result?.image?.url ?? result?.images?.[0]?.url;
     if (!url) throw new ProviderError(result?.has_nsfw_concepts?.[0] ? 'policy' : 'provider', 'fal returned no image');
     return { bytes: await downloadBytes(url), usage: null };
@@ -86,10 +86,10 @@ export default {
     }
     return { ok: true, verified: false };
   },
-  async run({ key, model, prompt, size, images }) {
+  async run({ key, model, prompt, size, images, resumeJob, onSubmitted }) {
     const build = inputs[model];
     if (!build) throw new ProviderError('invalid_request', 'Unknown fal model', { detail: model });
-    const result = await queued({ key, model, input: build({ prompt, size, images }), timeoutMs: 300_000 });
+    const result = await queued({ key, model, input: build({ prompt, size, images }), timeoutMs: 300_000, resumeJob, onSubmitted });
     const url = result?.images?.[0]?.url;
     if (!url) throw new ProviderError(result?.has_nsfw_concepts?.[0] ? 'policy' : 'provider', 'fal returned no image');
     return { bytes: await downloadBytes(url), usage: null };

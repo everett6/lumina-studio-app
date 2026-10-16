@@ -91,6 +91,15 @@ export function cleanSequenceSettings(input = {}, base = {}) {
   };
 }
 
+// Normalize and select only settings consumed by the film pipeline (including smoothing's look).
+function joinSettingsFingerprint(settings) {
+  const clean = cleanSequenceSettings(settings);
+  return createHash('sha256').update(JSON.stringify([
+    clean.music, clean.ambience, clean.clipVolume, clean.finish, clean.outputHeight, clean.aspect,
+    clean.transition, clean.colorMatch, clean.upscale, clean.interpolateFps, clean.narratorVoice, clean.look,
+  ])).digest('hex');
+}
+
 // Everything a shot must keep: who and where, what happens, what is said, how it starts and ends, what must not
 // change. `locked` freezes the story fields (description, dialogue, states) until a deliberate revision.
 // Themes are written as "Name: how it shows on screen" (the part after the colon is optional).
@@ -252,9 +261,12 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const shots = shotsOf(id);
     let clock = 0;
     // The joined film is stale when any shot changed after it was made. shots.updated_at moves on every edit
-    // (trim, grade, duration, reorder, new frame/clip/dialogue take), so it is the one reliable signal.
+    // (trim, grade, duration, reorder, new frame/clip/dialogue take). Settings are tracked separately.
     const joinedAt = asset(sequence.outputAssetId)?.createdAt ?? null;
-    const joinStale = Boolean(joinedAt) && shots.some((s) => s.updatedAt && s.updatedAt > joinedAt);
+    const joinedSettings = repo.settings.get(`joinSettings:${id}`, null);
+    const joinStale = Boolean(joinedAt) && (joinedSettings?.outputAssetId !== sequence.outputAssetId
+      || joinedSettings?.fingerprint !== joinSettingsFingerprint(sequence.settings)
+      || shots.some((s) => s.updatedAt && s.updatedAt > joinedAt));
     return {
       sequence: { ...sequence, joinStale, outputPath: asset(sequence.outputAssetId)?.path ?? null, join: joining.get(id) ?? null, production: producing.get(id) ?? null,
         enhance: sequence.outputAssetId ? enhancer?.status(sequence.outputAssetId) ?? null : null, themeCoverage: themeCoverage(sequence.settings.themes, shots) },
@@ -850,6 +862,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         if (Math.abs(info.duration - joined.duration) > 1 / rate + 0.005) throw new Error('Final film duration differs from the edit timeline by more than one frame.');
         if (!info.hasAudio) throw new Error('Final film lost its mixed audio track.');
         const saved = await assetStore.save({ bytes: await readFile(finished), projectId: sequence.projectId, kind: 'video', label: `${sequence.title} (film)` });
+        repo.settings.set(`joinSettings:${id}`, { outputAssetId: saved.id, fingerprint: joinSettingsFingerprint(settings) });
         repo.sequences.update(id, { outputAssetId: saved.id });
         Object.assign(state, { state: 'completed', duration: info.duration, width: info.width, height: info.height, done: state.total, step: 'Done' });
         const production = producing.get(id);
@@ -1032,7 +1045,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const shot = getShot(id);
     if (!shot) return;
     if (generation.status === 'completed') {
-      if (kind === 'shot-image') repo.shots.update(id, { imageAssetId: generation.assetId, review: { ...shot.review, frameApproved: null } });
+      if (kind === 'shot-image') repo.shots.update(id, { imageAssetId: generation.assetId, review: { ...shot.review, frameApproved: null, status: 'pending' } });
       if (kind === 'shot-video') {
         repo.shots.update(id, { videoAssetId: generation.assetId, review: { status: 'pending' } });
         track(runChecks(id).catch((error) => log.error?.('Shot checks failed', { detail: error.message })));
