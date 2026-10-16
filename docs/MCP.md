@@ -563,3 +563,13 @@ if still queued/running, it returns the generation status so it can be followed 
 
 API counterparts: `GET/POST /api/voices`, `DELETE /api/voices/:id` (URL-encode the id), and
 `POST /api/voice-change`. `speak_line` uses the existing speech generation and wait endpoints.
+
+## Production tools (0.9.13)
+
+Five more groups of tools (52 in all); each has its own page with every tool, its inputs and its limits:
+
+- [Film canon](tools/canon.md): a versioned film bible. Lock it, diff revisions, find the shots a change affects and reset their approvals, and take snapshots of the canon for jobs.
+- [Visual review and repair](tools/review.md): review bundles, take comparisons, sampled frames, cut checks and recorded findings. Repairs are capped at 2 per shot and 10 per film, a refused budget stops them, and a new take is used only after accept_repair.
+- [Audio and delivery](tools/audio.md): delivery validation (-16 LUFS ±1, ≤ -1 dBTP, stereo, picture/sound length, missing or clipped dialogue), loudness, waveform, silence, mix preview, stems and trims.
+- [Editing and animatic](tools/edit.md): insert, duplicate, split and delete shots, a transition per cut, speed, text overlays, scene reorder, the shot timeline, and a cheap low-resolution animatic.
+- [Library](tools/library.md): tags, search, lineage, storage use, unused assets (deleting needs confirm: true and refuses anything in use), duplicating a storyboard, JSON export/import and generation history.

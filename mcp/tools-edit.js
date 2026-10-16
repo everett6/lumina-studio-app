@@ -18,8 +18,8 @@ export function register({ tool, text, ok, safe, client, z }) {
     return ok(text(await client.call(method, url(storyboardId ?? shotId), method === 'GET' ? undefined : body)));
   }));
   const shotId = z.string(), storyboardId = z.string();
-  add('insert_shot', 'Insert a shot', 'Insert after afterShotId; null inserts first. Saves a plan without generating media.', {
-    storyboardId, afterShotId: z.string().nullable(), shot: z.object({ description: z.string().trim().min(1).max(2000), duration: z.number().min(1 / 24).max(30), camera: z.string().nullable().optional(), details: z.record(z.string(), z.unknown()).optional() }),
+  add('insert_shot', 'Insert a shot', 'Insert after afterShotId; null inserts first; leave it out to add the shot at the end. Saves a plan without generating media.', {
+    storyboardId, afterShotId: z.string().nullable().optional(), shot: z.object({ description: z.string().trim().min(1).max(2000), duration: z.number().min(1 / 24).max(30), camera: z.string().nullable().optional(), details: z.record(z.string(), z.unknown()).optional() }),
   }, 'POST', (id) => `/api/storyboards/${id}/edit/insert`);
   add('duplicate_shot', 'Duplicate a shot plan', 'Insert a copy immediately after this shot. withMedia=true references the same assets, including recordings; files are never copied. Approvals reset.', {
     shotId, withMedia: z.boolean().default(false),

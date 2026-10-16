@@ -469,12 +469,13 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const sequence = needSequence(id);
     return { storyboardId: id, ...editTimeline(shotsOf(id), sequence.settings) };
   }
-  function insertShot(id, { afterShotId = null, shot } = {}) {
+  // afterShotId: a shot id inserts after it, null inserts first, omitted appends at the end.
+  function insertShot(id, { afterShotId, shot } = {}) {
     needSequence(id);
     const shots = shotsOf(id);
     if (shots.length >= maxShots) throw new RequestError(400, `A storyboard supports at most ${maxShots} shots.`);
-    const after = afterShotId === null ? null : shots.find((s) => s.id === afterShotId);
-    if (afterShotId !== null && !after) throw new RequestError(400, 'afterShotId must belong to this storyboard.');
+    const after = afterShotId === undefined ? shots.at(-1) ?? null : afterShotId === null ? null : shots.find((s) => s.id === afterShotId);
+    if (afterShotId && !after) throw new RequestError(400, 'afterShotId must belong to this storyboard.');
     if (!shot || typeof shot.description !== 'string' || !shot.description.trim() || shot.description.length > 2000
       || !Number.isFinite(shot.duration) || shot.duration < 1 / 24 || shot.duration > 30) throw new RequestError(400, 'A shot needs a description and duration between 1/24 and 30 seconds.');
     const details = cleanShotDetails(shot.details ?? {});

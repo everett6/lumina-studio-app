@@ -73,6 +73,8 @@ test('MCP editing: insert, duplicate, split, delete, scene order, approvals and 
   assert.equal(detail().shots[0].details.scene, 'B');
   assert.deepEqual(detail().shots.map((s) => s.position), detail().shots.map((_, i) => i + 1));
   assert.equal((await raw('insert_shot', { storyboardId: board.id, afterShotId: 'missing', shot: { description: 'Bad', duration: 1 } })).isError, true);
+  const appended = await call('insert_shot', { storyboardId: board.id, shot: { description: 'Last', duration: 1 } });
+  assert.equal(appended.shots.at(-1).description, 'Last', 'leaving out afterShotId appends at the end');
 });
 
 test('MCP join: per-cut crossfade, speed, overlay pixels and animatic timing', async (t) => {
