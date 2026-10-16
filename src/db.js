@@ -212,6 +212,43 @@ const migrations = [
    ALTER TABLE characters ADD COLUMN voice TEXT;
    ALTER TABLE characters ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;`,
   `ALTER TABLE characters ADD COLUMN design_tags TEXT NOT NULL DEFAULT '';`,
+  // Submission accounting is additive: existing settings, ledger amounts and legacy billing are untouched.
+  `ALTER TABLE generations ADD COLUMN billing_state TEXT;
+   ALTER TABLE generations ADD COLUMN request_fingerprint TEXT;
+   ALTER TABLE generations ADD COLUMN retry_of TEXT;
+   UPDATE generations SET billing_state = CASE
+     WHEN provider IN ('local', 'mock') THEN 'confirmed_unbilled'
+     WHEN billing = 'charged' THEN 'charged'
+     WHEN billing = 'none' THEN 'confirmed_unbilled'
+     WHEN billing = 'unknown' THEN 'billing_unknown'
+     WHEN provider_job IS NOT NULL THEN 'submitted'
+     WHEN status = 'queued' THEN 'not_submitted'
+     ELSE 'billing_unknown' END;`,
+  `CREATE TABLE films (
+     id TEXT PRIMARY KEY,
+     sequence_id TEXT NOT NULL UNIQUE REFERENCES sequences(id) ON DELETE CASCADE,
+     brief TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(brief)),
+     policy TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(policy)),
+     revision INTEGER NOT NULL DEFAULT 1,
+     state TEXT NOT NULL DEFAULT 'plan',
+     pause_reason TEXT,
+     lease_owner TEXT,
+     lease_expires_at TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE TABLE film_events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     film_id TEXT NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+     revision INTEGER NOT NULL,
+     at TEXT NOT NULL,
+     kind TEXT NOT NULL CHECK(kind IN ('checkpoint','approval','job','finding','repair','delivery','pause','resume','edit')),
+     data TEXT NOT NULL CHECK(json_valid(data))
+   );
+   CREATE INDEX film_events_film ON film_events(film_id, id);
+   CREATE TRIGGER film_events_no_update BEFORE UPDATE ON film_events
+     BEGIN SELECT RAISE(ABORT, 'film_events is append-only'); END;
+   -- Events are never edited; they go only with their film (deleting a storyboard cascades).`,
 ];
 
 function migrate(db) {

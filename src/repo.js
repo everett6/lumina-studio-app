@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { transaction } from './db.js';
 
 const now = () => new Date().toISOString();
 const parse = (value, fallback) => (value == null ? fallback : JSON.parse(value));
@@ -16,6 +17,9 @@ const toGeneration = (r) => r && {
   usage: parse(r.usage, null), canvasRunId: r.canvas_run_id, nodeId: r.node_id, bookPageId: r.book_page_id, bookTarget: r.book_target,
   mimeType: r.output_mime ?? null, createdAt: r.created_at,
   providerJob: parse(r.provider_job, null), idempotencyKey: r.idempotency_key ?? null, billing: r.billing ?? null,
+  billingState: parse(r.provider_job, null)?.billingState ?? r.billing_state ?? parse(r.params, {})?.accounting?.billingState ?? null,
+  requestFingerprint: r.request_fingerprint ?? parse(r.params, {})?.accounting?.requestFingerprint ?? null,
+  retryOf: r.retry_of ?? parse(r.params, {})?.accounting?.retryOf ?? null,
   startedAt: r.started_at, completedAt: r.completed_at, durationMs: r.duration_ms,
 };
 const toCanvas = (r) => r && {
@@ -33,7 +37,7 @@ const generationSelect = `SELECT g.*, a.file AS output_file, a.mime_type AS outp
 const generationColumns = {
   status: 'status', finalPrompt: 'final_prompt', outputAssetId: 'output_asset_id', errorCategory: 'error_category',
   userError: 'user_error', usage: 'usage', startedAt: 'started_at', completedAt: 'completed_at', durationMs: 'duration_ms',
-  providerJob: 'provider_job', billing: 'billing',
+  providerJob: 'provider_job', billing: 'billing', billingState: 'billing_state',
 };
 const jsonColumns = new Set(['usage', 'providerJob']);
 
@@ -82,11 +86,11 @@ export function createRepo(db) {
     create(fields) {
       const id = randomUUID();
       db.prepare(`INSERT INTO generations (id, project_id, status, operation, provider, model, prompt, director, params,
-        input_asset_ids, canvas_run_id, node_id, book_page_id, book_target, idempotency_key, billing, created_at)
-        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        input_asset_ids, canvas_run_id, node_id, book_page_id, book_target, idempotency_key, billing, billing_state, request_fingerprint, retry_of, created_at)
+        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, fields.projectId, fields.operation, fields.provider, fields.model, fields.prompt, fields.director ?? null,
           JSON.stringify(fields.params ?? {}), JSON.stringify(fields.inputAssetIds ?? []), fields.canvasRunId ?? null,
-          fields.nodeId ?? null, fields.bookPageId ?? null, fields.bookTarget ?? null, fields.idempotencyKey ?? null, fields.billing ?? null, now());
+          fields.nodeId ?? null, fields.bookPageId ?? null, fields.bookTarget ?? null, fields.idempotencyKey ?? null, fields.billing ?? null, fields.billingState ?? 'not_submitted', fields.requestFingerprint ?? null, fields.retryOf ?? null, now());
       touch(fields.projectId);
       return generations.get(id);
     },
@@ -98,6 +102,7 @@ export function createRepo(db) {
       db.prepare(`UPDATE generations SET ${sql} WHERE id = ?`).run(...values, id);
       return generations.get(id);
     },
+    claim: (id) => db.prepare("UPDATE generations SET status = 'running' WHERE id = ? AND status = 'queued'").run(id).changes > 0,
     byIdempotencyKey: (key) => toGeneration(db.prepare(`${generationSelect} WHERE g.idempotency_key = ?`).get(key)),
     // Jobs that were mid-flight when the app stopped can't be resumed; mark them so the UI can offer a retry.
     markInterrupted: (ids) => {
@@ -359,6 +364,15 @@ export function createRepo(db) {
       const row = db.prepare(`SELECT COALESCE(SUM(COALESCE(actual_usd, estimated_usd)), 0) AS usd, COUNT(*) AS n FROM spend_ledger WHERE ${where.join(' AND ')}`).get(...args);
       return { usd: Math.round(row.usd * 10000) / 10000, count: row.n };
     },
+    breakdown({ since = null } = {}) {
+      const r = db.prepare(`SELECT
+        COALESCE(SUM(estimated_usd), 0) AS estimatedUsd,
+        COALESCE(SUM(CASE WHEN status = 'reserved' THEN COALESCE(actual_usd, estimated_usd) ELSE 0 END), 0) AS reservedUsd,
+        COALESCE(SUM(CASE WHEN status = 'charged' THEN COALESCE(actual_usd, estimated_usd) ELSE 0 END), 0) AS chargedUsd,
+        COALESCE(SUM(CASE WHEN status = 'unknown' THEN COALESCE(actual_usd, estimated_usd) ELSE 0 END), 0) AS unknownUsd
+        FROM spend_ledger WHERE (? IS NULL OR created_at >= ?)`).get(since, since);
+      return Object.fromEntries(Object.entries(r).map(([k, v]) => [k, Math.round(v * 10000) / 10000]));
+    },
     outstanding(provider) {
       const row = db.prepare(`SELECT COALESCE(SUM(COALESCE(actual_usd, estimated_usd)), 0) AS usd,
         SUM(CASE WHEN COALESCE(actual_usd, estimated_usd) IS NULL THEN 1 ELSE 0 END) AS unpriced
@@ -489,7 +503,68 @@ export function createRepo(db) {
     remove: (id) => db.prepare('DELETE FROM canvas_templates WHERE id = ?').run(id).changes > 0,
   };
 
-  return { projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth, characters, sequences, shots, canvasTemplates, spend, approvals };
+  const filmEvents = {
+    list: (filmId) => db.prepare('SELECT * FROM film_events WHERE film_id = ? ORDER BY id').all(filmId).map((r) => ({
+      id: r.id, filmId: r.film_id, revision: r.revision, at: r.at, kind: r.kind, data: parse(r.data, {}),
+    })),
+  };
+  const toFilm = (r) => r && ({
+    id: r.id, sequenceId: r.sequence_id, brief: parse(r.brief, {}), policy: parse(r.policy, {}), revision: r.revision,
+    state: r.state, pauseReason: r.pause_reason, leaseOwner: r.lease_owner, leaseExpiresAt: r.lease_expires_at,
+    createdAt: r.created_at, updatedAt: r.updated_at,
+  });
+  const appendFilmEvents = (film, events, at) => {
+    const insert = db.prepare('INSERT INTO film_events (film_id, revision, at, kind, data) VALUES (?, ?, ?, ?, ?)');
+    for (const event of events) insert.run(film.id, film.revision, at, event.kind, JSON.stringify(event.data ?? {}));
+  };
+  const films = {
+    get: (id) => toFilm(db.prepare('SELECT * FROM films WHERE id = ?').get(id)),
+    bySequence: (id) => toFilm(db.prepare('SELECT * FROM films WHERE sequence_id = ?').get(id)),
+    open(sequenceId, { brief = {}, policy = {}, at = now() } = {}) {
+      return transaction(db, () => {
+        const existing = films.bySequence(sequenceId);
+        if (existing) return existing;
+        const id = randomUUID();
+        db.prepare('INSERT INTO films (id, sequence_id, brief, policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(id, sequenceId, JSON.stringify(brief), JSON.stringify(policy), at, at);
+        const film = films.get(id);
+        appendFilmEvents(film, [{ kind: 'checkpoint', data: { stage: 'plan', phase: 'opened' } }], at);
+        return film;
+      });
+    },
+    acquire(id, owner, ttlMs, at = now()) {
+      const expires = new Date(Date.parse(at) + ttlMs).toISOString();
+      return db.prepare(`UPDATE films SET lease_owner = ?, lease_expires_at = ?
+        WHERE id = ? AND (lease_owner IS NULL OR lease_expires_at <= ? OR lease_owner = ?)`)
+        .run(owner, expires, id, at, owner).changes > 0;
+    },
+    release: (id, owner) => db.prepare('UPDATE films SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?')
+      .run(id, owner).changes > 0,
+    // Fence every transition and its events with one CAS under the SQLite write lock.
+    commit(id, { expectedRevision, owner = null, at = now(), state, pauseReason, brief, policy }, events = []) {
+      return transaction(db, () => {
+        const old = films.get(id);
+        if (!old || old.revision !== expectedRevision) return null;
+        const changed = db.prepare(`UPDATE films SET revision = revision + 1, state = ?, pause_reason = ?, brief = ?, policy = ?, updated_at = ?
+          WHERE id = ? AND revision = ? AND (? IS NULL OR (lease_owner = ? AND lease_expires_at > ?))`)
+          .run(state ?? old.state, pauseReason === undefined ? old.pauseReason : pauseReason,
+            JSON.stringify(brief ?? old.brief), JSON.stringify(policy ?? old.policy), at, id, expectedRevision, owner, owner, at);
+        if (!changed.changes) return null;
+        const film = films.get(id);
+        appendFilmEvents(film, events, at);
+        return film;
+      });
+    },
+    edit(id, { expectedRevision, brief, policy, at = now() }) {
+      const latest = new Map();
+      for (const e of filmEvents.list(id).filter((e) => e.kind === 'finding' && e.data.source === 'brief')) latest.set(e.data.id, e.data);
+      const resolved = [...latest.values()].filter((f) => !f.resolved).map((f) => ({ kind: 'finding', data: { ...f, resolved: true, reason: 'Brief/policy edited; re-evaluate at delivery.' } }));
+      return films.commit(id, { expectedRevision, brief, policy, at, state: 'plan', pauseReason: null },
+        [{ kind: 'edit', data: { brief, policy } }, ...resolved, { kind: 'checkpoint', data: { stage: 'plan', phase: 'edited' } }]);
+    },
+  };
+
+  return { transaction: (fn) => transaction(db, fn), projects, assets, generations, canvases, runs, settings, books, pages, chapters, oauth, characters, sequences, shots, canvasTemplates, spend, approvals, films, filmEvents };
 }
 
 const toCharacter = (r) => r && {
