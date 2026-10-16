@@ -23,7 +23,7 @@ export function register({ tool, text, ok, safe, client, z }) {
   const prompt = z.string().trim().min(1).max(4000);
   const plan = z.discriminatedUnion('type', [
     z.object({ type: z.literal('re-frame'), prompt, ...model, findingId: z.string().nullable().optional() }),
-    z.object({ type: z.literal('repair_frame'), box: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1)]), instruction: z.string().trim().min(1).max(3000), ...model, findingId: z.string().nullable().optional() }),
+    z.object({ type: z.literal('repair_frame'), box: z.array(z.number().min(0).max(1)).length(4), instruction: z.string().trim().min(1).max(3000), ...model, findingId: z.string().nullable().optional() }),
     z.object({ type: z.literal('new_clip'), frameId: z.string().uuid().optional(), prompt: prompt.optional(), ...model, findingId: z.string().nullable().optional() }),
     z.object({ type: z.literal('trim'), trimStart: z.number().min(0).max(10).optional(), duration: z.number().int().min(1).max(30).optional(), findingId: z.string().nullable().optional() }),
     z.object({ type: z.literal('re-record'), lineIndex: z.number().int().min(0).max(11), style: z.string().max(500).optional(), ...model, findingId: z.string().nullable().optional() }),

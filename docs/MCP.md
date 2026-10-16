@@ -577,3 +577,9 @@ Five more groups of tools (52 in all); each has its own page with every tool, it
 ### Compact tool discovery (0.9.14)
 
 `tools/list` keeps the full set of tools, parameter schemas and safety annotations. Long descriptions use a short summary and cost hint. Before first invoking a tool marked `Full help`, call `get_tool_help` with its exact `name` to retrieve the original complete description, constraints, examples and next steps. This applies equally to local stdio and remote HTTPS; it does not change permissions, spending approvals or backend validation.
+
+### ChatGPT: “Authentication succeeded, action discovery failed”
+
+Version 0.9.15 fixes a discovery blocker in `execute_repair`: its four-number bounding box was advertised with a legacy tuple schema (`items` was an array). The catalog omits the schema dialect marker, and this representation fails JSON Schema 2020 validation. It now uses an array of numbers with `minItems`/`maxItems` both four. Bounds and execution validation are unchanged. A regression compiles every advertised tool input/output schema and checks malformed boxes cannot reach execution routes.
+
+After updating and restarting Lumina, refresh the app's tool discovery in ChatGPT or reconnect the app with the same MCP URL. No password reset or provider-key change is needed for this schema fix. A successful local/public MCP probe does not establish that the signed-in ChatGPT scan accepted the update; confirm that separately in ChatGPT.
