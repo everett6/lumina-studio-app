@@ -1,3 +1,4 @@
+import { createAnimatic, cutTransitions, editTimeline, overlayPositions, overlayStyles, playbackSeconds, renderEdit } from './animatic.js';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -229,7 +230,12 @@ export function cleanShotDetails(input = {}, base = {}) {
     interpolate: typeof input.interpolate === 'boolean' ? input.interpolate : base.interpolate ?? false,
     timing: shotTimings.includes(input.timing) ? input.timing : shotTimings.includes(base.timing) ? base.timing : 'auto',
     holds: input.holds === null ? [] : holdsOf(input.holds) ?? holdsOf(base.holds) ?? [],
-    trimStart: Math.min(10, Math.max(0, Number(input.trimStart ?? base.trimStart ?? 0) || 0)),
+    speed: Number.isFinite(input.speed) && input.speed >= 0.25 && input.speed <= 4 ? input.speed : base.speed ?? 1,
+    keepPitch: typeof input.keepPitch === 'boolean' ? input.keepPitch : base.keepPitch ?? true,
+    cutTransition: input.cutTransition === null ? null : cutTransitions.includes(input.cutTransition?.transition) && Number.isFinite(input.cutTransition.seconds) && input.cutTransition.seconds >= 0 && input.cutTransition.seconds <= 10 ? { transition: input.cutTransition.transition, seconds: input.cutTransition.seconds } : base.cutTransition ?? null,
+    overlays: Array.isArray(input.overlays) ? input.overlays.filter((o) => typeof o?.text === 'string' && o.text.trim() && overlayPositions.includes(o.position) && overlayStyles.includes(o.style) && Number.isFinite(o.start) && o.start >= 0 && Number.isFinite(o.seconds) && o.seconds > 0).slice(0, 24).map((o) => ({ text: o.text.slice(0, 2000), position: o.position, style: o.style, start: o.start, seconds: o.seconds })) : base.overlays ?? [],
+    // Public trim edits keep their existing 10-second limit; internal splits may retain a later source in-point.
+    trimStart: Math.min(input.trimStart === undefined ? 600 : 10, Math.max(0, Number(input.trimStart ?? base.trimStart ?? 0) || 0)),
     // Sound effects placed in the shot: `at` seconds after the shot starts, at `volume` (mixed on their own bus).
     sfx: Array.isArray(input.sfx) ? input.sfx.filter((e) => e?.assetId).slice(0, 12).map((e) => ({
       assetId: String(e.assetId), at: Math.min(30, Math.max(0, Number(e.at) || 0)), volume: Math.min(2, Math.max(0, Number(e.volume ?? 0.8))),
@@ -273,19 +279,22 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const sequence = needSequence(id);
     const shots = shotsOf(id);
     let clock = 0;
+    const timing = editTimeline(shots, sequence.settings);
     // The joined film is stale when any shot changed after it was made. shots.updated_at moves on every edit
     // (trim, grade, duration, reorder, new frame/clip/dialogue take). Settings are tracked separately.
     const joinedAt = asset(sequence.outputAssetId)?.createdAt ?? null;
     const joinedSettings = repo.settings.get(`joinSettings:${id}`, null);
     const joinStale = Boolean(joinedAt) && (joinedSettings?.outputAssetId !== sequence.outputAssetId
       || joinedSettings?.fingerprint !== joinSettingsFingerprint(sequence.settings)
+      || (joinedSettings?.editRevision ?? null) !== repo.settings.get(`editRevision:${id}`, null)
+      || (joinedSettings?.shotOrder && joinedSettings.shotOrder !== JSON.stringify(shots.map((s) => s.id)))
       || shots.some((s) => s.updatedAt && s.updatedAt > joinedAt));
     return {
       sequence: { ...sequence, joinStale, outputPath: asset(sequence.outputAssetId)?.path ?? null, join: joining.get(id) ?? null, production: producing.get(id) ?? null,
         enhance: sequence.outputAssetId ? enhancer?.status(sequence.outputAssetId) ?? null : null, themeCoverage: themeCoverage(sequence.settings.themes, shots) },
-      shots: shots.map((shot) => {
-        const startsAt = clock;
-        clock += shot.duration ?? 0;
+      shots: shots.map((shot, index) => {
+        const startsAt = timing.shots[index].start;
+        clock = timing.shots[index].end;
         return {
           ...shot, startsAt, imagePath: asset(shot.imageAssetId)?.path ?? null, videoPath: asset(shot.videoAssetId)?.path ?? null,
           frameJob: latest(`shot-image:${shot.id}`), clipJob: latest(`shot-video:${shot.id}`),
@@ -444,6 +453,134 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       review: touchesStory ? { ...shot.review, status: 'pending', frameApproved: null } : undefined,
     });
     return detail(shot.sequenceId);
+  }
+
+  // Editing revisions cover removals and repository moves, which do not touch shot timestamps.
+  function invalidateEdit(id) {
+    repo.settings.set(`editRevision:${id}`, (repo.settings.get(`editRevision:${id}`, 0) ?? 0) + 1);
+  }
+  const pictureReview = (shot) => ({ ...shot.review, status: 'pending', frameApproved: null });
+  function editable(shot, story = false) {
+    if (story && shot.details.locked) throw new RequestError(409, 'Unlock this shot before splitting or deleting it.');
+    if (active(`shot-image:${shot.id}`) || active(`shot-video:${shot.id}`)
+      || shot.details.dialogue.some((_, i) => active(`shot-line:${shot.id}:${i}`))) throw new RequestError(409, 'Wait for active shot jobs before editing.');
+  }
+  function shotTimeline(id) {
+    const sequence = needSequence(id);
+    return { storyboardId: id, ...editTimeline(shotsOf(id), sequence.settings) };
+  }
+  function insertShot(id, { afterShotId = null, shot } = {}) {
+    needSequence(id);
+    const shots = shotsOf(id);
+    if (shots.length >= maxShots) throw new RequestError(400, `A storyboard supports at most ${maxShots} shots.`);
+    const after = afterShotId === null ? null : shots.find((s) => s.id === afterShotId);
+    if (afterShotId !== null && !after) throw new RequestError(400, 'afterShotId must belong to this storyboard.');
+    if (!shot || typeof shot.description !== 'string' || !shot.description.trim() || shot.description.length > 2000
+      || !Number.isFinite(shot.duration) || shot.duration < 1 / 24 || shot.duration > 30) throw new RequestError(400, 'A shot needs a description and duration between 1/24 and 30 seconds.');
+    const details = cleanShotDetails(shot.details ?? {});
+    for (const cid of [...details.characterIds, details.locationId].filter(Boolean)) if (!repo.characters.get(cid)) throw new RequestError(404, 'A shot character or location does not exist.');
+    if (shots.reduce((sum, s) => sum + playbackSeconds(s), 0) + shot.duration / details.speed > maxTargetSeconds) throw new RequestError(400, 'The film may not exceed 15 minutes.');
+    repo.shots.insert(id, { description: shot.description.trim(), duration: shot.duration, camera: cameraPresets.some((p) => p.id === shot.camera) ? shot.camera : null, details, position: after ? after.position + 1 : 1 });
+    repo.shots.renumber(id);
+    invalidateEdit(id);
+    return detail(id);
+  }
+  function duplicateShot(shotId, { withMedia = false } = {}) {
+    const shot = needShot(shotId);
+    editable(shot);
+    if (typeof withMedia !== 'boolean') throw new RequestError(400, 'withMedia must be boolean.');
+    const details = { ...shot.details, locked: false, post: {}, lipsync: null, attachedClips: withMedia ? shot.details.attachedClips : [], sfx: withMedia ? shot.details.sfx : [],
+      dialogue: shot.details.dialogue.map((line) => ({ ...line, ...(withMedia ? {} : { assetId: null, seconds: null }) })) };
+    insertShot(shot.sequenceId, { afterShotId: shotId, shot: { ...shot, details } });
+    const copy = shotsOf(shot.sequenceId).find((s) => s.position === shot.position + 1);
+    // cleanShotDetails deliberately discards untrusted audio ids on insert; only this internal copy restores them.
+    repo.shots.update(copy.id, { details, imageAssetId: withMedia ? shot.imageAssetId : null, videoAssetId: withMedia ? shot.videoAssetId : null, review: {} });
+    return detail(shot.sequenceId);
+  }
+  async function splitShot(shotId, { atSeconds } = {}) {
+    const shot = needShot(shotId);
+    editable(shot, true);
+    const speed = shot.details.speed, duration = playbackSeconds(shot);
+    if (!Number.isFinite(atSeconds) || atSeconds < 1 / 24 || duration - atSeconds < 1 / 24) throw new RequestError(400, 'Split strictly inside the shot, leaving at least one frame on each side.');
+    if (shotsOf(shot.sequenceId).length >= maxShots) throw new RequestError(400, `A storyboard supports at most ${maxShots} shots.`);
+    const lengths = await Promise.all(shot.details.dialogue.map((line) => asset(line.assetId) ? mediaSeconds(assetStore.path(asset(line.assetId))) : line.seconds ?? 0));
+    const { times } = lineTimes(shot.details.dialogue, duration, lengths);
+    const dialogue = [[], []];
+    shot.details.dialogue.forEach((line, i) => { const side = times[i] >= atSeconds ? 1 : 0; dialogue[side].push({ ...line, start: times[i] - (side ? atSeconds : 0) }); });
+    const spans = (list, key, side) => list.flatMap((item) => {
+      const from = Math.max(item.start, side ? atSeconds : 0), end = Math.min(item.start + item[key], side ? duration : atSeconds);
+      return end > from ? [{ ...item, start: from - (side ? atSeconds : 0), [key]: end - from }] : [];
+    });
+    const detailsFor = (side) => ({ ...shot.details, dialogue: dialogue[side], post: {}, lipsync: null,
+      cutTransition: side ? shot.details.cutTransition : { transition: 'cut', seconds: 0 },
+      trimStart: shot.details.trimStart + (side && shot.details.method !== 'still' ? atSeconds * speed : 0),
+      overlays: spans(shot.details.overlays, 'seconds', side),
+      holds: spans(shot.details.holds, 'seconds', side),
+      sfx: shot.details.sfx.filter((e) => (e.at >= atSeconds) === Boolean(side)).map((e) => ({ ...e, at: e.at - (side ? atSeconds : 0) })) });
+    const second = repo.shots.insert(shot.sequenceId, { position: shot.position + 1, description: shot.description, camera: shot.camera, duration: (duration - atSeconds) * speed, details: detailsFor(1) });
+    repo.shots.update(second.id, { imageAssetId: shot.imageAssetId, videoAssetId: shot.videoAssetId, review: pictureReview(shot) });
+    repo.shots.update(shotId, { duration: atSeconds * speed, details: detailsFor(0), review: pictureReview(shot) });
+    repo.shots.renumber(shot.sequenceId);
+    invalidateEdit(shot.sequenceId);
+    return detail(shot.sequenceId);
+  }
+  function deleteShot(shotId, { confirm } = {}) {
+    const shot = needShot(shotId);
+    if (confirm !== true) throw new RequestError(400, 'Deleting a shot requires confirm: true.');
+    editable(shot, true);
+    repo.shots.remove(shotId); // generation rows and their assets intentionally survive
+    invalidateEdit(shot.sequenceId);
+    return detail(shot.sequenceId);
+  }
+  function pictureEdit(shot, fields) {
+    editable(shot);
+    repo.shots.update(shot.id, { details: { ...shot.details, ...fields }, review: pictureReview(shot) });
+    invalidateEdit(shot.sequenceId);
+    return detail(shot.sequenceId);
+  }
+  function setCutTransition(shotId, { transition, seconds } = {}) {
+    const shot = needShot(shotId);
+    if (!cutTransitions.includes(transition) || !Number.isFinite(seconds) || seconds < 0 || seconds > 10 || (transition !== 'cut' && seconds === 0)) throw new RequestError(400, 'Choose a valid transition and positive seconds (up to 10).');
+    // The cut changes the film's picture, while the approved source frame remains the same.
+    editable(shot);
+    repo.shots.update(shotId, { details: { ...shot.details, cutTransition: { transition, seconds: transition === 'cut' ? 0 : seconds } }, review: { ...shot.review, status: 'pending' } });
+    invalidateEdit(shot.sequenceId);
+    return detail(shot.sequenceId);
+  }
+  function setShotSpeed(shotId, { speed, keepPitch = true } = {}) {
+    const shot = needShot(shotId);
+    if (!Number.isFinite(speed) || speed < 0.25 || speed > 4 || typeof keepPitch !== 'boolean') throw new RequestError(400, 'speed must be 0.25–4 and keepPitch must be boolean.');
+    return pictureEdit(shot, { speed, keepPitch });
+  }
+  function addTextOverlay(shotId, overlay = {}) {
+    const shot = needShot(shotId);
+    if (typeof overlay.text !== 'string' || !overlay.text.trim() || overlay.text.length > 2000 || !overlayPositions.includes(overlay.position)
+      || !overlayStyles.includes(overlay.style) || !Number.isFinite(overlay.start) || overlay.start < 0 || !Number.isFinite(overlay.seconds) || overlay.seconds <= 0
+      || overlay.start + overlay.seconds > playbackSeconds(shot) + 1e-9 || shot.details.overlays.length >= 24) throw new RequestError(400, 'A valid overlay must fit within the shot (maximum 24 overlays).');
+    return pictureEdit(shot, { overlays: [...shot.details.overlays, { text: overlay.text, position: overlay.position, start: overlay.start, seconds: overlay.seconds, style: overlay.style }] });
+  }
+  function reorderScene(id, { scene, beforeScene = null } = {}) {
+    needSequence(id);
+    const shots = shotsOf(id);
+    if (typeof scene !== 'string' || (beforeScene !== null && typeof beforeScene !== 'string')) throw new RequestError(400, 'Use scene labels and beforeScene or null.');
+    const moved = shots.filter((s) => s.details.scene === scene);
+    if (!moved.length || (beforeScene !== null && !shots.some((s) => s.details.scene === beforeScene))) throw new RequestError(404, 'Scene not found.');
+    if (scene === beforeScene) return detail(id);
+    const rest = shots.filter((s) => s.details.scene !== scene);
+    const index = beforeScene === null ? rest.length : rest.findIndex((s) => s.details.scene === beforeScene);
+    const order = [...rest.slice(0, index), ...moved, ...rest.slice(index)];
+    for (let i = 0; i < order.length; i++) {
+      while (repo.shots.get(order[i].id).position > i + 1) repo.shots.move(order[i].id, -1);
+    }
+    repo.shots.renumber(id);
+    invalidateEdit(id);
+    return detail(id);
+  }
+  async function makeAnimatic(id, { fps = 12, includeDialogue = true } = {}) {
+    const sequence = needSequence(id);
+    const shots = shotsOf(id);
+    if (!shots.length) throw new RequestError(400, 'Add shots before making an animatic.');
+    return createAnimatic({ shots, sequence, repo, assetStore, fps, includeDialogue });
   }
 
   // Review: accepted shots are the only ones a strict film uses; anyone (the person or the orchestrator) can mark.
@@ -733,7 +870,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     if (!lines.length) return null;
     const lengths = lines.map((line) => line.seconds ?? 0);
     if (lengths.some((s) => !s)) return null;
-    const { overrun } = lineTimes(lines, shot.duration ?? 0, lengths);
+    const { overrun } = lineTimes(lines, playbackSeconds(shot), lengths);
     return { id: 'dialogue-fit', ok: overrun <= 0.05, severity: 'warning', detail: overrun > 0.05 ? `The dialogue runs ${overrun.toFixed(1)} s past the end of the shot` : 'The dialogue fits the shot' };
   }
 
@@ -813,6 +950,8 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     }
     if (!(await hasFfmpeg())) throw new RequestError(501, 'Joining clips needs ffmpeg, which is not installed on this computer (on Debian/Ubuntu: sudo apt install ffmpeg).');
     const settings = sequence.settings;
+    const editRevision = repo.settings.get(`editRevision:${id}`, null);
+    const shotOrder = JSON.stringify(shots.map((s) => s.id));
     const size = outputSize(sequence);
     const postSteps = usable.length + (settings.upscale !== 'none' ? 1 : 0);
     const state = { state: 'running', done: 0, total: postSteps + 3, clips: usable.length, skipped: shots.length - usable.length, error: null, duration: null, step: 'Preparing shots' };
@@ -831,7 +970,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
             if (smooth) clip = smooth;
           }
           progress(`Shot ${shot.position}: smoothing`);
-          items.push({ file: assetStore.path(clip), duration: shot.duration ?? undefined, trimStart: shot.details.trimStart || 0, mute: shot.details.muteClipSound, shot });
+          items.push({ file: assetStore.path(clip), duration: shot.duration == null ? undefined : playbackSeconds(shot), trimStart: shot.details.trimStart || 0, mute: shot.details.muteClipSound, shot });
         }
         const sourceInfos = [];
         for (const item of items) sourceInfos.push(await probe(item.file));
@@ -872,7 +1011,11 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         }
         // 3. The picture: exact lengths, crossfades, near-lossless.
         state.step = 'Joining the shots';
-        const joined = await stitchClips(items.map(({ shot, ...item }) => item), { transition: settings.transition, finish: 'none', size: masterSize, deliver: false, fps: rate });
+        const edited = items.some(({ shot }) => shot.details.cutTransition || shot.details.speed !== 1 || shot.details.overlays.length || (editRevision !== null && shot.duration != null && !Number.isInteger(shot.duration)));
+        const joined = edited
+          ? await renderEdit(items, { settings, fps: rate, ...masterSize })
+          : await stitchClips(items.map(({ shot, ...item }) => item), { transition: settings.transition, finish: 'none', size: masterSize, deliver: false, fps: rate });
+        if (joined.timeline) items.forEach((item, i) => { item.duration = joined.timeline.shots[i].duration; });
         const picture = path.join(dir, 'picture.mp4');
         await import('node:fs/promises').then((fs) => fs.writeFile(picture, joined.bytes));
         progress('Mixing the sound');
@@ -942,7 +1085,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         if (Math.abs(info.duration - joined.duration) > 1 / rate + 0.005) throw new Error('Final film duration differs from the edit timeline by more than one frame.');
         if (!info.hasAudio) throw new Error('Final film lost its mixed audio track.');
         const saved = await assetStore.save({ bytes: await readFile(finished), projectId: sequence.projectId, kind: 'video', label: `${sequence.title} (film)` });
-        repo.settings.set(`joinSettings:${id}`, { outputAssetId: saved.id, fingerprint: joinSettingsFingerprint(settings) });
+        repo.settings.set(`joinSettings:${id}`, { outputAssetId: saved.id, fingerprint: joinSettingsFingerprint(settings), editRevision, shotOrder });
         repo.sequences.update(id, { outputAssetId: saved.id });
         Object.assign(state, { state: 'completed', duration: info.duration, width: info.width, height: info.height, done: state.total, step: 'Done' });
         const production = producing.get(id);
@@ -1286,7 +1429,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const cues = [];
     let clock = 0;
     for (const shot of shots) {
-      const duration = shot.duration ?? 0;
+      const duration = Math.max(1, Math.round(playbackSeconds(shot) * 24)) / 24;
       const lines = shot.details.dialogue ?? [];
       const lengths = lines.map((l) => l.seconds ?? Math.max(1, l.text.split(/\s+/).length / 2.5));
       const { times } = lineTimes(lines, duration, lengths);
@@ -1332,7 +1475,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const subtitles = subtitleCues(shots);
     let clock = 0;
     for (const shot of shots) {
-      const duration = shot.duration ?? 0;
+      const duration = Math.max(1, Math.round(playbackSeconds(shot) * 24)) / 24;
       const frame = asset(shot.imageAssetId);
       const clip = asset(shot.videoAssetId);
       const lines = shot.details.dialogue ?? [];
@@ -1346,7 +1489,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         dialogue.push({ speaker, text: line.text, file, start: Math.round(times[i] * 1000) / 1000, seconds: lengths[i], recorded: Boolean(voice), timingSet: Number.isFinite(line.start) });
       }
       timeline.push({
-        shot: shot.position, shotId: shot.id, description: shot.description, scene: shot.details.scene || null, start: clock, duration, trimStart: shot.details.trimStart || 0,
+        shot: shot.position, shotId: shot.id, description: shot.description, scene: shot.details.scene || null, start: clock, duration, sourceDuration: shot.duration, speed: shot.details.speed, keepPitch: shot.details.keepPitch, transition: shot.details.cutTransition, overlays: shot.details.overlays, trimStart: shot.details.trimStart || 0,
         frame: frame ? await copy(frame, 'frames', pad(shot.position)) : null, clip: clip ? await copy(clip, 'clips', pad(shot.position)) : null,
         muteClipSound: Boolean(shot.details.muteClipSound), review: shot.review.status ?? 'pending', dialogue,
       });
@@ -1366,7 +1509,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     const events = timeline.filter((s) => s.clip);
     await write('timeline.edl', [`TITLE: ${sequence.title.replace(/\s+/g, ' ')}`, 'FCM: NON-DROP FRAME', '',
       ...events.flatMap((s, i) => [
-        `${String(i + 1).padStart(3, '0')}  AX       V     C        ${timecode(s.trimStart, fps)} ${timecode(s.trimStart + s.duration, fps)} ${timecode(s.start, fps)} ${timecode(s.start + s.duration, fps)}`,
+        `${String(i + 1).padStart(3, '0')}  AX       V     C        ${timecode(s.trimStart, fps)} ${timecode(s.trimStart + s.duration * s.speed, fps)} ${timecode(s.start, fps)} ${timecode(s.start + s.duration, fps)}`,
         `* FROM CLIP NAME: ${path.basename(s.clip)}`, `* SHOT ${s.shot}${s.scene ? ` (${s.scene})` : ''}`, '']),
     ].join('\n'));
     await write('subtitles.srt', subtitles.map((c, i) => `${i + 1}\n${srtTime(c.from)} --> ${srtTime(c.to)}\n${c.text}\n`).join('\n'));
@@ -1378,6 +1521,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
 
   return {
     subtitleCues: (id) => subtitleCues(shotsOf(needSequence(id).id)), filmCredits, srtTime,
+    insertShot, duplicateShot, splitShot, deleteShot, setCutTransition, setShotSpeed, addTextOverlay, reorderScene, shotTimeline, makeAnimatic,
     detail, create, update, plan, importPlan, updateShot, review, approveFrame, composedPrompts, generateFrame, animate, renderStillShot, runChecks, makeDialogue, rerecordLine, lipSyncShot, takes, selectTake, attachClip, repairFrame, exportProject,
     stitch, produce, stopProduction, stopAllProductions, onGenerationUpdate, idle, needShot, needSequence, outputSize, shotFingerprint,
   };
