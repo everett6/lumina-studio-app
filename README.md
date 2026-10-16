@@ -1,6 +1,6 @@
 # Lumina Studio
 
-**Version 0.9.10** adds voice tools for AI chats (list_voices, preview_voice; local Kokoro voices are free), honours "smooth to 30 fps" on anime storyboards, plus Bake character (a per-character LoRA trained on your GPU), a stronger MCP server, and character sheets that keep anime characters on-model and theatrical anime lip sync (five mouth shapes timed to the words). It also asks before spending paid credits (Confirm & spend) and makes Lumina easier to drive from an AI chat (MCP): live previews (frames, clip contact sheets, dialogue audio), a step-by-step film wizard, job progress and cancel, and edit-by-chat tools (shot look, order, trim, character voice). See [docs/MCP.md](docs/MCP.md). Anime production: [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md).
+**Version 0.9.11** adds background music downloaded from the internet when a film needs it (free CC0 / CC BY tracks, credits kept), one-call voice casting (cast_voices), voice tools for AI chats (list_voices, preview_voice; local Kokoro voices are free), honours "smooth to 30 fps" on anime storyboards, plus Bake character (a per-character LoRA trained on your GPU), a stronger MCP server, and character sheets that keep anime characters on-model and theatrical anime lip sync (five mouth shapes timed to the words). It also asks before spending paid credits (Confirm & spend) and makes Lumina easier to drive from an AI chat (MCP): live previews (frames, clip contact sheets, dialogue audio), a step-by-step film wizard, job progress and cancel, and edit-by-chat tools (shot look, order, trim, character voice). See [docs/MCP.md](docs/MCP.md). Anime production: [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md).
 
 Lumina Studio is an open-source, Linux-first creative workspace for AI images. Bring your own API keys for OpenAI,
 fal.ai, Google Gemini or Replicate. Generate and edit images, keep everything in local projects, build reusable
@@ -52,13 +52,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.9.10_amd64.deb
+sudo apt install ./dist/lumina-studio_0.9.11_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.9.10.AppImage"
+chmod +x "dist/Lumina Studio-0.9.11.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
