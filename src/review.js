@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { contactSheet, probe } from './video.js';
 import { frameDifference } from './qc.js';
+import { billingState } from './budget.js';
 
 const exec = promisify(execFile);
 export const areas = ['identity', 'wardrobe', 'location', 'props', 'action', 'flicker', 'deformation', 'text', 'cross-shot'];
@@ -136,7 +137,7 @@ export function createReviewService({ repo, assetStore, sequences, catalog }) {
     if (!Array.isArray(moments) || !moments.length || moments.length > limits.frames || moments.some((t) => !Number.isFinite(t) || t < 0 || t > g.last)) fail('Times must contain 1–12 timestamps within the decodable clip.');
     const out = payload();
     const frames = [];
-    for (const t of moments) frames.push(await addFrame(out, id, t, 'sample'));
+    for (const t of moments) frames.push(await addFrame(out, id, t, 'sample', g));
     return finished(out, { assetId: id, frames });
   };
   const bundle = async (shotId) => {
@@ -282,7 +283,8 @@ export function createReviewService({ repo, assetStore, sequences, catalog }) {
     let stopReason = 'max_attempts';
     // Check limits before estimates or provider submission, and again atomically before each attempt.
     const limitReason = () => {
-      const all = history({ storyboardId: sequenceId }).attempts;
+      // Requests refused before submission (budget 402, confirmation 428) spent nothing and use no attempt.
+      const all = history({ storyboardId: sequenceId }).attempts.filter((a) => a.state !== 'budget_refused' && a.state !== 'confirm_required');
       const policy = repo.films.bySequence(sequenceId)?.policy ?? {};
       if (all.filter((a) => a.shotId === shotId).length >= Math.min(2, policy.maxAttemptsPerShot ?? 2)) return 'shot_limit';
       if (all.length >= Math.min(10, policy.maxRepairsPerFilm ?? 10)) return 'film_limit';
@@ -321,10 +323,12 @@ export function createReviewService({ repo, assetStore, sequences, catalog }) {
         attempts.push(attempt);
         if (attempt.state === 'completed') { stopReason = 'needs_review'; break; }
         if (active({ status: attempt.state })) { stopReason = 'pending_attempt'; break; }
+        // A failed paid job may still have been charged: only a confirmed-unbilled failure is retried automatically.
+        if (attempt.generationId && !['confirmed_unbilled', 'refused'].includes(billingState(repo.generations.get(attempt.generationId)))) { stopReason = 'billing_uncertain'; break; }
       } catch (error) {
-        Object.assign(attempt, { state: error.status === 402 ? 'budget_refused' : attempt.generationId ? 'uncertain' : 'failed', httpStatus: error.status ?? null, error: bounded(error.message, 1000), budget: error.status === 402 ? error.data ?? null : undefined });
+        Object.assign(attempt, { state: error.status === 402 ? 'budget_refused' : error.status === 428 && !attempt.generationId ? 'confirm_required' : attempt.generationId ? 'uncertain' : 'failed', httpStatus: error.status ?? null, error: bounded(error.message, 1000), budget: error.status === 402 ? error.data ?? null : undefined });
         append(sequenceId, 'repair', attempt); attempts.push(attempt);
-        stopReason = error.status === 402 ? 'budget_refused' : 'error';
+        stopReason = error.status === 402 ? 'budget_refused' : attempt.state === 'confirm_required' ? 'confirm_required' : 'error';
         break; // transport/unknown billing must never trigger an automatic retry
       }
     }
@@ -339,8 +343,8 @@ export function createReviewService({ repo, assetStore, sequences, catalog }) {
       if (kind === 'frame') await call('POST', `/api/shots/${shotId}/takes/select`, { kind, assetId: takeId });
       else if (kind === 'clip') {
         const takes = await call('GET', `/api/shots/${shotId}/takes`);
+        // Both selection routes already run the shot's checks.
         await call('POST', `/api/shots/${shotId}/${takes.clips.some((t) => t.assetId === takeId) ? 'takes/select' : 'attach-clip'}`, { kind, assetId: takeId });
-        await call('POST', `/api/shots/${shotId}/checks`, {});
         await call('POST', `/api/shots/${shotId}/review`, { status: 'accepted', notes: reason });
       } else if (kind === 'trim') {
         if (shot.videoAssetId !== c.original.clip) fail('Selected clip changed since this trim was proposed.', 409);

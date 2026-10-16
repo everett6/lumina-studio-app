@@ -51,7 +51,7 @@ const planSchema = z.object({
   idea: z.string().max(6000), screenplay: z.string().max(60000), settings: settingsSchema,
   shots: z.array(z.object({
     id: idSchema, description: z.string().max(2000), camera: z.string().max(200).nullable(),
-    duration: z.number().finite().min(1).max(30).nullable(), details: detailsSchema,
+    duration: z.number().finite().min(1 / 24).max(30).nullable(), details: detailsSchema,
     imageAssetId: idSchema.nullable(), videoAssetId: idSchema.nullable(), sceneState: record.nullable().optional(),
   }).strict()).max(maxShots),
 }).strict();
@@ -149,10 +149,20 @@ export function createLibraryService({ repo, assetStore, exportDir, sequences })
   function referenceScan() {
     const assets = allAssets(), used = new Map(), generations = allGenerations();
     const use = (id, reason) => { if (!used.has(id)) used.set(id, new Set()); used.get(id).add(reason); };
+    // Ids and stored file names are UUID-based, so each string is matched through an index instead of
+    // against every asset; only files with other names (old imports) fall back to a substring check.
+    const byToken = new Map(), odd = [];
+    const uuidOf = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+    for (const a of assets) {
+      byToken.set(String(a.id).toLowerCase(), a.id);
+      const stem = /^([0-9a-f-]{36})\.[a-z0-9]+$/i.exec(String(a.file ?? ''));
+      if (stem) byToken.set(stem[1].toLowerCase(), a.id); else if (a.file) odd.push(a);
+    }
     const scan = (value, reason) => {
       if (value === null || value === undefined) return;
       if (typeof value === 'string') {
-        for (const a of assets) if (value.includes(a.id) || value.includes(a.file)) use(a.id, reason);
+        for (const token of value.match(uuidOf) ?? []) { const hit = byToken.get(token.toLowerCase()); if (hit) use(hit, reason); }
+        for (const a of odd) if (value.includes(a.file)) use(a.id, reason);
       } else if (typeof value === 'object') {
         for (const [key, child] of Object.entries(value)) { scan(key, reason); scan(child, reason); }
       }

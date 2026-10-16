@@ -44,7 +44,7 @@ const audio = ['-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2'];
 // Bound decoder threads too: ffmpeg 8 can stall frame-threaded H.264 decoding when
 // sped-up timestamps and atempo share a source. A single decoder thread also caps preview CPU.
 const ffmpeg = (args) => run('ffmpeg', ['-v', 'error', '-nostdin', '-filter_threads', '1', '-filter_complex_threads', '1', '-threads', '1', ...args], 600_000);
-const tempo = (speed) => {
+export const tempo = (speed) => {
   const factors = [];
   while (speed < 0.5) { factors.push(0.5); speed /= 0.5; }
   while (speed > 2) { factors.push(2); speed /= 2; }

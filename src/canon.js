@@ -153,10 +153,14 @@ export function createCanonService({ repo }) {
     const { change, fromRevision, toRevision } = parsed(affectedSchema, input);
     const changes = change ? [change] : diff(id, fromRevision, toRevision).changes;
     const shots = [];
+    // Like generation: a shot with no cast or location of its own uses the storyboard's cast (characters and sets).
+    const filmCast = repo.sequences.get(id)?.settings?.characterIds ?? [];
     for (const shot of repo.shots.listBySequence(id)) {
       const states = statesOf(shot), people = states.flatMap((s) => s.characters ?? []);
-      const characters = new Set([...(shot.details.characterIds ?? []), ...people.map((c) => c.id)]);
-      const locations = new Set([shot.details.locationId, ...states.map((s) => s.location)].filter(Boolean));
+      const own = [...(shot.details.characterIds ?? []), shot.details.locationId].filter(Boolean);
+      const inherited = own.length ? [] : filmCast;
+      const characters = new Set([...(shot.details.characterIds ?? []), ...inherited, ...people.map((c) => c.id)]);
+      const locations = new Set([shot.details.locationId, ...inherited, ...states.map((s) => s.location ?? s.locationId)].filter(Boolean));
       const props = new Set(people.flatMap((c) => [...(c.props?.held ?? []), ...(c.props?.worn ?? [])]));
       const reasons = changes.filter((c) => {
         if (['style', 'storyFacts'].includes(c.section)) return true;

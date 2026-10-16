@@ -217,6 +217,20 @@ test('failed provider repairs retry at most twice and concurrent requests cannot
   } finally { await t.close(); }
 });
 
+test('a failed paid repair whose billing is uncertain is never retried automatically', async () => {
+  const t = await fixture();
+  const generations = t.app.repo.generations;
+  const original = generations.get;
+  // The provider failed but may have charged (e.g. the download failed after the job ran).
+  generations.get = (id) => { const g = original(id); return g && g.status === 'failed' ? { ...g, providerJob: { ...g.providerJob, billingState: 'download_failed' } } : g; };
+  try {
+    const plan = { type: 'repair_frame', box: [0.1, 0.1, 0.5, 0.5], instruction: '[fail] restore hat', provider: 'mock', model: 'mock-tools' };
+    const result = await t.call('execute_repair', { shotId: t.shots[0].id, plan });
+    assert.equal(result.attempts.length, 1);
+    assert.equal(result.stopReason, 'billing_uncertain');
+  } finally { generations.get = original; await t.close(); }
+});
+
 test('repair limits and findings survive an app and MCP restart and later creation of a film', async () => {
   const t = await fixture();
   let restarted;

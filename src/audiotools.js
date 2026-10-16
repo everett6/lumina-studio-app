@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { filmFps, run, runCapture } from './video.js';
 import { lineTimes, mixSoundtrack } from './soundtrack.js';
+import { playbackSeconds, tempo } from './animatic.js';
 
 // Delivery policy, not a claim that every kind of programme should use these targets.
 export const deliveryTargets = Object.freeze({ integratedLufs: -16, toleranceLu: 1, truePeakDbtp: -1, channels: 2, silenceThresholdDb: -50, silenceMinSeconds: 0.5 });
@@ -107,7 +108,8 @@ export function createAudioTools({ repo, assetStore, sequences, exportDir }) {
     let clock = 0, cue = sequence.settings.music ?? null;
     for (const [index, shot] of shots.entries()) {
       const info = infos[index];
-      const duration = Math.max(1, Math.round((shot.duration ?? Math.max(0, (info?.duration ?? 0) - (shot.details.trimStart || 0))) * fps)) / fps;
+      // Screen time, after playback speed (as the join plays it).
+      const duration = Math.max(1, Math.round((shot.duration != null ? playbackSeconds(shot) : Math.max(0, (info?.duration ?? 0) - (shot.details.trimStart || 0))) * fps)) / fps;
       const lines = await Promise.all((shot.details.dialogue ?? []).map(async (line, lineIndex) => {
         const recording = line.assetId ? repo.assets.get(line.assetId) : null;
         let seconds = null, playable = false, error = null;
@@ -239,7 +241,7 @@ export function createAudioTools({ repo, assetStore, sequences, exportDir }) {
       const input = sound ? ['-i', assetStore.path(source)] : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'];
       const out = path.join(dir, `clip-${i}.wav`);
       const edges = dissolve ? '' : `,afade=t=in:d=0.008,afade=t=out:st=${Math.max(0, duration - 0.008)}:d=0.008`;
-      await ff([...input, '-map', '0:a:0', '-af', `atrim=start=${sound ? slot.clip.trimStart : 0},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=0:${duration}${edges}`, '-t', String(duration), '-c:a', 'pcm_f32le', '-y', out]);
+      await ff([...input, '-map', '0:a:0', '-af', `atrim=start=${sound ? slot.clip.trimStart : 0},asetpts=PTS-STARTPTS,${sound && (shot.details.speed ?? 1) !== 1 ? `${shot.details.keepPitch === false ? `asetrate=48000*${shot.details.speed},aresample=48000` : tempo(shot.details.speed)},` : ''}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=0:${duration}${edges}`, '-t', String(duration), '-c:a', 'pcm_f32le', '-y', out]);
       parts.push(out);
     }
     const clipFile = path.join(dir, 'clips.wav'), filters = [];

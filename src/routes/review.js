@@ -14,7 +14,7 @@ export function registerRoutes(ctx) {
   // attribution so a loopback request cannot turn an MCP refusal into an app approval.
   const caller = (req) => async (method, path, body) => {
     const response = await fetch(`http://127.0.0.1:${req.socket.localPort}${path}`, {
-      method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(req.headers['x-lumina-client'] ? { 'x-lumina-client': req.headers['x-lumina-client'] } : {}), ...(req.headers['x-lumina-approval-id'] ? { 'x-lumina-approval-id': req.headers['x-lumina-approval-id'] } : {}) },
+      method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(req.headers['x-lumina-client'] ? { 'x-lumina-client': req.headers['x-lumina-client'] } : {}), ...(req.headers['x-lumina-approval-id'] ? { 'x-lumina-approval-id': req.headers['x-lumina-approval-id'] } : {}), ...(req.headers['x-lumina-confirm-spend'] === '1' ? { 'x-lumina-confirm-spend': '1' } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(120000),
     });
     const data = await response.json();

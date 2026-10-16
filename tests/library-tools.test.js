@@ -160,6 +160,11 @@ test('library and project management over MCP', async (suite) => {
       assert.deepEqual(missing.sequence.settings.characterIds, []); assert.deepEqual(missing.shots[0].details.characterIds, []);
       assert.equal(missing.shots[0].details.dialogue[0].speaker, 'none'); assert.ok(missing.warnings.length > 0);
     });
+    await suite.test('a sub-second shot (from split_shot) survives an export/import round trip', async () => {
+      const plan = JSON.parse((await good('export_storyboard_json', { storyboardId: board.id })).json);
+      const imported = await good('import_storyboard_json', { projectId: project.id, json: JSON.stringify({ ...plan, shots: [{ ...plan.shots[0], duration: 0.5 }] }) });
+      assert.equal(imported.shots[0].duration, 0.5);
+    });
     await suite.test('invalid JSON, invalid plan shapes and embedded paths are rejected before writes', async () => {
       const exported = await good('export_storyboard_json', { storyboardId: board.id });
       const before = t.app.repo.sequences.listByProject(project.id).length;

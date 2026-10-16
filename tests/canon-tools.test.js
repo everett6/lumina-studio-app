@@ -78,8 +78,9 @@ test('versioned film canon over MCP', async (t) => {
       const affected = await good('canon_affected_shots', { ...args, fromRevision: 1, toRevision: 2 });
       assert.deepEqual(affected.shots.map((s) => s.shotId), shots.map((s) => s.id), 'story facts can affect every shot');
       for (const [change, expected] of [
-        [{ section: 'characters', id: hero.id }, [shots[0].id]],
-        [{ section: 'locations', id: bridge.id }, [shots[0].id]],
+        // Shots 2 and 3 have no cast of their own, so generation draws them with the storyboard cast (Aiko, Bridge).
+        [{ section: 'characters', id: hero.id }, shots.map((s) => s.id)],
+        [{ section: 'locations', id: bridge.id }, shots.map((s) => s.id)],
         [{ section: 'props', id: 'sword' }, [shots[0].id, shots[2].id]],
         [{ section: 'wardrobe', characterId: hero.id, id: 'coat' }, [shots[0].id]],
         [{ section: 'style' }, shots.map((s) => s.id)],

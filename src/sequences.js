@@ -513,7 +513,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     });
     const detailsFor = (side) => ({ ...shot.details, dialogue: dialogue[side], post: {}, lipsync: null,
       cutTransition: side ? shot.details.cutTransition : { transition: 'cut', seconds: 0 },
-      trimStart: shot.details.trimStart + (side && shot.details.method !== 'still' ? atSeconds * speed : 0),
+      trimStart: shot.details.trimStart + (side && shot.videoAssetId ? atSeconds * speed : 0),
       overlays: spans(shot.details.overlays, 'seconds', side),
       holds: spans(shot.details.holds, 'seconds', side),
       sfx: shot.details.sfx.filter((e) => (e.at >= atSeconds) === Boolean(side)).map((e) => ({ ...e, at: e.at - (side ? atSeconds : 0) })) });
