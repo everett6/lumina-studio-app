@@ -7,7 +7,7 @@ import { confirmSpend, nearestDuration, RequestError } from './generation.js';
 import { presets } from './presets.js';
 import { priceFor } from './pricing.js';
 import { colourStats, curveFilter, matchCurve } from './grade.js';
-import { animeChecks, checkClip, driftChecks, suggestedStatus } from './qc.js';
+import { animeChecks, checkClip, driftChecks, identityNotVerified, suggestedStatus, withStatus } from './qc.js';
 import { imageSize } from './assets.js';
 import { encodePng } from './png.js';
 import { lineTimes, mixSoundtrack } from './soundtrack.js';
@@ -644,11 +644,13 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       checks.push(...await animeChecks(assetStore.path(clip)));
     }
     // Identity: do the people in the shot still look like their reference photos? (Only when installed; real faces.)
+    const hasCast = shotCast(sequence, shot).some((cid) => repo.characters.get(cid)?.kind === 'character');
+    if (hasCast && (sequence.settings.look === 'anime' || !faces?.status().installed)) checks.push(identityNotVerified(sequence.settings.look));
     if (faces?.status().installed && sequence.settings.look !== 'anime') {
       const people = shotCast(sequence, shot).map((cid) => repo.characters.get(cid)).filter((c) => c && c.kind === 'character')
         .map((c) => ({ name: c.name, referencePaths: c.referenceAssetIds.map((rid) => asset(rid)).filter((a) => a?.mimeType?.startsWith('image/')).map((a) => assetStore.path(a)) }));
       checks.push(...await faces.checkClip(assetStore.path(clip), people, { duration: shot.duration ?? 4 }).catch((error) => [
-        { id: 'faces', ok: true, severity: 'warning', detail: `Face check could not run: ${error.message}` }]));
+        { id: 'faces', ok: false, status: 'unavailable', severity: 'warning', detail: `Face check could not run: ${error.message}` }]));
     }
     const speechChecks = dialogueFit(shot);
     if (speechChecks) checks.push(speechChecks);
@@ -656,7 +658,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     if (current.videoAssetId !== clip.id) return null; // a newer clip arrived meanwhile
     const keep = current.review.status === 'accepted' && current.review.assetId === clip.id;
     repo.shots.update(shotId, {
-      review: { ...current.review, assetId: clip.id, checks, checkedAt: new Date().toISOString(), status: keep ? 'accepted' : suggestedStatus(checks) },
+      review: { ...current.review, assetId: clip.id, checks: checks.map(withStatus), checkedAt: new Date().toISOString(), status: keep ? 'accepted' : suggestedStatus(checks) },
     });
     log.info?.('Shot checked', { sequence: sequence.id, shot: shot.position, problems: checks.filter((c) => !c.ok).length });
     return checks;

@@ -228,13 +228,13 @@ export function createFaceChecker({ binDir, log = console, fetchImpl = fetch }) 
     const seen = [];
     for (const at of times) seen.push(...await facesIn(clipPath, at));
     if (!seen.length) {
-      return [{ id: 'faces', ok: true, severity: 'warning', detail: 'No human faces found in the clip, so identity was not checked (normal for anime, animals or wide shots)' }];
+      return [{ id: 'faces', ok: false, status: 'unavailable', severity: 'warning', detail: 'No human faces found in the clip, so identity was not checked (normal for anime, animals or wide shots)' }];
     }
     const checks = [];
     for (const person of withPhotos) {
       const refs = await referenceVectors(person.referencePaths);
       if (!refs.length) {
-        checks.push({ id: `face:${person.name}`, ok: true, severity: 'warning', detail: `No face found in ${person.name}'s reference photos, so identity was not checked` });
+        checks.push({ id: `face:${person.name}`, ok: false, status: 'unavailable', severity: 'warning', detail: `No face found in ${person.name}'s reference photos, so identity was not checked` });
         continue;
       }
       const best = Math.max(...seen.map((f) => Math.max(...refs.map((r) => cosine(f.vector, r)))));

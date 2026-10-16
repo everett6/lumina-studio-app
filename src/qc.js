@@ -43,6 +43,20 @@ export async function checkClip(file, { expectedSeconds = null, expectAudio = fa
 }
 
 // The review status the checks suggest. Only a person (or the orchestrator) can mark a shot accepted.
+// Every check reports one of three results. 'unavailable' (could not run, or nothing can verify it) is never a pass:
+// it carries ok: false so it is counted with the problems and shown to the reviewer.
+export function withStatus(check) {
+  return { ...check, status: check.status ?? (check.ok ? 'passed' : 'failed') };
+}
+
+// What no automatic check here can verify, stated as such instead of being implied by a passing colour check.
+export function identityNotVerified(look, reason) {
+  return { id: 'character-identity', ok: false, status: 'unavailable', severity: 'warning', measures: 'nothing',
+    detail: reason ?? (look === 'anime'
+      ? 'Character identity is not verified automatically for anime (the colour check only measures colour). Compare the clip with the approved character references (preview_shot) before accepting.'
+      : 'Character identity was not verified (the face checker is not installed). Compare the clip with the reference photos before accepting.') };
+}
+
 export function suggestedStatus(checks) {
   if (checks.some((c) => !c.ok && c.severity === 'error')) return 'needs_regeneration';
   return 'needs_review';
@@ -99,7 +113,7 @@ export async function driftChecks(clip, { startFrame = null, endFrame = null } =
         detail: shift < 12 ? 'Colours stay steady through the clip' : `Colours shift noticeably during the clip (by ${shift.toFixed(0)}): lighting or wardrobe may have drifted` });
     }
   } catch (error) {
-    checks.push({ id: 'drift', ok: true, severity: 'warning', detail: `Drift checks could not run: ${error.message}` });
+    checks.push({ id: 'drift', ok: false, status: 'unavailable', severity: 'warning', detail: `Drift checks could not run: ${error.message}` });
   }
   return checks;
 }
@@ -180,12 +194,12 @@ export async function animeChecks(file) {
     if (area.length >= 3) {
       const { drift } = colourDrift(area);
       const flagged = drift > 0.45;
-      checks.push({ id: 'character-drift', ok: !flagged, severity: 'warning', score: drift,
+      checks.push({ id: 'character-drift', ok: !flagged, severity: 'warning', score: drift, measures: 'colour only (not identity)',
         detail: flagged ? `The colours in the character area change a lot during the clip (${Math.round(drift * 100)}% different from the start): costume or hair colour may be drifting. This does not check who it is; compare with the start frame.`
-          : 'Colours in the character area stay steady' });
+          : 'Colours in the character area stay steady (colour only: this does not show it is the same character)' });
     }
   } catch (error) {
-    checks.push({ id: 'anime-review', ok: true, severity: 'warning', detail: `Anime review checks could not run: ${error.message}` });
+    checks.push({ id: 'anime-review', ok: false, status: 'unavailable', severity: 'warning', detail: `Anime review checks could not run: ${error.message}` });
   }
   return checks;
 }

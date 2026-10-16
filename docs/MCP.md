@@ -134,6 +134,7 @@ Notes:
 - Clip checks now also flag **flicker** (brightness jumps that bounce back) and **character-area colour drift**
   (the colours of the middle/upper part of the frame change a lot, which can mean costume or hair colour drift).
   They only warn, never fail a shot, and do not check who is on screen (no identity check).
+  Every check in a shot review now carries `status`: `passed`, `failed` or `unavailable` (could not run, or nothing can verify it). Unavailable is never a pass. Anime shots with a cast always include `character-identity: unavailable`, because the colour check measures colour, not who it is.
 
 ### HTTP routes behind these tools
 
