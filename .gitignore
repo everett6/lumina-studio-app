@@ -5,3 +5,4 @@ storage/assets/*
 exports/
 dist/
 __pycache__/
+logs/

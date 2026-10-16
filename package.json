@@ -13,7 +13,8 @@
     "desktop:mock": "LUMINA_MOCK=1 electron .",
     "dist": "electron-builder --linux deb AppImage",
     "mcp": "node mcp/server.js",
-    "doctor": "node scripts/doctor.mjs"
+    "doctor": "node scripts/doctor.mjs",
+    "monitor": "node scripts/monitor.mjs"
   },
   "engines": {
     "node": ">=22.13"
