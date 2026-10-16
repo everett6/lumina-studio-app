@@ -71,7 +71,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake, publicDir, exportDir, info } = ctx;
+  const { music, repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -157,6 +157,18 @@ export function createApiServer(ctx) {
     // Masks are working files for inpainting; they stay out of the library.
     return { status: 201, body: { asset: await assetStore.save({ bytes: image.bytes, projectId: body.projectId, kind: body.kind === 'mask' ? 'mask' : 'reference', label }) } };
   });
+  // Background music from the internet (Openverse; CC0, public domain and CC BY only), downloaded on request.
+  route('GET', '/api/music/search', async (req, params, url) => {
+    if (!music) throw new RequestError(501, 'Music search is not available.');
+    return { tracks: await music.search(url.searchParams.get('q'), { minSeconds: Number(url.searchParams.get('minSeconds') ?? 30) || 0, limit: Number(url.searchParams.get('limit') ?? 10) || 10 }) };
+  });
+  route('POST', `/api/projects/${uuid}/music`, async (req, [projectId]) => {
+    needProject(projectId);
+    if (!music) throw new RequestError(501, 'Music download is not available.');
+    const { trackId } = await readBody(req, 4 * 1024);
+    return { status: 201, body: await music.download(projectId, trackId) };
+  });
+  route('GET', `/api/assets/${uuid}/credit`, (req, [id]) => ({ credit: music?.credit(id) ?? null }));
   // Music, ambience or recorded dialogue for films: the raw file as the body (MP3, WAV, OGG or FLAC, up to 80 MB).
   route('POST', `/api/projects/${uuid}/audio`, async (req, [projectId]) => {
     needProject(projectId);
@@ -490,7 +502,15 @@ export function createApiServer(ctx) {
   route('POST', `/api/storyboards/${uuid}/import-plan`, async (req, [id]) => sequences.importPlan(id, await readBody(req, 256 * 1024)));
   route('GET', `/api/storyboards/${uuid}`, (req, [id]) => sequences.detail(id));
   route('PATCH', `/api/storyboards/${uuid}`, async (req, [id]) => {
-    sequences.update(id, await readBody(req, 32 * 1024));
+    const body = await readBody(req, 32 * 1024);
+    // Music and ambience beds must be audio files of this storyboard's project.
+    for (const role of ['music', 'ambience']) {
+      const assetId = body.settings?.[role]?.assetId;
+      if (!assetId) continue;
+      const found = repo.assets.get(String(assetId));
+      if (!found?.mimeType?.startsWith('audio/') || found.projectId !== sequences.needSequence(id).projectId) throw new RequestError(400, `The ${role} must be an audio file in this storyboard's project.`);
+    }
+    sequences.update(id, body);
     return sequences.detail(id);
   });
   route('DELETE', `/api/storyboards/${uuid}`, (req, [id]) => {

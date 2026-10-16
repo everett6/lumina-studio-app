@@ -26,7 +26,7 @@ MONEY
 
 RULES OF THE ROAD
 - Anime storyboards (look: "anime") are English only. Japanese and other languages are not supported for anime dialogue.
-- Voices: list_voices shows every voice (local Kokoro/Chatterbox voices are free); preview_voice plays a sample; set_character_voice assigns one; voice_dialogue records the lines.
+- Voices: cast_voices gives the narrator and every character of a storyboard a distinct free local voice in one call (record=true also records the lines); list_voices shows every voice; preview_voice plays a sample; set_character_voice changes one; voice_dialogue records a shot's lines.
 - Lip sync is OFF by default per storyboard (setting lipSync, chosen at create_storyboard or in the storyboard's Settings in the app). When off, lip_sync_shot is refused. It needs recorded dialogue first (voice_dialogue).
 - Local models are free but slow and share one GPU: run one heavy job at a time. Do not poll; use watch_jobs with waitSeconds to wait for jobs.
 - Replacing work (import_shot_plan replace, plan_storyboard/plan_pages/outline_book replace, draft_bible, bake_character remove) needs the user's OK first.
@@ -53,7 +53,7 @@ const TOOL_META = {
   draft_chapter: ['do', 'Uses the writer model (may spend credits).', 'read_chapter'], read_chapter: ['r', free, null],
   revise_chapter: ['o', 'Uses the writer model (may spend credits).', null], edit_chapter: ['i', free, null],
   generate_cover: ['o', paid, 'export_book'], narrate: ['o', paid, 'export_book'], generate_speech: ['o', 'Free with a local voice (Kokoro, Chatterbox); provider voices may spend credits.', null],
-  list_voices: ['r', free, 'preview_voice, then set_character_voice'], preview_voice: ['o', 'Free with a local voice; provider voices may spend a little.', 'set_character_voice or generate_speech'],
+  list_voices: ['r', free, 'preview_voice, then cast_voices or set_character_voice'], find_music: ['ro', 'Free (searches Openverse on the internet).', 'set_background_music (trackId)'], set_background_music: ['io', 'Free; may download a track from the internet (CC0 / CC BY music).', 'join_storyboard (the music is mixed in when the film is joined)'], cast_voices: ['i', 'Free with the local voices (the default); provider voices may spend a little per line when record=true.', 'preview_voice, then voice_dialogue (or record=true)'], preview_voice: ['o', 'Free with a local voice; provider voices may spend a little.', 'set_character_voice or generate_speech'],
   generate_video: ['o', paid, 'get_generation (if wait=false)'], import_manuscript: ['', free, 'read_chapter or revise_chapter'],
   create_storyboard: ['o', 'Planning uses the writer model (a little credit); plan=false is free.', 'film_next_step'],
   import_shot_plan: ['d', free, 'film_next_step'], production_readiness: ['r', free, 'estimate_film_cost'],
@@ -929,6 +929,67 @@ export function registerLuminaTools(server, client) {
     }));
   }
 
+  tool('find_music', {
+    title: 'Find background music',
+    description: 'Search free music on the internet (Openverse: Jamendo, Freesound, Wikimedia and more) by mood, genre or instruments, e.g. "calm emotional piano", "epic orchestral battle", "lofi chill", "j-pop upbeat". Only tracks you may use in a film are returned: CC0 / public domain (no conditions) and CC BY (credit the artist; the credit line is kept). Pass a trackId to set_background_music to download and use it.',
+    inputSchema: { query: z.string().min(1).max(200), minSeconds: z.number().int().min(0).max(1800).optional().describe('Skip tracks shorter than this (default 30)'), limit: z.number().int().min(1).max(20).optional() },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  }, safe(async ({ query, minSeconds, limit }) => {
+    const params = new URLSearchParams({ q: query, ...(minSeconds !== undefined ? { minSeconds: String(minSeconds) } : {}), ...(limit ? { limit: String(limit) } : {}) });
+    const { tracks } = await client.call('GET', `/api/music/search?${params}`);
+    return ok(text({ tracks: tracks.map(({ id, title, creator, seconds, license, needsCredit, source, page }) => ({ trackId: id, title, creator, seconds, license, needsCredit, source, page })), note: tracks.length ? undefined : 'Nothing found: try broader words (e.g. "piano", "orchestral", "ambient").' }));
+  }));
+
+  tool('set_background_music', {
+    title: 'Set background music',
+    description: 'Put a music bed (and optionally an ambience bed such as rain or city noise) under a storyboard\'s film. The track loops to the film\'s length and is ducked automatically whenever someone speaks; dialogue stays loudness-matched. The music can come from the internet: search (a mood, e.g. "gentle piano") downloads the best free track automatically, or trackId downloads one picked with find_music (CC0 / CC BY only; the artist credit is returned, put it in the video description). Or give an audio assetId from the library, or on a local connection filePath to an MP3/WAV/OGG/FLAC file. volume 0-2 (default 0.3 for music, 0.25 for ambience). remove=true takes that bed off. clipVolume sets the clips\' own sound (default 1). Then join_storyboard to hear it.',
+    inputSchema: {
+      storyboardId: z.string(), role: z.enum(['music', 'ambience']).optional().describe('Default music'),
+      search: z.string().max(200).optional().describe('Find and download a free track for this mood, e.g. "calm emotional piano"'),
+      trackId: z.string().optional().describe('A trackId from find_music'),
+      assetId: z.string().optional(), filePath: z.string().optional().describe('Absolute path of an audio file (local connections only)'),
+      volume: z.number().min(0).max(2).optional(), clipVolume: z.number().min(0).max(2).optional(), remove: z.boolean().optional(),
+    },
+  }, safe(async ({ storyboardId, role = 'music', search, trackId, assetId, filePath, volume, clipVolume, remove = false }) => {
+    const detail = await client.call('GET', `/api/storyboards/${storyboardId}`);
+    const settings = {};
+    if (clipVolume !== undefined) settings.clipVolume = clipVolume;
+    let label;
+    let skipped = [];
+    if (remove) settings[role] = null;
+    else if (search || trackId || assetId || filePath) {
+      if (search && !trackId && !assetId && !filePath) {
+        const filmSeconds = detail.shots.reduce((sum, shot) => sum + (shot.duration ?? 0), 0);
+        const { tracks } = await client.call('GET', `/api/music/search?${new URLSearchParams({ q: search, minSeconds: String(Math.min(60, Math.max(20, Math.round(filmSeconds)))), limit: '5' })}`);
+        if (!tracks.length) throw new Error(`No free music found for "${search}". Try broader words (e.g. "piano", "orchestral", "ambient"), or find_music.`);
+        // The first track that downloads cleanly wins; broken links are skipped.
+        for (const candidate of tracks) {
+          try { ({ asset: { id: assetId, label } } = await client.call('POST', `/api/projects/${detail.sequence.projectId}/music`, { trackId: candidate.id })); break; } catch (error) { skipped.push(`${candidate.title}: ${error.message}`); }
+        }
+        if (!assetId) throw new Error(`Could not download any of the tracks found: ${skipped.join('; ')}`);
+      } else if (trackId) {
+        ({ asset: { id: assetId, label } } = await client.call('POST', `/api/projects/${detail.sequence.projectId}/music`, { trackId }));
+      }
+      if (filePath) {
+        if (!client.upload) throw new Error('filePath works on a local connection only. Add the file to the project in the Lumina app, then pass its assetId.');
+        const { readFile } = await import('node:fs/promises');
+        const uploaded = await client.upload(`/api/projects/${detail.sequence.projectId}/audio`, await readFile(path.resolve(filePath)), path.basename(filePath));
+        assetId = uploaded.asset.id; label = uploaded.asset.label;
+      }
+      settings[role] = { assetId, volume: volume ?? (role === 'music' ? 0.3 : 0.25) };
+    } else if (volume !== undefined) {
+      const current = detail.sequence.settings[role];
+      if (!current) throw new Error(`This storyboard has no ${role} yet: pass assetId or filePath.`);
+      settings[role] = { ...current, volume };
+    } else if (clipVolume === undefined) throw new Error('Pass assetId or filePath (or volume, clipVolume, remove).');
+    const updated = await client.call('PATCH', `/api/storyboards/${storyboardId}`, { settings });
+    const { music, ambience, clipVolume: clips } = updated.sequence.settings;
+    const creditOf = async (bed) => (bed?.assetId ? (await client.call('GET', `/api/assets/${bed.assetId}/credit`).catch(() => ({ credit: null }))).credit : null);
+    const credits = (await Promise.all([creditOf(music), creditOf(ambience)])).filter(Boolean).map(({ title, creator, license, needsCredit, credit, page }) => ({ title, creator, license, needsCredit, credit, page }));
+    return ok(text({ storyboardId, music, ambience, clipVolume: clips, imported: label, credits: credits.length ? credits : undefined, skipped: skipped.length ? skipped : undefined,
+      creditNote: credits.some((c) => c.needsCredit) ? 'CC BY music: put the credit line in the video description or end credits when you publish.' : undefined, next: updated.sequence.outputAssetId ? 'join_storyboard again to remix the film with it (the picture is reused).' : 'join_storyboard to make the film with it.' }));
+  }));
+
   tool('join_storyboard', {
     title: 'Join storyboard clips',
     description: 'Join the storyboard\'s clips, in shot order, into one MP4 saved in the project library. Needs ffmpeg on the computer running Lumina. Shots without a clip are skipped. Long films take a few minutes; if it is still running when this returns, call get_storyboard later.',
@@ -1250,6 +1311,98 @@ export function registerLuminaTools(server, client) {
     const detail = await client.call('PATCH', `/api/shots/${shotId}`, { details: { ...(timing !== undefined ? { timing } : {}), ...(holds !== undefined ? { holds } : {}) } });
     const shot = shotIn(detail, shotId);
     return ok(text({ shotId, position: shot?.position, timing: shot?.details?.timing, holds: shot?.details?.holds }));
+  }));
+
+  // Kokoro/Chatterbox voice pools for automatic casting, most natural first.
+  const castPools = {
+    female: ['af_heart', 'bf_emma', 'af_bella', 'af_nicole', 'bf_isabella', 'af_sarah', 'af_nova', 'bf_alice', 'af_sky', 'af_kore', 'bf_lily', 'af_aoede', 'af_jessica', 'af_river', 'af_alloy'],
+    male: ['am_michael', 'bm_george', 'am_fenrir', 'bm_lewis', 'am_puck', 'am_eric', 'bm_daniel', 'am_liam', 'am_onyx', 'am_echo', 'am_adam', 'am_santa'],
+    narrator: ['bm_fable', 'af_heart', 'bf_emma', 'bm_george'],
+  };
+  const genderOf = (character) => {
+    const words = `${character.designTags ?? ''} ${character.description ?? ''}`.toLowerCase();
+    const count = (re) => (words.match(re) ?? []).length;
+    const female = count(/\b(1girl|\d?girls?|woman|women|female|lady|she|her|princess|queen|mother|sister|daughter|witch)\b/g);
+    const male = count(/\b(1boy|\d?boys?|man|men|male|guy|he|his|him|prince|king|father|brother|son)\b/g);
+    return female > male ? 'female' : male > female ? 'male' : null;
+  };
+
+  tool('cast_voices', {
+    title: 'Cast voices for a storyboard',
+    description: 'Give the narrator and every character in a storyboard (its cast and every dialogue speaker) a voice in one call. Characters without a voice get a distinct free local voice (female/male guessed from designTags and description); voices already chosen are kept unless replace=true. Pick specific ones with narrator / voices (voice names from list_voices). engine "chatterbox" acts lines with emotion on the GPU; "kokoro" (default) is fast. record=true then records every unrecorded line. Changing a voice does not re-record existing lines (use rerecord_line).',
+    inputSchema: {
+      storyboardId: z.string(),
+      narrator: z.string().optional().describe('Narrator voice name, e.g. "bm_fable"'),
+      voices: z.record(z.string(), z.string()).optional().describe('characterId -> voice name, e.g. {"<id>": "af_bella"}'),
+      engine: z.enum(['kokoro', 'chatterbox']).optional(),
+      provider: z.string().optional().describe('Use a provider voice model instead of the local voices (with model)'), model: z.string().optional(),
+      replace: z.boolean().optional().describe('Also re-cast characters that already have a voice (default false)'),
+      record: z.boolean().optional().describe('Record every unrecorded dialogue line afterwards (default false)'),
+    },
+  }, safe(async ({ storyboardId, narrator, voices: chosen = {}, engine = 'kokoro', provider, model, replace = false, record = false }) => {
+    const wantProvider = provider ?? (model ? undefined : 'local');
+    const wantModel = model ?? (provider ? undefined : engine === 'chatterbox' ? 'chatterbox' : 'kokoro-82m');
+    const matches = (await speechModels()).filter((m) => (!wantProvider || m.provider === wantProvider) && (!wantModel || m.model === wantModel));
+    const target = matches.find((m) => m.ready);
+    if (!target) throw new Error(matches[0] ? `${matches[0].label} is not ready. ${matches[0].setup}` : `No voice model ${[wantProvider, wantModel].filter(Boolean).join(':')} (see list_voices).`);
+    const speech = { provider: target.provider, model: target.model };
+    const available = target.voices;
+    const check = (name, who) => {
+      if (available.length && !available.includes(name)) throw new Error(`${speech.model} has no voice "${name}" (for ${who}). Its voices: ${available.join(', ')}.`);
+      return name;
+    };
+    const detail = await client.call('GET', `/api/storyboards/${storyboardId}`);
+    const speakers = new Set(detail.sequence.settings.characterIds ?? []);
+    let narratorLines = 0;
+    for (const shot of detail.shots) for (const line of shot.details?.dialogue ?? []) line.speaker === 'narrator' ? narratorLines += 1 : speakers.add(line.speaker);
+    const everyone = (await client.call('GET', '/api/characters')).characters;
+    const cast = [...speakers].map((id) => everyone.find((c) => c.id === id)).filter((c) => c && c.kind !== 'location');
+    for (const id of Object.keys(chosen)) if (!cast.some((c) => c.id === id)) throw new Error(`Character ${id} is not in this storyboard.`);
+
+    const used = new Set();
+    const sameModel = (v) => v?.provider === speech.provider && v?.model === speech.model;
+    for (const c of cast) if (!replace && c.voice && sameModel(c.voice) && !chosen[c.id]) used.add(c.voice.voice);
+    const current = detail.sequence.settings.narratorVoice;
+    if (!replace && current && sameModel(current) && !narrator) used.add(current.voice);
+    for (const name of Object.values(chosen)) used.add(name);
+    if (narrator) used.add(narrator);
+    const kokoroNames = available.some((v) => castPools.female.includes(v));
+    const next = (pool) => {
+      const options = kokoroNames ? [...castPools[pool], ...castPools.female, ...castPools.male] : available;
+      const pick = options.find((v) => !used.has(v)) ?? options[used.size % Math.max(1, options.length)];
+      if (pick) used.add(pick);
+      return pick ?? null;
+    };
+
+    // Work out every assignment first and check it, then save: an invalid choice changes nothing.
+    const result = { model: `${speech.provider}:${speech.model}`, narrator: null, characters: [], queued: 0 };
+    const voiceOf = (name) => ({ ...speech, ...(name ? { voice: name } : {}) });
+    const writes = [];
+    for (const c of cast) {
+      if (!chosen[c.id] && c.voice && !replace) { result.characters.push({ id: c.id, name: c.name, voice: c.voice.voice, model: `${c.voice.provider}:${c.voice.model}`, kept: true }); continue; }
+      const gender = genderOf(c);
+      const name = chosen[c.id] ? check(chosen[c.id], c.name) : next(gender ?? (result.characters.length % 2 ? 'male' : 'female'));
+      writes.push(['PATCH', `/api/characters/${c.id}`, { voice: voiceOf(name) }]);
+      result.characters.push({ id: c.id, name: c.name, voice: name, guessed: chosen[c.id] ? undefined : gender ?? 'unknown (alternating)' });
+    }
+    if (narrator || !current || replace) {
+      const name = narrator ? check(narrator, 'the narrator') : next('narrator');
+      writes.push(['PATCH', `/api/storyboards/${storyboardId}`, { settings: { narratorVoice: voiceOf(name) } }]);
+      result.narrator = { voice: name, lines: narratorLines };
+    } else result.narrator = { voice: current.voice, model: `${current.provider}:${current.model}`, kept: true, lines: narratorLines };
+    const voiceNames = [...result.characters.map((c) => c.voice), result.narrator.voice].filter(Boolean);
+    const shared = voiceNames.filter((v, i) => voiceNames.indexOf(v) !== i);
+    if (shared.length) result.warning = `${speech.model} has too few voices for everyone to sound different: ${[...new Set(shared)].join(', ')} is used more than once.`;
+    for (const [method, route, body] of writes) await client.call(method, route, body);
+
+    if (record) {
+      for (const shot of detail.shots) {
+        if (!(shot.details?.dialogue ?? []).some((l) => !l.assetId)) continue;
+        result.queued += (await client.call('POST', `/api/shots/${shot.id}/dialogue`, {})).queued.length;
+      }
+    }
+    result.next = record ? 'Lines are recording: watch_jobs, then preview_shot to listen.' : 'Listen with preview_voice, change any with voices / narrator, then record with voice_dialogue (or cast_voices record=true).';
+    return ok(text(result));
   }));
 
   tool('set_character_voice', {

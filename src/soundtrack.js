@@ -7,6 +7,8 @@ import { probe, run } from './video.js';
 //  - a music bed and an ambience bed, looped to the film's length, the music ducked automatically (sidechain
 //    compression) whenever someone speaks;
 //  - a limiter at the end so nothing clips.
+// The ducking key is padded with silence: without it the compressor stops when the last line ends and the music
+// is cut off for the rest of the film.
 // The picture is copied untouched, so mixing never costs picture quality, and the sound can be remixed any time
 // (new music, a re-recorded line) without touching the footage.
 export async function mixSoundtrack(videoFile, outFile, { lines = [], music = null, ambience = null, clipVolume = 1, duration = null } = {}) {
@@ -41,7 +43,7 @@ export async function mixSoundtrack(videoFile, outFile, { lines = [], music = nu
     inputs.push('-stream_loop', '-1', '-i', bed.file);
     const raw = `[${index}:a]${fmt},atrim=0:${length.toFixed(3)},volume=${Number(bed.volume ?? 0.3).toFixed(3)}`;
     index += 1;
-    if (name === 'mus' && placed.length) filters.push(`${raw}[mraw]`, '[mraw][key]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[mus]');
+    if (name === 'mus' && placed.length) filters.push(`${raw}[mraw]`, '[key]apad[keypad]', '[mraw][keypad]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[mus]');
     else filters.push(`${raw}[${name}]`);
     bus.push(`[${name}]`);
   }

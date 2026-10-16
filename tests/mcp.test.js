@@ -24,7 +24,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
       'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
       'update_character', 'make_character_sheet', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'inspect_video', 'interpolate_video',
-      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production', 'list_voices', 'preview_voice']) {
+      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production', 'list_voices', 'preview_voice', 'cast_voices', 'set_background_music', 'find_music']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -201,6 +201,37 @@ test('MCP novel tools: outline → draft → read → narrate → speech/video �
     assert.equal(parse(sample).voice, 'tone-high');
     const clip = sample.content.find((c) => c.type === 'audio');
     assert.ok(clip?.data.length > 100, 'the sample is returned as inline audio');
+    const aiko = parse(await client.callTool({ name: 'create_character', arguments: { name: 'Aiko', description: '1girl, short black hair, school uniform' } }));
+    const ren = parse(await client.callTool({ name: 'create_character', arguments: { name: 'Ren', description: '1boy, spiky hair, he carries a sword' } }));
+    const castBoard = parse(await client.callTool({ name: 'create_storyboard', arguments: { projectId: project.id, title: 'Cast', idea: 'Two friends.', plan: false, characterIds: [aiko.id] } }));
+    await client.callTool({ name: 'import_shot_plan', arguments: { storyboardId: castBoard.id, shots: [{ description: 'rooftop', duration: 3, details: { method: 'still', dialogue: [{ speaker: aiko.id, text: 'Ready?' }, { speaker: ren.id, text: 'Always.' }, { speaker: 'narrator', text: 'They jumped.' }] } }] } });
+    const cast = parse(await client.callTool({ name: 'cast_voices', arguments: { storyboardId: castBoard.id, provider: 'mock', model: 'mock-voice', record: true } }));
+    assert.deepEqual(cast.characters.map((c) => c.name).sort(), ['Aiko', 'Ren'], 'the cast and every dialogue speaker get a voice');
+    assert.notEqual(cast.characters[0].voice, cast.characters[1].voice, 'characters get distinct voices');
+    assert.equal(cast.characters.find((c) => c.name === 'Aiko').guessed, 'female');
+    assert.equal(cast.characters.find((c) => c.name === 'Ren').guessed, 'male');
+    assert.ok(cast.narrator.voice);
+    assert.equal(cast.queued, 3, 'record=true records every line');
+    const again = parse(await client.callTool({ name: 'cast_voices', arguments: { storyboardId: castBoard.id, provider: 'mock', model: 'mock-voice', voices: { [ren.id]: 'tone-low' } } }));
+    assert.equal(again.characters.find((c) => c.name === 'Aiko').kept, true, 'chosen voices are kept');
+    assert.equal(again.characters.find((c) => c.name === 'Ren').voice, 'tone-low');
+    const sampleId = parse(sample).assetId;
+    const music = parse(await client.callTool({ name: 'set_background_music', arguments: { storyboardId: castBoard.id, assetId: sampleId, volume: 0.4 } }));
+    assert.deepEqual(music.music, { assetId: sampleId, volume: 0.4 });
+    const quieter = parse(await client.callTool({ name: 'set_background_music', arguments: { storyboardId: castBoard.id, volume: 0.2, clipVolume: 0.5 } }));
+    assert.equal(quieter.music.volume, 0.2);
+    assert.equal(quieter.clipVolume, 0.5);
+    const picture = parse(await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'a lake', provider: 'mock', model: 'mock-image' } }));
+    const notAudio = await client.callTool({ name: 'set_background_music', arguments: { storyboardId: castBoard.id, role: 'ambience', assetId: picture.assetId } });
+    assert.equal(notAudio.isError, true, 'an image cannot be the ambience');
+    const removed = parse(await client.callTool({ name: 'set_background_music', arguments: { storyboardId: castBoard.id, remove: true } }));
+    assert.equal(removed.music, null);
+    const before = parse(await client.callTool({ name: 'list_characters', arguments: {} })).find((c) => c.id === aiko.id).voice;
+    const bad = await client.callTool({ name: 'cast_voices', arguments: { storyboardId: castBoard.id, provider: 'mock', model: 'mock-voice', replace: true, narrator: 'nobody' } });
+    assert.equal(bad.isError, true);
+    const after = parse(await client.callTool({ name: 'list_characters', arguments: {} })).find((c) => c.id === aiko.id).voice;
+    assert.deepEqual(after, before, 'an invalid request changes no voice');
+    assert.match(cast.warning ?? '', /too few voices/, 'three speakers on a two-voice model are flagged');
     const wrong = await client.callTool({ name: 'preview_voice', arguments: { projectId: project.id, voice: 'nobody', model: 'mock-voice' } });
     assert.equal(wrong.isError, true);
     assert.match(wrong.content[0].text, /tone-low, tone-high/, 'a model-only call picks that model and lists its voices');
