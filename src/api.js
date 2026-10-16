@@ -160,13 +160,21 @@ export function createApiServer(ctx) {
   // Background music from the internet (Openverse; CC0, public domain and CC BY only), downloaded on request.
   route('GET', '/api/music/search', async (req, params, url) => {
     if (!music) throw new RequestError(501, 'Music search is not available.');
-    return { tracks: await music.search(url.searchParams.get('q'), { minSeconds: Number(url.searchParams.get('minSeconds') ?? 30) || 0, limit: Number(url.searchParams.get('limit') ?? 10) || 10 }) };
+    const kind = url.searchParams.get('kind') === 'sound' ? 'sound' : 'music';
+    return { tracks: await music.search(url.searchParams.get('q'), { kind, minSeconds: Number(url.searchParams.get('minSeconds') ?? (kind === 'sound' ? 0 : 30)) || 0,
+      maxSeconds: Number(url.searchParams.get('maxSeconds')) || null, limit: Number(url.searchParams.get('limit') ?? 10) || 10 }) };
+  });
+  route('GET', `/api/music/preview/${uuid}`, async (req, [trackId], url, res) => {
+    if (!music) throw new RequestError(501, 'Music preview is not available.');
+    const { bytes } = await music.preview(trackId, { seconds: Number(url.searchParams.get('seconds') ?? 20) || 20, start: Number(url.searchParams.get('start') ?? 0) || 0 });
+    res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': bytes.length, 'cache-control': 'no-store' });
+    res.end(bytes);
   });
   route('POST', `/api/projects/${uuid}/music`, async (req, [projectId]) => {
     needProject(projectId);
     if (!music) throw new RequestError(501, 'Music download is not available.');
-    const { trackId } = await readBody(req, 4 * 1024);
-    return { status: 201, body: await music.download(projectId, trackId) };
+    const { trackId, kind } = await readBody(req, 4 * 1024);
+    return { status: 201, body: await music.download(projectId, trackId, { kind: kind === 'sound' ? 'sound' : 'music' }) };
   });
   route('GET', `/api/assets/${uuid}/credit`, (req, [id]) => ({ credit: music?.credit(id) ?? null }));
   // Music, ambience or recorded dialogue for films: the raw file as the body (MP3, WAV, OGG or FLAC, up to 80 MB).
@@ -504,8 +512,8 @@ export function createApiServer(ctx) {
   route('PATCH', `/api/storyboards/${uuid}`, async (req, [id]) => {
     const body = await readBody(req, 32 * 1024);
     // Music and ambience beds must be audio files of this storyboard's project.
-    for (const role of ['music', 'ambience']) {
-      const assetId = body.settings?.[role]?.assetId;
+    const cueIds = Array.isArray(body.settings?.musicCues) ? body.settings.musicCues.map((c) => c?.assetId) : [];
+    for (const [role, assetId] of [['music', body.settings?.music?.assetId], ['ambience', body.settings?.ambience?.assetId], ...cueIds.map((a) => ['music cue', a])]) {
       if (!assetId) continue;
       const found = repo.assets.get(String(assetId));
       if (!found?.mimeType?.startsWith('audio/') || found.projectId !== sequences.needSequence(id).projectId) throw new RequestError(400, `The ${role} must be an audio file in this storyboard's project.`);
@@ -625,7 +633,18 @@ export function createApiServer(ctx) {
     repo.shots.insert(id, { position: count + 1, description: String(body.description ?? '').slice(0, 2000) });
     return { status: 201, body: sequences.detail(id) };
   });
-  route('PATCH', `/api/shots/${uuid}`, async (req, [id]) => sequences.updateShot(id, await readBody(req, 64 * 1024)));
+  route('PATCH', `/api/shots/${uuid}`, async (req, [id]) => {
+    const body = await readBody(req, 64 * 1024);
+    // Sound effects must be audio files of the shot's project.
+    if (Array.isArray(body.details?.sfx)) {
+      const projectId = sequences.needSequence(sequences.needShot(id).sequenceId).projectId;
+      for (const effect of body.details.sfx) {
+        const found = effect?.assetId ? repo.assets.get(String(effect.assetId)) : null;
+        if (!found?.mimeType?.startsWith('audio/') || found.projectId !== projectId) throw new RequestError(400, 'A sound effect must be an audio file in this storyboard\'s project.');
+      }
+    }
+    return sequences.updateShot(id, body);
+  });
   route('POST', `/api/shots/${uuid}/review`, async (req, [id]) => sequences.review(id, await readBody(req, 4096)));
   route('POST', `/api/shots/${uuid}/approve-frame`, async (req, [id]) => sequences.approveFrame(id, (await readBody(req, 1024)).approved !== false));
   route('POST', `/api/shots/${uuid}/still`, (req, [id]) => sequences.renderStillShot(id));

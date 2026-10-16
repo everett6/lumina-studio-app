@@ -24,7 +24,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
       'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
       'update_character', 'make_character_sheet', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'inspect_video', 'interpolate_video',
-      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production', 'list_voices', 'preview_voice', 'cast_voices', 'set_background_music', 'find_music']) {
+      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production', 'list_voices', 'preview_voice', 'cast_voices', 'set_background_music', 'find_music', 'find_sound', 'preview_music', 'add_sound_effect', 'remove_sound_effect', 'set_music_cue']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -224,6 +224,20 @@ test('MCP novel tools: outline → draft → read → narrate → speech/video �
     const picture = parse(await client.callTool({ name: 'generate_image', arguments: { projectId: project.id, prompt: 'a lake', provider: 'mock', model: 'mock-image' } }));
     const notAudio = await client.callTool({ name: 'set_background_music', arguments: { storyboardId: castBoard.id, role: 'ambience', assetId: picture.assetId } });
     assert.equal(notAudio.isError, true, 'an image cannot be the ambience');
+    const castShot = parse(await client.callTool({ name: 'get_storyboard', arguments: { storyboardId: castBoard.id } })).shots[0];
+    const hit = parse(await client.callTool({ name: 'add_sound_effect', arguments: { shotId: castShot.id, at: 1.5, assetId: sampleId, label: 'whoosh' } }));
+    assert.equal(hit.added.index, 0);
+    assert.equal(hit.effects, 1);
+    const late = await client.callTool({ name: 'add_sound_effect', arguments: { shotId: castShot.id, at: 99, assetId: sampleId } });
+    assert.equal(late.isError, true, 'an effect must fall inside the shot');
+    const wrongSfx = await client.callTool({ name: 'add_sound_effect', arguments: { shotId: castShot.id, at: 1, assetId: picture.assetId } });
+    assert.equal(wrongSfx.isError, true, 'an image cannot be a sound effect');
+    const cue = parse(await client.callTool({ name: 'set_music_cue', arguments: { shotId: castShot.id, assetId: sampleId, volume: 0.5 } }));
+    assert.deepEqual(cue.cues.map((c) => [c.shotId, c.volume]), [[castShot.id, 0.5]]);
+    const uncued = parse(await client.callTool({ name: 'set_music_cue', arguments: { shotId: castShot.id, remove: true } }));
+    assert.deepEqual(uncued.cues, []);
+    const cleared = parse(await client.callTool({ name: 'remove_sound_effect', arguments: { shotId: castShot.id, index: 0 } }));
+    assert.deepEqual(cleared.effects, []);
     const removed = parse(await client.callTool({ name: 'set_background_music', arguments: { storyboardId: castBoard.id, remove: true } }));
     assert.equal(removed.music, null);
     const before = parse(await client.callTool({ name: 'list_characters', arguments: {} })).find((c) => c.id === aiko.id).voice;

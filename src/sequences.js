@@ -45,6 +45,10 @@ export function cleanSequenceSettings(input = {}, base = {}) {
     const value = input[key] === undefined ? base[key] : input[key];
     return value?.assetId ? { assetId: String(value.assetId), volume: Math.min(2, Math.max(0, Number(value.volume ?? 0.3))) } : null;
   };
+  // Music that changes per scene: from the start of shot `shotId` the film plays `assetId` until the next cue
+  // (crossfaded). settings.music plays before the first cue.
+  const cues = (value) => (Array.isArray(value) ? value.filter((c) => c && typeof c.shotId === 'string' && c.assetId)
+    .slice(0, 20).map((c) => ({ shotId: c.shotId, assetId: String(c.assetId), volume: Math.min(2, Math.max(0, Number(c.volume ?? 0.3))) })) : null);
   const voice = (value) => (value && typeof value.provider === 'string' && typeof value.model === 'string'
     ? { provider: value.provider, model: value.model, voice: typeof value.voice === 'string' ? value.voice : null } : null);
   // Older storyboards stored realistic: true/false instead of a look.
@@ -85,7 +89,7 @@ export function cleanSequenceSettings(input = {}, base = {}) {
     requireApproval: typeof input.requireApproval === 'boolean' ? input.requireApproval : base.requireApproval ?? false,
     // Seconds of generated video the writer may plan; other shots become free still shots (0 = no limit).
     videoSecondsBudget: Math.min(maxTargetSeconds, Math.max(0, Math.round(Number(input.videoSecondsBudget ?? base.videoSecondsBudget ?? 0)) || 0)),
-    music: bed('music'), ambience: bed('ambience'),
+    music: bed('music'), ambience: bed('ambience'), musicCues: input.musicCues === undefined ? base.musicCues ?? [] : cues(input.musicCues) ?? [],
     clipVolume: volume('clipVolume', 1),
     narratorVoice: input.narratorVoice === undefined ? base.narratorVoice ?? null : voice(input.narratorVoice),
   };
@@ -95,7 +99,7 @@ export function cleanSequenceSettings(input = {}, base = {}) {
 function joinSettingsFingerprint(settings) {
   const clean = cleanSequenceSettings(settings);
   return createHash('sha256').update(JSON.stringify([
-    clean.music, clean.ambience, clean.clipVolume, clean.finish, clean.outputHeight, clean.aspect,
+    clean.music, clean.ambience, clean.musicCues, clean.clipVolume, clean.finish, clean.outputHeight, clean.aspect,
     clean.transition, clean.colorMatch, clean.upscale, clean.interpolateFps, clean.narratorVoice, clean.look,
   ])).digest('hex');
 }
@@ -222,6 +226,11 @@ export function cleanShotDetails(input = {}, base = {}) {
     timing: shotTimings.includes(input.timing) ? input.timing : shotTimings.includes(base.timing) ? base.timing : 'auto',
     holds: input.holds === null ? [] : holdsOf(input.holds) ?? holdsOf(base.holds) ?? [],
     trimStart: Math.min(10, Math.max(0, Number(input.trimStart ?? base.trimStart ?? 0) || 0)),
+    // Sound effects placed in the shot: `at` seconds after the shot starts, at `volume` (mixed on their own bus).
+    sfx: Array.isArray(input.sfx) ? input.sfx.filter((e) => e?.assetId).slice(0, 12).map((e) => ({
+      assetId: String(e.assetId), at: Math.min(30, Math.max(0, Number(e.at) || 0)), volume: Math.min(2, Math.max(0, Number(e.volume ?? 0.8))),
+      label: typeof e.label === 'string' ? e.label.slice(0, 80) : '',
+    })) : base.sfx ?? [],
     muteClipSound: typeof input.muteClipSound === 'boolean' ? input.muteClipSound : base.muteClipSound ?? false,
     locked: typeof input.locked === 'boolean' ? input.locked : base.locked ?? false,
     grade: input.grade === null ? null : input.grade && typeof input.grade === 'object' ? cleanGrade(input.grade) : base.grade ? cleanGrade(base.grade) : null,
@@ -816,7 +825,15 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         // 4. The sound: dialogue at its times, music and ambience under it.
         let clockSeconds = 0;
         const lines = [];
+        const effects = [];
+        const shotStarts = new Map();
         for (const item of items) {
+          shotStarts.set(item.shot.id, clockSeconds);
+          for (const effect of item.shot.details.sfx ?? []) {
+            const audio = asset(effect.assetId);
+            if (!audio) throw new Error(`Shot ${item.shot.position} has a deleted sound effect${effect.label ? ` (${effect.label})` : ''}.`);
+            if (effect.at < (item.duration ?? 0)) effects.push({ file: assetStore.path(audio), at: clockSeconds + effect.at, volume: effect.volume });
+          }
           const shotLines = (item.shot.details.dialogue ?? []).filter((line) => line.assetId);
           for (const line of shotLines) {
             if (!asset(line.assetId)) throw new Error(`Shot ${item.shot.position} has a deleted dialogue recording.`);
@@ -836,7 +853,14 @@ export function createSequenceService({ repo, directors, keys, generations, asse
           return file ? { file: assetStore.path(file), volume: value.volume } : null;
         };
         const mixed = path.join(dir, 'mixed.mp4');
-        await mixSoundtrack(picture, mixed, { lines, music: bed(settings.music), ambience: bed(settings.ambience), clipVolume: settings.clipVolume, duration: joined.duration });
+        // Music per scene: settings.music until the first cue, then each cue's track from its shot's start.
+        const starts = (settings.musicCues ?? []).filter((c) => shotStarts.has(c.shotId))
+          .map((c) => ({ ...c, start: shotStarts.get(c.shotId) })).sort((a, b) => a.start - b.start);
+        for (const cue of settings.musicCues ?? []) if (!shotStarts.has(cue.shotId)) log.warn?.('Music cue on a shot that is not in the film', { shotId: cue.shotId });
+        const plan = [...(settings.music && (!starts.length || starts[0].start > 0) ? [{ ...settings.music, start: 0 }] : []), ...starts];
+        const music = plan.map((m, i) => ({ ...bed(m), start: m.start, end: plan[i + 1]?.start ?? joined.duration })).filter((m) => m.file);
+        for (const cue of starts) if (!asset(cue.assetId)) throw new Error('A music cue\'s track was deleted. Pick new music for that scene.');
+        await mixSoundtrack(picture, mixed, { lines, music, effects, ambience: bed(settings.ambience), clipVolume: settings.clipVolume, duration: joined.duration });
         let deliverySource = mixed;
         if (settings.upscale !== 'none' && masterSize.height < size.height - 8) {
           if (!enhancer) throw new Error('The requested film upscaler is unavailable.');

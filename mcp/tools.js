@@ -53,7 +53,7 @@ const TOOL_META = {
   draft_chapter: ['do', 'Uses the writer model (may spend credits).', 'read_chapter'], read_chapter: ['r', free, null],
   revise_chapter: ['o', 'Uses the writer model (may spend credits).', null], edit_chapter: ['i', free, null],
   generate_cover: ['o', paid, 'export_book'], narrate: ['o', paid, 'export_book'], generate_speech: ['o', 'Free with a local voice (Kokoro, Chatterbox); provider voices may spend credits.', null],
-  list_voices: ['r', free, 'preview_voice, then cast_voices or set_character_voice'], find_music: ['ro', 'Free (searches Openverse on the internet).', 'set_background_music (trackId)'], set_background_music: ['io', 'Free; may download a track from the internet (CC0 / CC BY music).', 'join_storyboard (the music is mixed in when the film is joined)'], cast_voices: ['i', 'Free with the local voices (the default); provider voices may spend a little per line when record=true.', 'preview_voice, then voice_dialogue (or record=true)'], preview_voice: ['o', 'Free with a local voice; provider voices may spend a little.', 'set_character_voice or generate_speech'],
+  list_voices: ['r', free, 'preview_voice, then cast_voices or set_character_voice'], find_sound: ['ro', 'Free (searches Openverse on the internet).', 'add_sound_effect (trackId)'], preview_music: ['ro', 'Free (downloads a sample, saves nothing).', 'set_background_music or set_music_cue (trackId)'], add_sound_effect: ['io', 'Free; may download a sound from the internet (CC0 / CC BY).', 'join_storyboard'], remove_sound_effect: ['d', free, 'join_storyboard'], set_music_cue: ['io', 'Free; may download a track from the internet (CC0 / CC BY).', 'join_storyboard'], find_music: ['ro', 'Free (searches Openverse on the internet).', 'set_background_music (trackId)'], set_background_music: ['io', 'Free; may download a track from the internet (CC0 / CC BY music).', 'join_storyboard (the music is mixed in when the film is joined)'], cast_voices: ['i', 'Free with the local voices (the default); provider voices may spend a little per line when record=true.', 'preview_voice, then voice_dialogue (or record=true)'], preview_voice: ['o', 'Free with a local voice; provider voices may spend a little.', 'set_character_voice or generate_speech'],
   generate_video: ['o', paid, 'get_generation (if wait=false)'], import_manuscript: ['', free, 'read_chapter or revise_chapter'],
   create_storyboard: ['o', 'Planning uses the writer model (a little credit); plan=false is free.', 'film_next_step'],
   import_shot_plan: ['d', free, 'film_next_step'], production_readiness: ['r', free, 'estimate_film_cost'],
@@ -929,6 +929,112 @@ export function registerLuminaTools(server, client) {
     }));
   }
 
+  // An audio file in the project library from: a search (the first free track that downloads cleanly), a trackId
+  // from find_music / find_sound, an existing assetId, or a local filePath. Returns { assetId, label, skipped }.
+  async function resolveAudio({ projectId, search, trackId, assetId, filePath, kind = 'music', minSeconds, maxSeconds }) {
+    if (assetId) return { assetId, label: undefined, skipped: [] };
+    if (trackId) {
+      const { asset } = await client.call('POST', `/api/projects/${projectId}/music`, { trackId, kind });
+      return { assetId: asset.id, label: asset.label, skipped: [] };
+    }
+    if (filePath) {
+      if (!client.upload) throw new Error('filePath works on a local connection only. Add the file to the project in the Lumina app, then pass its assetId.');
+      const { readFile } = await import('node:fs/promises');
+      const uploaded = await client.upload(`/api/projects/${projectId}/audio`, await readFile(path.resolve(filePath)), path.basename(filePath));
+      return { assetId: uploaded.asset.id, label: uploaded.asset.label, skipped: [] };
+    }
+    if (!search) throw new Error('Pass search, trackId, assetId or filePath.');
+    const params = new URLSearchParams({ q: search, kind, limit: '5', ...(minSeconds !== undefined ? { minSeconds: String(minSeconds) } : {}), ...(maxSeconds ? { maxSeconds: String(maxSeconds) } : {}) });
+    const { tracks } = await client.call('GET', `/api/music/search?${params}`);
+    if (!tracks.length) throw new Error(`No free ${kind === 'sound' ? 'sound' : 'music'} found for "${search}". Try broader words${kind === 'sound' ? ' (e.g. "sword", "footsteps", "explosion")' : ' (e.g. "piano", "orchestral", "ambient")'}.`);
+    const skipped = [];
+    for (const candidate of tracks) {
+      try {
+        const { asset } = await client.call('POST', `/api/projects/${projectId}/music`, { trackId: candidate.id, kind });
+        return { assetId: asset.id, label: asset.label, skipped };
+      } catch (error) { skipped.push(`${candidate.title}: ${error.message}`); }
+    }
+    throw new Error(`Could not download any of the ${kind === 'sound' ? 'sounds' : 'tracks'} found: ${skipped.join('; ')}`);
+  }
+  const creditFor = async (assetId) => (assetId ? (await client.call('GET', `/api/assets/${assetId}/credit`).catch(() => ({ credit: null }))).credit : null);
+
+  tool('find_sound', {
+    title: 'Find sound effects',
+    description: 'Search free sound effects on the internet (Openverse, mostly Freesound): e.g. "sword clash", "footsteps on wood", "door slam", "magic whoosh", "crowd cheer". Only CC0 / public domain / CC BY sounds (the credit is kept). Pass a trackId to add_sound_effect.',
+    inputSchema: { query: z.string().min(1).max(200), maxSeconds: z.number().min(0.5).max(120).optional().describe('Skip sounds longer than this (default 20)'), limit: z.number().int().min(1).max(20).optional() },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  }, safe(async ({ query, maxSeconds = 20, limit }) => {
+    const { tracks } = await client.call('GET', `/api/music/search?${new URLSearchParams({ q: query, kind: 'sound', minSeconds: '0', maxSeconds: String(maxSeconds), ...(limit ? { limit: String(limit) } : {}) })}`);
+    return ok(text({ sounds: tracks.map(({ id, title, creator, seconds, license, needsCredit, page }) => ({ trackId: id, title, creator, seconds, license, needsCredit, page })), note: tracks.length ? undefined : 'Nothing found: try simpler words.' }));
+  }));
+
+  tool('preview_music', {
+    title: 'Listen to a track',
+    description: 'Play a short sample (default the first 20 s, up to 30) of a track or sound from find_music / find_sound, inline, before choosing it. Nothing is saved.',
+    inputSchema: { trackId: z.string(), seconds: z.number().min(3).max(30).optional(), start: z.number().min(0).max(3600).optional().describe('Start the sample this many seconds in') },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  }, safe(async ({ trackId, seconds, start }) => {
+    const parts = await mediaParts([[`/api/music/preview/${trackId}?${new URLSearchParams({ ...(seconds ? { seconds: String(seconds) } : {}), ...(start ? { start: String(start) } : {}) })}`, 'audio', 'Sample']]);
+    return ok(text({ trackId, note: 'Use it with set_background_music or set_music_cue (trackId), or add_sound_effect for sounds.' }), ...parts);
+  }));
+
+  tool('add_sound_effect', {
+    title: 'Add a sound effect to a shot',
+    description: 'Place a sound effect in a shot at a time in seconds from the shot\'s start: search (a free sound is found and downloaded), trackId from find_sound, an audio assetId, or a local filePath. Effects are mixed on their own track (they do not lower the music). Up to 12 per shot. Then join_storyboard.',
+    inputSchema: {
+      shotId: z.string(), at: z.number().min(0).max(30), volume: z.number().min(0).max(2).optional().describe('Default 0.8'), label: z.string().max(80).optional(),
+      search: z.string().max(200).optional(), trackId: z.string().optional(), assetId: z.string().optional(), filePath: z.string().optional(),
+    },
+  }, safe(async ({ shotId, at, volume = 0.8, label, search, trackId, assetId, filePath }) => {
+    const { shot, sequenceId } = await client.call('GET', `/api/shots/${shotId}`);
+    const detail = await client.call('GET', `/api/storyboards/${sequenceId}`);
+    if (at >= (shot.duration ?? 0)) throw new Error(`at must be inside the shot (0 to ${shot.duration} s).`);
+    const sfx = shot.details?.sfx ?? [];
+    if (sfx.length >= 12) throw new Error('This shot already has 12 sound effects; remove one first.');
+    const got = await resolveAudio({ projectId: detail.sequence.projectId, search, trackId, assetId, filePath, kind: 'sound', minSeconds: 0, maxSeconds: 30 });
+    const name = label ?? search ?? got.label?.replace(/^Sound: /, '') ?? 'sound';
+    await client.call('PATCH', `/api/shots/${shotId}`, { details: { sfx: [...sfx, { assetId: got.assetId, at, volume, label: name.slice(0, 80) }] } });
+    const credit = await creditFor(got.assetId);
+    return ok(text({ shotId, added: { index: sfx.length, at, volume, label: name, assetId: got.assetId }, effects: sfx.length + 1, credit: credit?.needsCredit ? credit.credit : undefined, skipped: got.skipped.length ? got.skipped : undefined, next: 'join_storyboard to hear it.' }));
+  }));
+
+  tool('remove_sound_effect', {
+    title: 'Remove a sound effect',
+    description: 'Remove one sound effect from a shot by its index (0-based, as listed in get_storyboard / add_sound_effect), or all with all=true. The audio file stays in the library.',
+    inputSchema: { shotId: z.string(), index: z.number().int().min(0).optional(), all: z.boolean().optional() },
+  }, safe(async ({ shotId, index, all = false }) => {
+    const { shot } = await client.call('GET', `/api/shots/${shotId}`);
+    const sfx = shot.details?.sfx ?? [];
+    if (!all && (index === undefined || index >= sfx.length)) throw new Error(`Pass index 0-${Math.max(0, sfx.length - 1)} or all=true (this shot has ${sfx.length}).`);
+    const left = all ? [] : sfx.filter((_, i) => i !== index);
+    await client.call('PATCH', `/api/shots/${shotId}`, { details: { sfx: left } });
+    return ok(text({ shotId, effects: left.map(({ at, volume, label }, i) => ({ index: i, at, volume, label })) }));
+  }));
+
+  tool('set_music_cue', {
+    title: 'Change the music at a shot',
+    description: 'Music per scene: from the start of this shot the film plays a different track (crossfaded over 1.5 s) until the next cue. The background music (set_background_music) plays before the first cue. Give search (a free track is found and downloaded), trackId (find_music), assetId or filePath, or remove=true to delete the cue at this shot. Then join_storyboard.',
+    inputSchema: {
+      shotId: z.string(), volume: z.number().min(0).max(2).optional().describe('Default 0.3'), remove: z.boolean().optional(),
+      search: z.string().max(200).optional(), trackId: z.string().optional(), assetId: z.string().optional(), filePath: z.string().optional(),
+    },
+  }, safe(async ({ shotId, volume = 0.3, remove = false, search, trackId, assetId, filePath }) => {
+    const { shot, sequenceId } = await client.call('GET', `/api/shots/${shotId}`);
+    const detail = await client.call('GET', `/api/storyboards/${sequenceId}`);
+    const others = (detail.sequence.settings.musicCues ?? []).filter((c) => c.shotId !== shotId);
+    let cue = null;
+    let got = { skipped: [] };
+    if (!remove) {
+      got = await resolveAudio({ projectId: detail.sequence.projectId, search, trackId, assetId, filePath, kind: 'music', minSeconds: 20 });
+      cue = { shotId, assetId: got.assetId, volume };
+    }
+    const updated = await client.call('PATCH', `/api/storyboards/${sequenceId}`, { settings: { musicCues: cue ? [...others, cue] : others } });
+    const position = new Map(updated.shots.map((s) => [s.id, s.position]));
+    const cues = (updated.sequence.settings.musicCues ?? []).map((c) => ({ shot: position.get(c.shotId), shotId: c.shotId, assetId: c.assetId, volume: c.volume })).sort((a, b) => a.shot - b.shot);
+    const credit = cue ? await creditFor(cue.assetId) : null;
+    return ok(text({ cues, imported: got.label, credit: credit?.needsCredit ? credit.credit : undefined, skipped: got.skipped.length ? got.skipped : undefined, next: 'join_storyboard to hear it.' }));
+  }));
+
   tool('find_music', {
     title: 'Find background music',
     description: 'Search free music on the internet (Openverse: Jamendo, Freesound, Wikimedia and more) by mood, genre or instruments, e.g. "calm emotional piano", "epic orchestral battle", "lofi chill", "j-pop upbeat". Only tracks you may use in a film are returned: CC0 / public domain (no conditions) and CC BY (credit the artist; the credit line is kept). Pass a trackId to set_background_music to download and use it.',
@@ -958,24 +1064,8 @@ export function registerLuminaTools(server, client) {
     let skipped = [];
     if (remove) settings[role] = null;
     else if (search || trackId || assetId || filePath) {
-      if (search && !trackId && !assetId && !filePath) {
-        const filmSeconds = detail.shots.reduce((sum, shot) => sum + (shot.duration ?? 0), 0);
-        const { tracks } = await client.call('GET', `/api/music/search?${new URLSearchParams({ q: search, minSeconds: String(Math.min(60, Math.max(20, Math.round(filmSeconds)))), limit: '5' })}`);
-        if (!tracks.length) throw new Error(`No free music found for "${search}". Try broader words (e.g. "piano", "orchestral", "ambient"), or find_music.`);
-        // The first track that downloads cleanly wins; broken links are skipped.
-        for (const candidate of tracks) {
-          try { ({ asset: { id: assetId, label } } = await client.call('POST', `/api/projects/${detail.sequence.projectId}/music`, { trackId: candidate.id })); break; } catch (error) { skipped.push(`${candidate.title}: ${error.message}`); }
-        }
-        if (!assetId) throw new Error(`Could not download any of the tracks found: ${skipped.join('; ')}`);
-      } else if (trackId) {
-        ({ asset: { id: assetId, label } } = await client.call('POST', `/api/projects/${detail.sequence.projectId}/music`, { trackId }));
-      }
-      if (filePath) {
-        if (!client.upload) throw new Error('filePath works on a local connection only. Add the file to the project in the Lumina app, then pass its assetId.');
-        const { readFile } = await import('node:fs/promises');
-        const uploaded = await client.upload(`/api/projects/${detail.sequence.projectId}/audio`, await readFile(path.resolve(filePath)), path.basename(filePath));
-        assetId = uploaded.asset.id; label = uploaded.asset.label;
-      }
+      const got = await resolveAudio({ projectId: detail.sequence.projectId, search, trackId, assetId, filePath, kind: 'music', minSeconds: Math.min(60, Math.max(20, Math.round(detail.shots.reduce((sum, shot) => sum + (shot.duration ?? 0), 0)))) });
+      ({ assetId, label } = got); skipped = got.skipped;
       settings[role] = { assetId, volume: volume ?? (role === 'music' ? 0.3 : 0.25) };
     } else if (volume !== undefined) {
       const current = detail.sequence.settings[role];
