@@ -75,7 +75,7 @@ function cookieToken(req) {
 }
 
 export function createApiServer(ctx) {
-  const { music, repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake, publicDir, exportDir, info } = ctx;
+  const { music, publisher, repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake, publicDir, exportDir, info } = ctx;
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern: new RegExp(`^${pattern}$`), handler });
 
@@ -181,6 +181,11 @@ export function createApiServer(ctx) {
     if (!music) throw new RequestError(501, 'Music download is not available.');
     const { trackId, kind } = await readBody(req, 4 * 1024);
     return { status: 201, body: await music.download(projectId, trackId, { kind: kind === 'sound' ? 'sound' : 'music' }) };
+  });
+  // The publish kit: film (+ title card / end credits), subtitles, description with credits, thumbnail, Short.
+  route('POST', `/api/storyboards/${uuid}/publish`, async (req, [id]) => {
+    if (!publisher) throw new RequestError(501, 'Publishing is not available.');
+    return publisher.publish(id, await readBody(req, 8 * 1024));
   });
   route('GET', `/api/assets/${uuid}/credit`, (req, [id]) => ({ credit: music?.credit(id) ?? null }));
   // Music, ambience or recorded dialogue for films: the raw file as the body (MP3, WAV, OGG or FLAC, up to 80 MB).

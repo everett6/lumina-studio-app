@@ -24,7 +24,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
       'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
       'update_character', 'make_character_sheet', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'inspect_video', 'interpolate_video',
-      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production', 'list_voices', 'preview_voice', 'cast_voices', 'set_background_music', 'find_music', 'find_sound', 'preview_music', 'add_sound_effect', 'remove_sound_effect', 'set_music_cue']) {
+      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production', 'list_voices', 'preview_voice', 'cast_voices', 'set_background_music', 'find_music', 'find_sound', 'preview_music', 'add_sound_effect', 'remove_sound_effect', 'set_music_cue', 'publish_film']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 

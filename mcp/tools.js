@@ -60,7 +60,7 @@ const TOOL_META = {
   draft_chapter: ['do', 'Uses the writer model (may spend credits).', 'read_chapter'], read_chapter: ['r', free, null],
   revise_chapter: ['o', 'Uses the writer model (may spend credits).', null], edit_chapter: ['i', free, null],
   generate_cover: ['o', paid, 'export_book'], narrate: ['o', paid, 'export_book'], generate_speech: ['o', 'Free with a local voice (Kokoro, Chatterbox); provider voices may spend credits.', null],
-  list_voices: ['r', free, 'preview_voice, then cast_voices or set_character_voice'], find_sound: ['ro', 'Free (searches Openverse on the internet).', 'add_sound_effect (trackId)'], preview_music: ['ro', 'Free (downloads a sample, saves nothing).', 'set_background_music or set_music_cue (trackId)'], add_sound_effect: ['io', 'Free; may download a sound from the internet (CC0 / CC BY).', 'join_storyboard'], remove_sound_effect: ['d', free, 'join_storyboard'], set_music_cue: ['io', 'Free; may download a track from the internet (CC0 / CC BY).', 'join_storyboard'], find_music: ['ro', 'Free (searches Openverse on the internet).', 'set_background_music (trackId)'], set_background_music: ['io', 'Free; may download a track from the internet (CC0 / CC BY music).', 'join_storyboard (the music is mixed in when the film is joined)'], cast_voices: ['i', 'Free with the local voices (the default); provider voices may spend a little per line when record=true.', 'preview_voice, then voice_dialogue (or record=true)'], preview_voice: ['o', 'Free with a local voice; provider voices may spend a little.', 'set_character_voice or generate_speech'],
+  list_voices: ['r', free, 'preview_voice, then cast_voices or set_character_voice'], publish_film: ['', local, 'upload the files in the folder; paste description.txt'], find_sound: ['ro', 'Free (searches Openverse on the internet).', 'add_sound_effect (trackId)'], preview_music: ['ro', 'Free (downloads a sample, saves nothing).', 'set_background_music or set_music_cue (trackId)'], add_sound_effect: ['io', 'Free; may download a sound from the internet (CC0 / CC BY).', 'join_storyboard'], remove_sound_effect: ['d', free, 'join_storyboard'], set_music_cue: ['io', 'Free; may download a track from the internet (CC0 / CC BY).', 'join_storyboard'], find_music: ['ro', 'Free (searches Openverse on the internet).', 'set_background_music (trackId)'], set_background_music: ['io', 'Free; may download a track from the internet (CC0 / CC BY music).', 'join_storyboard (the music is mixed in when the film is joined)'], cast_voices: ['i', 'Free with the local voices (the default); provider voices may spend a little per line when record=true.', 'preview_voice, then voice_dialogue (or record=true)'], preview_voice: ['o', 'Free with a local voice; provider voices may spend a little.', 'set_character_voice or generate_speech'],
   generate_video: ['o', paid, 'get_generation (if wait=false)'], import_manuscript: ['', free, 'read_chapter or revise_chapter'],
   create_storyboard: ['o', 'Planning uses the writer model (a little credit); plan=false is free.', 'film_next_step'],
   import_shot_plan: ['d', free, 'film_next_step'], production_readiness: ['r', free, 'estimate_film_cost'],
@@ -966,6 +966,21 @@ export function registerLuminaTools(server, client) {
     throw new Error(`Could not download any of the ${kind === 'sound' ? 'sounds' : 'tracks'} found: ${skipped.join('; ')}`);
   }
   const creditFor = async (assetId) => (assetId ? (await client.call('GET', `/api/assets/${assetId}/credit`).catch(() => ({ credit: null }))).credit : null);
+
+  tool('publish_film', {
+    title: 'Publish kit for a film',
+    description: 'Make everything needed to post a joined film, in one folder on the computer running Lumina: film.mp4 (optionally with a title card first and an end-credits roll listing the voice cast, music and sound credits), subtitles.srt, description.txt (ready to paste, with every CC BY credit), thumbnail.png (the title drawn on a shot frame), and optionally a 9:16 Short and a copy with burned-in subtitles. Refuses an out-of-date film (join_storyboard again first). Free and local.',
+    inputSchema: {
+      storyboardId: z.string(), titleCard: z.boolean().optional().describe('A 3 s title card before the film (default false)'),
+      endCredits: z.boolean().optional().describe('An end-credits roll (default true)'), thumbnail: z.boolean().optional(), thumbnailShotId: z.string().optional(),
+      short: z.boolean().optional().describe('Also make a 9:16 Short (default false)'), shortStart: z.number().min(0).optional(), shortSeconds: z.number().min(5).max(180).optional(),
+      burnSubtitles: z.boolean().optional().describe('Also a copy with subtitles burned in'), logline: z.string().max(300).optional().describe('One line for the description and title card'),
+    },
+  }, safe(async ({ storyboardId, ...options }) => {
+    const result = await client.call('POST', `/api/storyboards/${storyboardId}/publish`, options);
+    const media = result.assets?.thumbnail ? await imageContent(result.assets.thumbnail.path).catch(() => []) : [];
+    return ok(text({ folder: result.folder, files: result.files, film: result.film, warnings: result.warnings.length ? result.warnings : undefined, description: result.description, assets: result.assets }), ...media);
+  }));
 
   tool('find_sound', {
     title: 'Find sound effects',

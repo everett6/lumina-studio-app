@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createMusicService } from './music.js';
+import { createPublisher } from './publish.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,8 +100,9 @@ export async function startLumina({ dataRoot = appRoot, port = 0, cipher = null,
     repo, localOrigin: () => origin, localToken: token, exportDir: path.join(dataRoot, 'exports'), binDir: path.join(dataRoot, 'bin'), tunnelCommand: process.env.LUMINA_TUNNEL_COMMAND || null, log,
   });
   const music = createMusicService({ repo, assetStore, log });
+  const publisher = createPublisher({ sequences, assetStore, repo, exportDir: path.join(dataRoot, 'exports'), log });
   const server = createApiServer({
-    music, repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake,
+    music, publisher, repo, assetStore, providers, directors, keys, generations, canvasRunner, books, sequences, enhancer, faces, jobs, token, remote, budget, credits, modelCatalog, bake,
     publicDir: path.join(appRoot, 'public'), exportDir: path.join(dataRoot, 'exports'), info: { version, mode },
   });
   await new Promise((resolve, reject) => {
