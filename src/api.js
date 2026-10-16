@@ -5,7 +5,12 @@ import { copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseDataUrl, sniffMedia } from './assets.js';
 import { registerRoutes as directorRoutes } from './routes/director.js';
+import { registerRoutes as audioRoutes } from './routes/audio.js';
+import { registerRoutes as canonRoutes } from './routes/canon.js';
+import { registerRoutes as editRoutes } from './routes/edit.js';
 import { registerRoutes as filmRoutes } from './routes/film.js';
+import { registerRoutes as libraryRoutes } from './routes/library.js';
+import { registerRoutes as reviewRoutes } from './routes/review.js';
 import { registerRoutes as localRoutes } from './routes/local.js';
 import { registerRoutes as mediaRoutes } from './routes/media.js';
 import { registerRoutes as voiceRoutes } from './routes/voice.js';
@@ -113,7 +118,7 @@ export function createApiServer(ctx) {
   route('GET', '/api/health', () => ({ ok: true, version: info.version, mode: info.mode, jobs: jobs.stats() }));
   route('GET', '/api/catalog', catalog);
   // Route modules (each owns its file under src/routes/).
-  for (const add of [mediaRoutes, voiceRoutes, localRoutes, directorRoutes, filmRoutes]) add({ ...ctx, route, readBody, readRaw, needProject, RequestError, sniffMedia, uuid, catalog });
+  for (const add of [mediaRoutes, voiceRoutes, localRoutes, directorRoutes, filmRoutes, canonRoutes, reviewRoutes, audioRoutes, editRoutes, libraryRoutes]) add({ ...ctx, route, readBody, readRaw, needProject, RequestError, sniffMedia, uuid, catalog });
   route('GET', '/api/presets', () => ({ groups: presetGroups, presets }));
 
   route('GET', '/api/projects', () => ({ projects: repo.projects.list() }));
