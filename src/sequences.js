@@ -1226,6 +1226,41 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   };
   const safeName = (text) => String(text).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'film';
 
+  // Subtitle cues for the joined film: every line at its start, as long as its recording (or a reading estimate).
+  const speakerName = (line) => (line.speaker === 'narrator' ? 'Narrator' : repo.characters.get(line.speaker)?.name ?? 'Unknown');
+  function subtitleCues(shots) {
+    const cues = [];
+    let clock = 0;
+    for (const shot of shots) {
+      const duration = shot.duration ?? 0;
+      const lines = shot.details.dialogue ?? [];
+      const lengths = lines.map((l) => l.seconds ?? Math.max(1, l.text.split(/\s+/).length / 2.5));
+      const { times } = lineTimes(lines, duration, lengths);
+      lines.forEach((line, i) => cues.push({ shotId: shot.id, line: i, from: clock + times[i], to: Math.min(clock + duration, clock + times[i] + lengths[i]),
+        text: line.speaker === 'narrator' ? line.text : `${speakerName(line)}: ${line.text}` }));
+      clock += duration;
+    }
+    return cues;
+  }
+
+  // Everything a published film must credit: the voice cast, and the music and sound effects downloaded from
+  // the internet (credit lines kept by src/music.js under music-credit:<assetId>).
+  function filmCredits(id) {
+    const sequence = needSequence(id);
+    const shots = shotsOf(id);
+    const creditOf = (assetId) => (assetId ? repo.settings.get(`music-credit:${assetId}`, null) : null);
+    const speakers = new Set(shots.flatMap((s) => (s.details.dialogue ?? []).map((l) => l.speaker)));
+    const voiceLabel = (v) => (v ? `${v.voice ?? 'default'} (${v.model})` : 'no voice set');
+    const voices = [...speakers].map((speaker) => (speaker === 'narrator'
+      ? { name: 'Narrator', voice: voiceLabel(sequence.settings.narratorVoice) }
+      : { name: repo.characters.get(speaker)?.name ?? 'Unknown', voice: voiceLabel(repo.characters.get(speaker)?.voice) }));
+    const musicIds = [sequence.settings.music?.assetId, sequence.settings.ambience?.assetId, ...(sequence.settings.musicCues ?? []).map((c) => c.assetId)].filter(Boolean);
+    const soundIds = shots.flatMap((s) => (s.details.sfx ?? []).map((e) => e.assetId));
+    const unique = (ids) => [...new Set(ids)].map(creditOf).filter(Boolean)
+      .map(({ title, creator, license, needsCredit, credit, page }) => ({ title, creator, license, needsCredit, credit, page }));
+    return { title: sequence.title, voices, music: unique(musicIds), sounds: unique(soundIds) };
+  }
+
   async function exportProject(id, exportDir, { fps = 24 } = {}) {
     const sequence = needSequence(id);
     const shots = shotsOf(id);
@@ -1240,7 +1275,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
     };
     const pad = (n) => String(n).padStart(2, '0');
     const timeline = [];
-    const subtitles = [];
+    const subtitles = subtitleCues(shots);
     let clock = 0;
     for (const shot of shots) {
       const duration = shot.duration ?? 0;
@@ -1252,10 +1287,9 @@ export function createSequenceService({ repo, directors, keys, generations, asse
       const dialogue = [];
       for (const [i, line] of lines.entries()) {
         const voice = asset(line.assetId);
-        const speaker = line.speaker === 'narrator' ? 'Narrator' : repo.characters.get(line.speaker)?.name ?? 'Unknown';
+        const speaker = speakerName(line);
         const file = voice ? await copy(voice, 'dialogue', `${pad(shot.position)}-${pad(i + 1)}-${safeName(speaker)}`) : null;
         dialogue.push({ speaker, text: line.text, file, start: Math.round(times[i] * 1000) / 1000, seconds: lengths[i], recorded: Boolean(voice), timingSet: Number.isFinite(line.start) });
-        subtitles.push({ from: clock + times[i], to: clock + times[i] + lengths[i], text: line.speaker === 'narrator' ? line.text : `${speaker}: ${line.text}` });
       }
       timeline.push({
         shot: shot.position, shotId: shot.id, description: shot.description, scene: shot.details.scene || null, start: clock, duration, trimStart: shot.details.trimStart || 0,
@@ -1289,6 +1323,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
   const shotFingerprint = (shot) => createHash('sha256').update(JSON.stringify([shot.videoAssetId, shot.imageAssetId, shot.details.dialogue?.map((l) => l.assetId)])).digest('hex').slice(0, 12);
 
   return {
+    subtitleCues: (id) => subtitleCues(shotsOf(needSequence(id).id)), filmCredits, srtTime,
     detail, create, update, plan, importPlan, updateShot, review, approveFrame, generateFrame, animate, renderStillShot, runChecks, makeDialogue, rerecordLine, lipSyncShot, takes, selectTake, attachClip, repairFrame, exportProject,
     stitch, produce, stopProduction, stopAllProductions, onGenerationUpdate, idle, needShot, needSequence, outputSize, shotFingerprint,
   };

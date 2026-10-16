@@ -5,6 +5,13 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { nextStep, shotFacts } from './wizard.js';
+import * as directorTools from './tools-director.js';
+import * as localTools from './tools-local.js';
+import * as mediaTools from './tools-media.js';
+import * as voiceTools from './tools-voice.js';
+
+// Tool modules that add their own tools (each owns its file; see the header of each module).
+const extensions = [mediaTools, voiceTools, localTools, directorTools];
 
 const maxInlineImageBytes = 3 * 1024 * 1024;
 
@@ -77,6 +84,8 @@ const TOOL_META = {
   rerecord_line: ['o', 'May spend a little on the voice provider (free with a local voice).', 'get_generation or watch_jobs, then preview_shot'],
   set_line_timing: ['i', free, 'preview_shot'], set_shot_timing: ['i', free, 'join_storyboard'], export_production: ['', free, null],
 };
+
+for (const extension of extensions) Object.assign(TOOL_META, extension.meta);
 
 export function toolAnnotations(name) {
   const flags = TOOL_META[name]?.[0] ?? '';
@@ -1539,6 +1548,8 @@ export function registerLuminaTools(server, client) {
 
   // ---------- Prompts: ready-made step plans that use the real tool names ----------
   const arg = (description) => z.string().optional().describe(description);
+  for (const extension of extensions) extension.register({ tool, text, ok, safe, client, z, path, summarizeGeneration, waitAndShow, imageContent, mediaParts, pickModel, pickVoice, resolveAudio });
+
   server.registerPrompt('make_anime_short', {
     title: 'Make an anime short',
     description: 'Step-by-step plan for an English-language anime short, from idea to joined MP4, using Lumina\'s film tools.',
