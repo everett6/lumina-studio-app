@@ -346,3 +346,220 @@ Version 0.9.1 release limitation: no actual signed-in ChatGPT connection or paid
 OAuth and tunnel checks above used an MCP client and simulated ChatGPT's request sequence; they do not confirm the
 ChatGPT product's signed-in end-to-end behavior. No paid cloud job was submitted. Those acceptance checks still
 require the relevant account and provider setup. If a connection fails, the Lumina log shows the request.
+
+## Creative director
+
+The AI connected through MCP (Claude or ChatGPT) is Lumina's creative director. No paid writer or director
+model is needed. Under a strict budget, the recommended workflow is:
+
+1. Call `create_storyboard` with `plan: false`, then write and save the shot plan with `import_shot_plan`.
+2. Read `get_director_brief({storyboardId, offset: 0, limit: 6})`. It returns the idea and screenplay, look and
+   look bible, settings, all library characters and locations (names, descriptions, designTags, voices, reference
+   asset ids and bake status), and a page of shots with camera, duration, timing/holds, dialogue, states, saved
+   overrides and the exact composed frame/clip prompts. Follow `nextOffset` until it is null.
+3. Write prompts with `direct_shot`, or use `direct_storyboard` to save many directions atomically. No model is
+   called. All shot ids, storyboard membership, fields, locks and prompt lengths are validated before saving.
+4. Check `preview_prompts({shotId})` or `preview_prompts({storyboardId, offset, limit})`, then use `generate_shot`
+   when ready. Storyboard previews use the same pagination as the brief (default 6, maximum 60 shots).
+   Prompt previews do not generate media or spend credits. Normal generation budget rules still apply.
+
+For example:
+
+```json
+{
+  "shotId": "<shot id>",
+  "framePrompt": "Pip beneath an immense indigo sky, tiny against the reeds.",
+  "clipPrompt": "One ripple spreads while Pip watches, ears lifting slowly.",
+  "negativePrompt": "extra tails, extra people",
+  "camera": "locked-off",
+  "keepAutomatic": true
+}
+```
+
+`direct_storyboard` accepts `{storyboardId, shots: [{shotId, framePrompt, clipPrompt, ...}]}` with 1–60 unique
+shots, all belonging to that storyboard. A missing shot, locked shot or invalid entry leaves the entire batch
+unchanged. The optional `motion` chooses a supported local still-shot camera move, such as `push-in`.
+
+Directions are stored in shot details as `directorFramePrompt`, `directorClipPrompt`, `directorNegative` and
+`directorKeepAutomatic`. Unspecified fields retain their values. Automatic composition is enabled by default:
+Lumina replaces the shot's descriptive text with your direction and retains the look, look bible, identity
+and consistency blocks, plus the applicable camera/style presets. Character designTags and reference/bake
+handling still apply. Setting a prompt to `null` restores its normal automatic composition; setting
+`negativePrompt` to `null` clears exclusions. Clearing both positive prompts restores both automatic prompts.
+Directions follow the existing story-edit rules: frame approval clears, clip review becomes pending, and
+locked shots must first be deliberately unlocked with `update_shot`. Existing media/takes are retained.
+
+With `keepAutomatic: false`, each overridden positive prompt bypasses automatic text, camera/style presets,
+character reference attachments and baked character LoRAs. The clip still uses its start/end frame. Prompts
+without an override continue to compose automatically. Generation's existing outer-whitespace trimming still
+applies. Because the job/provider interface has no separate negative-prompt channel, exclusions are rendered
+as `Avoid: ...` in automatically composed prompts and are omitted for verbatim positive overrides; include
+any desired exclusions in your verbatim text itself. Prompts plus automatic text must fit generation's
+4,000-character input limit; identity and preset text appended by generation can make the final prompt longer.
+
+The previews match generation's `finalPrompt` for the current storyboard settings and image model, including
+camera/style fragments and character-reference wording. Overriding the model when calling `generate_shot`
+can change that reference wording. Providers may further interpret or transform prompts internally.
+For standalone `generate_image`, write the prompt directly and omit its optional `director` model parameter.
+
+The corresponding local API routes are `GET /api/storyboards/:id/director-brief`,
+`GET /api/storyboards/:id/prompts`, `GET /api/shots/:id/prompts`, `POST /api/shots/:id/direct`, and
+`POST /api/storyboards/:id/direct`. The storyboard GET routes accept `offset` and `limit`.
+
+## Local models
+
+Five tools inspect the computer running Lumina, through its authenticated API. They never download weights,
+install packages, launch inference or enumerate application processes (including Ollama). Licences below are
+reported from the repository's model/setup metadata; check the upstream terms before distribution.
+
+| Tool | Behaviour | API |
+| --- | --- | --- |
+| `local_status` | GPU name, used/total VRAM, temperature, draw/limit in watts and utilisation; free/total RAM and disk at `<dataRoot>/data`; running/queued Lumina GPU jobs; worker visibility. | `GET /api/local/status` |
+| `list_local_models` | Installation checks, size in bytes, purpose, licence and the setup script or exact installation API request for every model. Reads existing files only. | `GET /api/local/models` |
+| `free_gpu_memory` | Stop idle Lumina workers, then report device VRAM before/after. Immediately skip if GPU work is running **or queued**. | `POST /api/local/free-gpu-memory` |
+| `gpu_queue` | Running/queued heavy Lumina jobs, enqueue/start timestamps, age since enqueue and age since start in milliseconds. | `GET /api/local/gpu-queue` |
+| `preflight` | `{task, options?}` → `go`, `wait` or `no`, with resource thresholds, reasons and the measured status. | `POST /api/local/preflight` |
+
+NVIDIA telemetry uses only `nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu,power.draw,power.limit,utilization.gpu
+--format=csv,noheader,nounits`, with a **5 second timeout**. Unsupported values remain `null`; unavailable telemetry
+is explicit. Warnings appear below **4 GiB free RAM**, below **20 GiB free disk**, or above **80 °C**. VRAM totals
+include other applications, but their names, PIDs and allocations are never queried or changed. Memory units use
+GiB (1,073,741,824 bytes); NVIDIA MiB values are converted to bytes.
+
+The inventory covers Wan 2.2 TI2V 5B (Apache-2.0), Animagine XL 4.0 (OpenRAIL++), IP-Adapter Plus SDXL
+(Apache-2.0), Kokoro (Apache-2.0), Chatterbox (MIT), the anime face detector (MIT), Real-ESRGAN (BSD-3-Clause),
+RIFE (MIT), the face check (YuNet MIT + SFace Apache-2.0), and MuseTalk (MIT, with SD VAE CreativeML Open RAIL-M
+and Whisper Apache-2.0 dependencies). MuseTalk is shown even when missing so its setup is discoverable.
+
+HF lookup respects `HF_HUB_CACHE`, then `HF_HOME/hub`, then `$HOME/.cache/huggingface/hub`. Wan/Animagine use
+existing provider installation checks, including Wan's shard indexes. Other models require their expected files;
+voice models also require the configured voice Python executable to exist. This does not import Python dependencies
+or validate model checksums. Sizes include partial downloads and metadata in each model's cache directory, count
+symlinked/hard-linked blobs once per model, and exclude shared Python environments. `sizeAvailable:false` means
+some files could not be read. Bundled finishing tools and face models are checked under `<dataRoot>/bin` (the
+app's actual layout). A Real-ESRGAN executable installed separately on `PATH` can be usable despite the bundled
+inventory reporting missing; inventory never executes it.
+
+Run setup scripts manually from a source checkout. The Real-ESRGAN/RIFE and face-check install API requests shown
+in the inventory are app-only operations: use the corresponding Lumina UI control. These five tools never call
+those install routes. `setup-anime.sh` installs the newer landmark tracker, but the provider's lip-sync readiness
+check still requires `lbpcascade_animeface.xml`; the inventory reports its state separately and supplies
+`legacyCascadeSetup`. MuseTalk needs that cascade as well as its three HF repositories and voice environment.
+
+Preflight's conservative baseline needs are **free** resources:
+
+| Task | VRAM GiB | RAM GiB | Disk GiB | Maximum temperature |
+| --- | ---: | ---: | ---: | ---: |
+| `wan-clip` | 12 | 32 | 40 | 80 °C |
+| `anime-frame` | 8 | 8 | 20 | 80 °C |
+| `bake` | 12 | 24 | 30 | 80 °C |
+| `upscale` | 4 | 8 | 20 | 80 °C |
+| `interpolate` | 4 | 8 | 20 | 80 °C |
+
+The baseline assumes 1280×704 Wan, 1344×768 anime/baking, and finishing at 1920×1080, 5 seconds, 30 fps.
+Optional `width`/`height` (whole pixels, 1–16384) describe the largest working frame; `durationSeconds`
+(0.01–86400) and `fps` (1–240) describe finishing output. Larger dimensions scale the VRAM threshold in proportion
+to pixel area, never below baseline. Finishing disk needs are the larger of the table floor and
+`ceil(width × height × 3 RGB bytes × durationSeconds × fps × 3 working copies / GiB) + 2 GiB`.
+Duration/fps affect finishing disk estimates only. Options do not select a model, device or runtime mode.
+
+`no` means insufficient physical GPU/RAM capacity, insufficient free disk, invalid input (HTTP 400), or unavailable
+required VRAM/RAM/disk/temperature telemetry. `wait` means temporary VRAM/RAM pressure, heat above 80 °C, or queued/
+running Lumina GPU work; a `no` reason takes precedence. `go` means all these resource checks passed. Preflight
+uses the first NVIDIA device, never sums VRAM across devices, and does not resolve `CUDA_VISIBLE_DEVICES` mappings.
+It is advisory: **it cannot prevent every out-of-memory error**, reserve resources, verify runtime dependencies,
+or prove model readiness. Check `list_local_models` too. Driver overhead, task length and other applications can
+change the outcome after the snapshot; offloaded Wan modes may run on hardware below these thresholds.
+
+Worker shutdown reuses the provider's GPU lease, which reserves the shared FIFO and waits for its owned worker
+processes to exit before subsequent jobs start. It rechecks idleness after loading that hook, so a newly queued
+job is never interrupted. No process discovery or external signals are used. VRAM accounting may lag exit or
+change because other applications allocate memory; a completed shutdown does not promise a particular reduction.
+
+Two provider hooks would improve visibility but require a change outside this module: a read-only snapshot of
+`wan`, `anime`, `voice`, `lipsync` and `train` worker loaded/pending/stopping states, and job metadata when submitting
+to `gpuQueue.run`. Until those exist, worker `loaded` is explicitly `null` (`workers.available:false`), shutdown
+cannot name which workers were unloaded, and existing anonymous GPU callbacks use the generic “Lumina GPU job”
+label. Queue job IDs are transient and distinct from generation IDs. CPU-only or other work outside the shared
+GPU queue is not represented. The existing ten-minute worker idle timers remain in effect.
+
+## Media tools
+
+Direct media tools work on library asset ids and save new copies. Local work is free; paid paths use the existing
+`/api/generate` route, keeping budget approvals and app confirm-spend checks. A **402 means stop**: inspect
+`budget_status`, obtain the user's approval, and retry only the refused request. Never repeat already queued batch
+items. Box masks and outpaint canvases keep stable ids across approval retries.
+
+| Tool | Inputs and behavior | Cost |
+| --- | --- | --- |
+| `upscale_image` | `assetId`, `scale` 2/4, `engine` `local-anime` (default), `local-photo`, or `fal`; returns a new asset id with its source as parent and an inline image when small enough | Installed local Real-ESRGAN is free GPU work; fal is paid |
+| `upscale_video` | `assetId`, `height` 1080/1440/2160, `engine` `anime` (default)/`ai`/`fast`; existing enhancement job with status/wait URLs. `waitSeconds` 0–60 (default 1); `checkOnly:true` waits without starting again | Free; local GPU queue |
+| `remove_background` | `assetId`; fal BiRefNet cutout | Paid; no local remover is integrated |
+| `outpaint_image` | `assetId`, optional `prompt`, `direction` (default `all`), `aspect`, or `padding:{left,right,top,bottom}` in pixels. Padding takes priority; direction extends 25% of source dimensions per chosen side | Paid fal Fill; canvas and mask made locally |
+| `inpaint_image` | `assetId`, `prompt`, `mask`: matching-size mask asset id or `{x,y,w,h}` fractions from 0–1. White repaints, black preserves; box is rasterized locally | Paid fal Fill |
+| `reframe` | `assetId`, `aspect` `16:9`/`9:16`/`1:1`/`4:5`, `mode` `crop`/`pad`/`outpaint`, optional `focusX`/`focusY` from 0–1 (default centre), optional outpaint `prompt` | Crop/pad: free CPU ffmpeg for images/videos; outpaint: paid, images only |
+| `import_media_url` | `projectId`, public HTTPS `url`, optional `label`; checks DNS/private addresses and each redirect, sniffs bytes, saves to library | Free download |
+| `import_media_file` | `projectId`, `filePath`, optional `label`; requires a local connection supplying `client.upload`; remote calls are refused before reading files | Free |
+| `generate_image_batch` | `projectId`, 1–8 `prompts`, shared `generate_image` options (provider/model, size, quality, seed, references, director, presets, characters); always queues without waiting | Existing generation pricing and budget rules |
+| `generate_video_batch` | `projectId`, 1–8 `prompts`, shared video options (provider/model, input image, duration, aspect, seed, presets, characters); always queues without waiting | Existing generation pricing and budget rules |
+| `analyze_video` | `assetId`; scene cuts (`scdet`), black and frozen stretches, EBU R128 integrated LUFS and true peak dBFS (null without audio), dimensions/fps/duration and four inline sample frames | Free, read-only CPU ffmpeg |
+
+Imports accept PNG/JPEG/WebP (25 MB), MP3/WAV/OGG/FLAC (80 MB), and MP4 (300 MB). File extensions and declared
+Content-Type are never trusted. URL imports allow at most five redirects and a two-minute download. Reframing and
+working masks are capped at 32 million pixels and 16384 pixels per side; H.264 reframing uses even dimensions.
+Video crop/pad preserves timing and transcodes audio to AAC. Prepared outpaint canvases/masks are working assets.
+
+Real-ESRGAN must already be installed through Lumina; these tools never download models. Image upscaling and video
+enhancement use the shared GPU queue. Photo 2× upscaling uses native x4plus 4× then Lanczos downscaling. Paid image
+tools wait at most 60 seconds, then return the generation handle for `get_generation`/`watch_jobs`. Large images
+follow the existing inline-size limit. Batch failures return `isError`, the HTTP status, the failed prompt index
+(`stoppedAt`, zero-based), already queued `jobIds`, and approval details when present.
+
+Analysis uses heuristic thresholds (scene score 10, freeze minimum 0.5 s, black minimum 0.3 s). Detections and four
+samples support human review; they do not establish motion quality, audio sync, or absence of artifacts. No paid
+provider or actual GPU execution is covered by the offline media tests; the upscale test uses a fake executable.
+
+## Voice tools
+
+All six tools are free and local:
+
+| Tool | Inputs and result |
+| --- | --- |
+| `create_voice` | `name`, `audioAssetId`, `consent: true` → saved voice metadata with an id such as `custom:my-voice`. |
+| `create_voice_from_confirmed_audio` | Alias of `create_voice`, with the same required consent. |
+| `list_custom_voices` | Lists saved voice metadata, source asset ids and consent timestamps. |
+| `delete_custom_voice` | `id` → removes the voice and its saved reference copy. |
+| `voice_change` | `audioAssetId`, `targetVoice` → a new audio asset in the source project, plus inline audio. |
+| `speak_line` | `projectId`, `text`, optional `voice`, `style`, `engine` → inline audio and `assetId`. Engines: `kokoro` (or `kokoro-82m`) and `chatterbox`. |
+
+Use only your own voice or a voice you have permission to use. Creation refuses missing or false
+consent. Supply a clean speech clip from the library, 5–30 seconds long. Preparation trims leading and
+trailing silence, normalizes loudness to -20 LUFS, and saves mono 24 kHz PCM WAV. The trimmed reference
+must also be 5–30 seconds. No training or downloads are needed. Duplicate slugged names are refused;
+choose a different name. Speech quality, speaker count and permission cannot be verified automatically.
+
+Voices persist under `<Lumina data root>/storage/custom-voices/<slug>/` as `reference.wav` and
+`voice.json`, independently of the original asset. `list_voices` includes the ids in the local
+Chatterbox catalog. To cast one explicitly, use `set_character_voice` with
+`provider: "local", model: "chatterbox", voice: "custom:my-voice"`. Custom ids are also accepted by
+local Kokoro selections so existing default speech tools preserve them; synthesis automatically uses
+Chatterbox for those ids. Presets continue to use their selected engine. Custom voices do not apply to
+cloud providers. Deleting a voice keeps existing recordings; saved character settings must be updated
+before recording that voice again.
+
+`voice_change` uses the installed package's `chatterbox.vc.ChatterboxVC` audio-to-audio API with
+`from_local` and cached model weights. The source performance drives conversion without transcription.
+Timing and acting preservation depend on the model; sample-exact timing and an identical performance
+are not guaranteed. Targets can be custom ids or local preset names (the latter use a Kokoro reference).
+If the installed package lacks a usable conversion API, or its environment/weights are missing, the
+request reports unavailable with a reason (HTTP 501). It never substitutes transcription and TTS.
+The checked voice environment includes this real conversion API; GPU inference quality was not tested.
+
+Chatterbox speech and conversion use the shared GPU queue, one heavy job at a time, and preserve the
+model's AI watermark. Kokoro presets run on CPU. Set `LUMINA_VOICE_PYTHON` to the voice environment's
+Python, or use `~/.local/share/lumina-studio/voice-env/bin/python`. `NUMBA_CACHE_DIR` can override the
+worker's writable Numba cache (defaults under the voice cache). `speak_line` waits up to four minutes;
+if still queued/running, it returns the generation status so it can be followed with `get_generation`.
+
+API counterparts: `GET/POST /api/voices`, `DELETE /api/voices/:id` (URL-encode the id), and
+`POST /api/voice-change`. `speak_line` uses the existing speech generation and wait endpoints.

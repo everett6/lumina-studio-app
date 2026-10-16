@@ -15,6 +15,29 @@ const executorMayBeAlive = (intent) => {
 };
 
 // Durable orchestration only. The sequence service owns prompts, takes, checks and rendering.
+// The autonomy policy keys a film accepts. `enforced` are acted on by the controller today; the others are recorded
+// for the client and reported as not yet enforced (never presented as a guarantee).
+export const policyKeys = {
+  mode: { enforced: false, check: (v) => ['guided', 'autonomous'].includes(v) },
+  autoApproveFrames: { enforced: true, check: (v) => typeof v === 'boolean' },
+  autoAcceptClips: { enforced: true, check: (v) => typeof v === 'boolean' },
+  acceptanceCriteriaApproved: { enforced: true, check: (v) => typeof v === 'boolean' },
+  runtimeToleranceSeconds: { enforced: true, check: (v) => Number.isFinite(v) && v >= 0 && v <= 30 },
+  maxAttemptsPerShot: { enforced: false, check: (v) => Number.isInteger(v) && v >= 1 && v <= 5 },
+  maxRepairsPerFilm: { enforced: false, check: (v) => Number.isInteger(v) && v >= 0 && v <= 50 },
+  allowedProviders: { enforced: false, check: (v) => Array.isArray(v) && v.every((p) => typeof p === 'string') && v.length <= 10 },
+};
+export function cleanPolicy(input = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    const rule = policyKeys[key];
+    if (!rule) throw Object.assign(new TypeError(`Unknown policy key "${key}". Known: ${Object.keys(policyKeys).join(', ')}.`), { status: 400 });
+    if (!rule.check(value)) throw Object.assign(new TypeError(`Invalid value for policy "${key}".`), { status: 400 });
+    out[key] = value;
+  }
+  return out;
+}
+
 export function createProductionController({ repo, sequences, generations, log = console, now = Date.now }) {
   const at = () => new Date(now()).toISOString();
   const need = (id) => repo.films.get(id) ?? (() => { throw missing('Film not found.'); })();
@@ -344,7 +367,7 @@ export function createProductionController({ repo, sequences, generations, log =
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} must be a JSON object.`);
       }
       sequences.needSequence(sequenceId);
-      return repo.films.open(sequenceId, { brief, policy, at: at() });
+      return repo.films.open(sequenceId, { brief, policy: cleanPolicy(policy), at: at() });
     },
     status, acquire, release: (id, owner) => repo.films.release(id, owner), step,
     async resume(id, owner) {
@@ -352,6 +375,22 @@ export function createProductionController({ repo, sequences, generations, log =
       if (need(id).state === 'delivered') return status(id);
       const result = reconcile(need(id), owner);
       return step(id, { owner, expectedRevision: result.film.revision });
+    },
+    // Edit the brief or the autonomy policy (a deliberate revision: production re-walks from planning and reuses
+    // finished work). Only known policy keys are accepted, so text inside prompts or assets cannot widen a policy.
+    edit(id, { expectedRevision, brief, policy } = {}) {
+      const film = need(id);
+      if (film.revision !== expectedRevision) throw conflict('Stale film revision; reload the film status before editing.');
+      const clean = policy === undefined ? undefined : cleanPolicy({ ...film.policy, ...policy });
+      if (brief !== undefined && (!brief || typeof brief !== 'object' || Array.isArray(brief))) throw new TypeError('brief must be a JSON object.');
+      const result = repo.films.edit(id, { expectedRevision, brief: brief === undefined ? undefined : { ...film.brief, ...brief }, policy: clean, at: at() });
+      if (!result) throw conflict('Film revision changed; reload before editing.');
+      return status(id);
+    },
+    film: (id) => need(id),
+    journal: (id, { offset = 0, limit = 50 } = {}) => {
+      const all = events(id);
+      return { total: all.length, offset, events: all.slice(offset, offset + Math.min(200, Math.max(1, limit))) };
     },
     pause(id, reason = 'Paused by user.') { stop(need(id), `manual: ${reason}`); return status(id); },
     unpause(id) {

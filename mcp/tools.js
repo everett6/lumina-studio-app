@@ -6,12 +6,13 @@ import path from 'node:path';
 import { z } from 'zod';
 import { nextStep, shotFacts } from './wizard.js';
 import * as directorTools from './tools-director.js';
+import * as filmTools from './tools-film.js';
 import * as localTools from './tools-local.js';
 import * as mediaTools from './tools-media.js';
 import * as voiceTools from './tools-voice.js';
 
 // Tool modules that add their own tools (each owns its file; see the header of each module).
-const extensions = [mediaTools, voiceTools, localTools, directorTools];
+const extensions = [mediaTools, voiceTools, localTools, directorTools, filmTools];
 
 const maxInlineImageBytes = 3 * 1024 * 1024;
 
