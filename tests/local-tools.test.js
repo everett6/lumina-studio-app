@@ -273,3 +273,14 @@ test('failed idle worker shutdown is reported alongside a fresh VRAM sample', as
   assert.match(result.reason, /did not exit/);
   assert.equal(result.after.gpus[0].totalBytes, 12 * GiB);
 });
+
+test('preflight over HTTP returns 200 with its report (no top-level status key)', async () => {
+  const { startTestApp } = await import('./helpers.js');
+  const app = await startTestApp();
+  try {
+    const r = await app.call('POST', '/api/local/preflight', { task: 'anime-frame' });
+    assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 200));
+    assert.ok(['go', 'wait', 'no'].includes(r.body.decision));
+    assert.equal(r.body.status, undefined);
+  } finally { await app.close(); }
+});

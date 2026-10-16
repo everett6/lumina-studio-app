@@ -2,7 +2,7 @@ import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { burnSubtitles, endCredits, makeShort, makeThumbnail, srtFromCues, titleCard } from './delivery.js';
 import { RequestError } from './generation.js';
-import { probe, run } from './video.js';
+import { probe, runVideo, videoEncoder } from './video.js';
 
 // The publish kit for a joined film: one folder with the film (optionally with a title card and an end-credits
 // roll), subtitles, a ready-to-paste description with every credit the film needs (voice cast, internet music and
@@ -38,6 +38,9 @@ export function createPublisher({ sequences, assetStore, repo, exportDir, log = 
     const fps = Math.round(info.fps) || 30;
     const folder = path.join(exportDir, `${safeName(sequence.title)}-publish-${new Date().toISOString().replace(/[:.]/g, '-')}`);
     await mkdir(folder, { recursive: true });
+    // A failed publish leaves no half-written kit behind (this call created the folder, so it removes it).
+    try { return await build(); } catch (error) { await rm(folder, { recursive: true, force: true }); throw error; }
+    async function build() {
     const files = [];
     const warnings = [];
     const saved = {};
@@ -70,8 +73,9 @@ export function createPublisher({ sequences, assetStore, repo, exportDir, log = 
       const inputs = parts.flatMap((p) => ['-i', p]);
       const norm = parts.map((_, i) => `[${i}:v]fps=${fps},scale=${width}:${height},setsar=1,format=yuv420p[v${i}];[${i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`).join(';');
       const chain = parts.map((_, i) => `[v${i}][a${i}]`).join('');
-      await run('ffmpeg', ['-v', 'error', ...inputs, '-filter_complex', `${norm};${chain}concat=n=${parts.length}:v=1:a=1[v][a]`, '-map', '[v]', '-map', '[a]',
-        '-c:v', 'libx264', '-crf', '16', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-r', String(fps), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-y', out('film.mp4')], 1_800_000);
+      // One full-length encode: NVENC when the GPU can (runVideo falls back to the CPU encoder).
+      await runVideo(['-v', 'error', ...inputs, '-filter_complex', `${norm};${chain}concat=n=${parts.length}:v=1:a=1[v][a]`, '-map', '[v]', '-map', '[a]',
+        ...(await videoEncoder('final')).args, '-r', String(fps), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-y', out('film.mp4')], 1_800_000);
     } else await copyFile(master, out('film.mp4'));
     master = path.join(folder, 'film.mp4');
     const offset = withTitle ? (await probe(parts[0])).duration : 0;
@@ -103,6 +107,7 @@ export function createPublisher({ sequences, assetStore, repo, exportDir, log = 
     const final = await probe(master);
     log.info?.('Published film', { id, folder, files: files.length });
     return { folder, files, description, credits, warnings, assets: saved, film: { seconds: Math.round(final.duration * 100) / 100, width: final.width, height: final.height, fps: Math.round(final.fps) } };
+    }
   }
 
   return { publish };

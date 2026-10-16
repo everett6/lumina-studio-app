@@ -28,7 +28,10 @@ export function createVoiceLibrary({ dir }) {
       if (!existsSync(dir)) return [];
       return readdirSync(dir).filter((slug) => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug))
         .filter((slug) => existsSync(path.join(dir, slug, 'voice.json')))
-        .map((slug) => get(`custom:${slug}`));
+        .flatMap((slug) => {
+          // One damaged voice.json (e.g. from a crash mid-write) must not hide every other voice.
+          try { return [get(`custom:${slug}`)]; } catch { return []; }
+        });
     },
     reference(id) {
       get(id);

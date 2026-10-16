@@ -8,7 +8,7 @@ import { sniffMedia, imageSize } from './assets.js';
 import { RequestError } from './generation.js';
 import { privateAddress, safeFetch } from './safefetch.js';
 import { encodePng } from './png.js';
-import { inspectVideo, probe, run, runCapture } from './video.js';
+import { inspectVideo, probe, run, runCapture, runVideo, videoEncoder } from './video.js';
 
 const MB = 1024 * 1024;
 export const mediaLimits = { image: 25 * MB, audio: 80 * MB, video: 300 * MB };
@@ -98,14 +98,13 @@ export function createMediaService({ repo, assetStore, enhancer, fetchImpl = saf
       break;
     }
     if (Number(response.headers.get('content-length')) > mediaLimits.video) { await response.body?.cancel(); invalid('Media exceeds the 300 MB size limit.'); }
-    const reader = response.body?.getReader();
-    if (!reader) invalid('The media response has no body.');
+    // The body is a Node stream (safeFetch) or a web stream (fetch): both are async-iterable.
+    const body = response.body;
+    if (!body?.[Symbol.asyncIterator]) invalid('The media response has no body.');
     const chunks = [];
     let size = 0, cap = mediaLimits.video, prefix = Buffer.alloc(0);
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      for await (const value of body) {
         const bytes = Buffer.from(value);
         size += bytes.length;
         if (prefix.length < 32) prefix = Buffer.concat([prefix, bytes.subarray(0, 32 - prefix.length)]);
@@ -115,7 +114,7 @@ export function createMediaService({ repo, assetStore, enhancer, fetchImpl = saf
         if (size > cap || (type && Number(response.headers.get('content-length')) > cap)) invalid(`Media is too large (limit ${cap / MB} MB for this type).`);
         chunks.push(bytes);
       }
-    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    } finally { await Promise.resolve(body.cancel?.()).catch(() => {}); body.destroy?.(); }
     return importBytes(projectId, Buffer.concat(chunks), label);
   }
   async function temporary(fn) {
@@ -148,7 +147,8 @@ export function createMediaService({ repo, assetStore, enhancer, fetchImpl = saf
     const filter = mode === 'crop' ? `crop=${width}:${height}:${x}:${y}:exact=1` : `pad=${width}:${height}:${x}:${y}:color=black`;
     return temporary(async (dir) => {
       const out = path.join(dir, video ? 'reframed.mp4' : 'reframed.png');
-      await run('ffmpeg', ['-v', 'error', '-i', assetStore.path(asset), '-map', '0:v:0', ...(video ? ['-map', '0:a?', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart'] : ['-frames:v', '1']), '-vf', filter, '-threads', '1', '-y', out], 600_000);
+      // Videos encode on the GPU (NVENC) when it can, falling back to the CPU.
+      await runVideo(['-v', 'error', '-i', assetStore.path(asset), '-map', '0:v:0', ...(video ? ['-map', '0:a?', ...(await videoEncoder('final')).args, '-c:a', 'aac', '-movflags', '+faststart'] : ['-frames:v', '1']), '-vf', filter, ...(video ? [] : ['-threads', '1']), '-y', out], 600_000);
       const saved = await assetStore.save({ bytes: await readFile(out), projectId: asset.projectId, kind: video ? 'video' : 'generation', label: `${asset.label ?? 'Media'} (${mode} ${aspect})`, parentAssetId: id });
       return { asset: saved, width, height };
     });

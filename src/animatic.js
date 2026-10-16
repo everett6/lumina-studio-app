@@ -1,5 +1,5 @@
 import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
 import { resolveFonts } from './fonts.js';
 import { lineTimes, mixSoundtrack } from './soundtrack.js';
@@ -39,7 +39,9 @@ export function editTimeline(shots, settings = {}, fps = 24) {
   return { fps, totalSeconds: clock / fps, totalFrames: clock, shots: rows };
 }
 
-const encode = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '0', '-threads', '2', '-pix_fmt', 'yuv420p'];
+// Lossless pieces from one encoder (stitched later with -c copy). Half the CPU threads: much faster than 2 while
+// leaving the rest of the machine responsive.
+const encode = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '0', '-threads', String(Math.max(2, Math.floor(availableParallelism() / 2))), '-pix_fmt', 'yuv420p'];
 const audio = ['-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2'];
 // Bound decoder threads too: ffmpeg 8 can stall frame-threaded H.264 decoding when
 // sped-up timestamps and atempo share a source. A single decoder thread also caps preview CPU.

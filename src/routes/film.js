@@ -12,7 +12,7 @@ export function registerRoutes({ route, readBody, RequestError, uuid, production
   // Errors from the controller carry a status (409 conflict, 400 bad policy): keep it.
   const guard = (fn) => async (...args) => {
     try { return await fn(...args); } catch (error) {
-      throw error instanceof RequestError ? error : new RequestError(error.status ?? (error instanceof TypeError ? 400 : 500), error.message);
+      throw error instanceof RequestError ? error : new RequestError(error.status ?? (error instanceof TypeError || error instanceof RangeError ? 400 : 500), error.message);
     }
   };
   const view = (id) => {

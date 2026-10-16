@@ -73,6 +73,19 @@ test('URL imports enforce public HTTPS on every hop, sniff bytes and stop oversi
   assert.equal(saved[1].kind, 'audio');
 });
 
+test('URL imports read the Node stream body that safeFetch returns (no web getReader)', async () => {
+  const { Readable } = await import('node:stream');
+  const saved = [];
+  const media = createMediaService({ assetStore: { save: async (a) => { saved.push(a); return { id: 'saved', ...a }; } },
+    lookupImpl: async () => [{ address: '93.184.216.34' }],
+    fetchImpl: async () => {
+      const body = Object.assign(Readable.from([tinyPng()]), { cancel: async () => {} });
+      return { ok: true, status: 200, headers: { get: () => null }, body };
+    } });
+  await media.importUrl('p', 'https://files.example/picture.png', 'Node stream');
+  assert.equal(saved[0].kind, 'reference');
+});
+
 test('image and video reframing produces crop/pad dimensions and retains the source as parent', async () => {
   const t = await startTestApp();
   try {

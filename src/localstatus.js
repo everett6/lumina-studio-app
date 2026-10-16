@@ -192,7 +192,7 @@ export function createLocalStatus({ dataRoot, env = process.env, commandRunner =
     else if (current.disk.freeBytes < requirements.diskGiB * GiB) no(`Free disk space is below ${requirements.diskGiB} GiB.`);
     if (current.queue.running.length || current.queue.queued.length) wait('Lumina GPU work is running or queued.');
     if (!reasons.length) reasons.push('Measured resource headroom meets the conservative thresholds.');
-    return { task, options, decision, reasons, requirements, advisory, status: current };
+    return { task, options, decision, reasons, requirements, advisory, snapshot: current }; // not `status`: the router reads a top-level status as the HTTP code
   }
   return { status, listModels, freeMemory, queue: () => queue.snapshot(), preflight };
 }

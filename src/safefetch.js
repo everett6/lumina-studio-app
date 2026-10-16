@@ -12,7 +12,13 @@ export function privateAddress(address) {
     return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) || a >= 224;
   }
   const v6 = address.toLowerCase();
-  if (v6.startsWith('::ffff:')) return privateAddress(v6.slice(7));
+  if (v6.startsWith('::ffff:')) {
+    const rest = v6.slice(7);
+    // URL parsing rewrites ::ffff:127.0.0.1 as ::ffff:7f00:1: turn the hex form back into dotted IPv4.
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+    if (hex) { const [a, b] = [parseInt(hex[1], 16), parseInt(hex[2], 16)]; return privateAddress(`${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`); }
+    return isIP(rest) === 4 ? privateAddress(rest) : true;
+  }
   return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith('ff');
 }
 

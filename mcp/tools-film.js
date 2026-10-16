@@ -104,7 +104,7 @@ export function register({ tool, text, ok, safe, client, z }) {
   tool('set_scene_state', {
     title: 'Declare a shot\'s scene state',
     description: 'Declare who is in a shot at its start and end, where they stand and face, what they wear and hold, injuries, what they know, the location and the time of day, plus deliberate changes as transitions ({ type: character-enter|character-exit|wardrobe-change|location-change|time-skip|prop-transfer|prop-appears|prop-lost|injury|injury-healed, who, what, to, reason }). validate_film_plan checks these across cuts.',
-    inputSchema: { shotId: z.string(), start: state, end: state, transitions: z.array(z.record(z.string(), z.unknown())).optional(), events: z.array(z.record(z.string(), z.unknown())).optional() },
+    inputSchema: { shotId: z.string(), start: state.optional(), end: state.optional(), transitions: z.array(z.record(z.string(), z.unknown())).optional(), events: z.array(z.record(z.string(), z.unknown())).optional() },
   }, safe(async ({ shotId, ...body }) => ok(text(await client.call('PUT', `/api/shots/${shotId}/scene-state`, body)))));
 
   tool('validate_film_plan', {

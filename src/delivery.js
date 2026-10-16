@@ -3,16 +3,18 @@ import { copyFile, lstat, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { resolveFonts } from './fonts.js';
-import { probe, run, runCapture } from './video.js';
+import { probe, run, runCapture, runVideo, videoEncoder } from './video.js';
 
 // File-only publishing helpers. CPU encoding deliberately avoids videoEncoder's GPU probe.
-const encode = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '16', '-threads', '2', '-pix_fmt', 'yuv420p'];
+// Each delivery file is one encode: NVENC on an NVIDIA GPU (much faster), libx264 otherwise; runVideo retries a
+// failed GPU encode on the CPU. ENCODE is replaced with the chosen encoder's arguments when the command runs.
+const encode = ['ENCODE'];
 const audio = ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'];
 const flags = ['-movflags', '+faststart'];
 let filterCache;
 async function filters() {
   filterCache ??= runCapture('ffmpeg', ['-hide_banner', '-filters'], 10_000).then(({ stdout, stderr }) =>
-    new Set([...`${stdout}\n${stderr}`.matchAll(/^\s*[.A-Z|]{2,3}\s+(\w+)\s/gm)].map((m) => m[1])));
+    new Set([...`${stdout}\n${stderr}`.matchAll(/^\s*[.A-Z|]{2,3}\s+(\w+)\s/gm)].map((m) => m[1]))).catch((error) => { filterCache = null; throw error; }); // a failed probe is retried next time
   return filterCache;
 }
 
@@ -99,7 +101,9 @@ async function staged(file, extension, render) {
   }
 }
 async function ffmpeg(args) {
-  await run('ffmpeg', ['-v', 'error', '-nostdin', '-filter_threads', '1', '-filter_complex_threads', '1', ...args], 3_600_000);
+  const at = args.indexOf('ENCODE');
+  if (at >= 0) args = [...args.slice(0, at), ...(await videoEncoder('final')).args, ...args.slice(at + 1)];
+  await runVideo(['-v', 'error', '-nostdin', '-filter_threads', '1', '-filter_complex_threads', '1', ...args], 3_600_000);
 }
 
 async function fontFor(text, dir) {

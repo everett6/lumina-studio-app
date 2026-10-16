@@ -434,6 +434,8 @@ export function createApiServer(ctx) {
         const { provider, model, voice } = body.voice ?? {};
         const found = providers.model(provider, model);
         if (!found?.operations.includes('speech')) throw new RequestError(400, 'Choose a voice model that can speak.');
+        // A custom voice that no longer exists is an error, never silently another voice (as in generation.js).
+        if (String(voice ?? '').startsWith('custom:') && !found.voices?.includes(voice)) throw new RequestError(400, `The custom voice ${voice} no longer exists. Pick another with list_voices.`);
         fields.voice = { provider, model, voice: found.voices?.includes(voice) ? voice : found.voices?.[0] ?? null };
       }
     }
