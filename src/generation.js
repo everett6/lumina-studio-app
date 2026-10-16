@@ -142,6 +142,10 @@ export function createGenerationService({ repo, providers, directors, keys, jobs
       if (!model.operations.includes(media)) throw new RequestError(400, `${model.label} cannot ${media === 'speech' ? 'narrate' : 'make video'}.`);
       if (inputAssetIds.length > model.maxReferences) throw new RequestError(400, `${model.label} accepts at most ${model.maxReferences} input image(s).`);
       if (model.requiresImage && !inputAssetIds.length) throw new RequestError(400, `${model.label} needs a start image.`);
+      // A custom voice that was deleted must not silently become the default voice.
+      if (media === 'speech' && typeof input.voice === 'string' && input.voice.startsWith('custom:') && !model.voices?.includes(input.voice)) {
+        throw new RequestError(400, `The custom voice ${input.voice} no longer exists (or ${model.label ?? model.id} cannot use it). Pick another voice (list_voices).`);
+      }
       params = media === 'speech'
         ? { voice: model.voices?.includes(input.voice) ? input.voice : model.voices?.[0] ?? null, style: typeof input.style === 'string' ? input.style.slice(0, 500) : null }
         : {

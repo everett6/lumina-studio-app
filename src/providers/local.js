@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProviderError } from './http.js';
 import { gpuQueue } from '../gpu.js';
+import { customVoiceLibrary } from '../voices.js';
 import { run } from '../video.js';
 
 // Local GPU: open-weight models run on this computer with Hugging Face diffusers — no API, no key, no cost.
@@ -274,6 +275,22 @@ const log = (label, onProgress) => (step, total) => {
   if (step === total || step % 10 === 0) console.info(`[local] ${label} step ${step}/${total}`);
 };
 
+// Real speech-to-speech conversion: the worker checks its installed API before loading weights.
+export async function changeVoice({ audio, targetVoice }) {
+  const custom = typeof targetVoice === 'string' && targetVoice.startsWith('custom:');
+  const reference = custom ? customVoiceLibrary()?.reference(targetVoice) : undefined;
+  if (custom ? !reference : !kokoroVoices.includes(targetVoice)) throw new ProviderError('invalid_request', 'Choose a voice from list_voices.', { status: 400 });
+  if (!voicePython()) throw Object.assign(new Error(voiceUnavailableNote('chatterbox')), { status: 501 });
+  const capability = await gpu('voice', { task: 'voice-capabilities' }, null, { exclusive: false });
+  if (!capability.available) throw Object.assign(new Error(`Voice conversion is unavailable: ${capability.reason}`), { status: 501 });
+  if (!voiceInstalled('chatterbox')) throw Object.assign(new Error(voiceUnavailableNote('chatterbox')), { status: 501 });
+  return inTemp(async (dir) => {
+    const out = path.join(dir, 'changed.wav');
+    await gpu('voice', { task: 'voice-change', audio, voice: targetVoice, reference, out });
+    return { bytes: await readFile(out), usage: { local: true, cost: 0 } };
+  });
+}
+
 export default {
   id: 'local',
   label: 'Local GPU (open models)',
@@ -301,11 +318,13 @@ export default {
       note: 'Anime still frames on this computer (SDXL fine-tune, OpenRAIL++): about half a minute each. Use them as start frames for Wan clips. Download: hf download cagliostrolab/animagine-xl-4.0 (7 GB).',
     },
     {
-      id: 'kokoro-82m', label: 'Kokoro 82M · voices (this computer)', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0, voices: kokoroVoices,
-      note: 'Open-weight voices (Apache 2.0) on the CPU, faster than real time. American and British English voices.',
+      id: 'kokoro-82m', label: 'Kokoro 82M · voices (this computer)', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0,
+      get voices() { return [...kokoroVoices, ...(customVoiceLibrary()?.list() ?? []).map((v) => v.id)]; },
+      note: 'Open-weight voices (Apache 2.0) on the CPU, faster than real time. American and British English voices. Custom voice ids automatically use Chatterbox.',
     },
     {
-      id: 'chatterbox', label: 'Chatterbox · expressive acted voices (your GPU)', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0, voices: kokoroVoices,
+      id: 'chatterbox', label: 'Chatterbox · expressive acted voices (your GPU)', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0,
+      get voices() { return [...kokoroVoices, ...(customVoiceLibrary()?.list() ?? []).map((v) => v.id)]; },
       note: 'Open-weight acting voice (MIT): clones the chosen voice and plays the line with emotion; the style text sets how intense (e.g. "furious", "calm"). Adds an inaudible AI watermark.',
     },
   ],
@@ -339,7 +358,10 @@ export default {
   },
   // Speech: Kokoro preset voices, or Chatterbox acting the line in that voice. Returns WAV.
   async speak({ model, text, voice, style, signal }) {
-    const engine = model === 'chatterbox' ? 'chatterbox' : 'kokoro';
+    const custom = typeof voice === 'string' && voice.startsWith('custom:');
+    const reference = custom ? customVoiceLibrary()?.reference(voice) : undefined;
+    if (custom && !reference) throw new ProviderError('invalid_request', 'Custom voice not found.');
+    const engine = custom || model === 'chatterbox' ? 'chatterbox' : 'kokoro';
     if (!voiceInstalled(engine)) throw new ProviderError('provider', voiceUnavailableNote(engine));
     // Kokoro reads Japanese through espeak, which cannot read kanji (it says "Chinese letter" for each one).
     if (engine === 'kokoro' && /^j/.test(voice ?? '') && /[\u3400-\u9fff]/.test(text)) {
@@ -348,7 +370,7 @@ export default {
     }
     return inTemp(async (dir) => {
       const out = path.join(dir, 'line.wav');
-      await gpu('voice', { task: 'speech', engine, text, voice, style, out }, null, { exclusive: engine === 'chatterbox', signal });
+      await gpu('voice', { task: 'speech', engine, text, voice, style, reference, out }, null, { exclusive: engine === 'chatterbox', signal });
       return { bytes: await readFile(out), usage: { local: true, characters: text.length, cost: 0 } };
     });
   },
