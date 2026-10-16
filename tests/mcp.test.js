@@ -24,7 +24,7 @@ test('MCP tools drive a running Lumina app end to end', async () => {
       'outline_book', 'draft_chapter', 'read_chapter', 'revise_chapter', 'edit_chapter', 'generate_cover', 'narrate', 'generate_speech', 'generate_video', 'export_book', 'list_presets',
       'list_characters', 'create_character', 'enhance_image', 'import_manuscript', 'create_storyboard', 'get_storyboard', 'update_shot', 'generate_shot', 'join_storyboard',
       'update_character', 'make_character_sheet', 'review_shot', 'render_still_shot', 'voice_dialogue', 'estimate_film_cost', 'openrouter_credit_status', 'budget_status', 'decide_approval', 'refresh_models', 'import_video', 'inspect_video', 'interpolate_video',
-      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production']) {
+      'list_shot_takes', 'select_shot_take', 'attach_clip_to_shot', 'repair_frame', 'rerecord_line', 'set_line_timing', 'export_production', 'list_voices', 'preview_voice']) {
       assert.ok(names.includes(name), `missing tool ${name}`);
     }
 
@@ -193,6 +193,17 @@ test('MCP novel tools: outline → draft → read → narrate → speech/video �
     assert.equal(parse(narrated).operation, 'speech');
     const speech = parse(await client.callTool({ name: 'generate_speech', arguments: { projectId: project.id, text: 'Hello.', provider: 'mock', model: 'mock-voice' } }));
     assert.equal(speech.status, 'completed');
+    const voices = parse(await client.callTool({ name: 'list_voices', arguments: {} }));
+    const mockVoice = voices.models.find((m) => m.provider === 'mock');
+    assert.deepEqual(mockVoice.voices, ['tone-low', 'tone-high']);
+    assert.equal(voices.models[0].local, true, 'local voices are listed first');
+    const sample = await client.callTool({ name: 'preview_voice', arguments: { projectId: project.id, voice: 'tone-high', provider: 'mock', model: 'mock-voice' } });
+    assert.equal(parse(sample).voice, 'tone-high');
+    const clip = sample.content.find((c) => c.type === 'audio');
+    assert.ok(clip?.data.length > 100, 'the sample is returned as inline audio');
+    const wrong = await client.callTool({ name: 'preview_voice', arguments: { projectId: project.id, voice: 'nobody', model: 'mock-voice' } });
+    assert.equal(wrong.isError, true);
+    assert.match(wrong.content[0].text, /tone-low, tone-high/, 'a model-only call picks that model and lists its voices');
     const video = parse(await client.callTool({ name: 'generate_video', arguments: { projectId: project.id, prompt: 'rain', provider: 'mock', model: 'mock-video' } }));
     assert.equal(video.operation, 'video');
     const docx = parse(await client.callTool({ name: 'export_book', arguments: { bookId: book.id, format: 'docx' } }));

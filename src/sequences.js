@@ -179,9 +179,10 @@ export function exposureFilter(details = {}, rate = 24) {
   return parts.join(',');
 }
 // Frame interpolation (RIFE) would smear the held drawings of anime timing, so it is skipped for those shots, and
-// anime storyboards never smooth shots that are on 'auto' timing automatically (a shot's own interpolate switch still works).
-export function skipsSmoothing(details, look) {
-  return ['twos', 'threes'].includes(details.timing) || (details.holds?.length ?? 0) > 0 || (look === 'anime' && (details.timing ?? 'auto') === 'auto' && !details.interpolate);
+// anime storyboards only smooth shots on 'auto' timing when asked (the shot's interpolate switch, or the storyboard's
+// "smooth to 30 fps" setting, passed as `wanted`).
+export function skipsSmoothing(details, look, wanted = false) {
+  return ['twos', 'threes'].includes(details.timing) || (details.holds?.length ?? 0) > 0 || (look === 'anime' && (details.timing ?? 'auto') === 'auto' && !details.interpolate && !wanted);
 }
 
 export function cleanShotDetails(input = {}, base = {}) {
@@ -748,7 +749,7 @@ export function createSequenceService({ repo, directors, keys, generations, asse
         for (const shot of usable) {
           let clip = asset(shot.videoAssetId);
           const source = clip.id;
-          if ((shot.details.interpolate || settings.interpolateFps) && shot.details.method !== 'still' && enhancer && !skipsSmoothing(shot.details, settings.look)) {
+          if ((shot.details.interpolate || settings.interpolateFps) && shot.details.method !== 'still' && enhancer && !skipsSmoothing(shot.details, settings.look, Boolean(settings.interpolateFps))) {
             const smooth = await derived(shot, `smooth|${source}|30`, async () => (await enhancer.interpolate(assetStore.path(clip), { fps: 30 }))?.bytes ?? null);
             if (smooth) clip = smooth;
           }

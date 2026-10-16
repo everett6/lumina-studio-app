@@ -302,7 +302,7 @@ export default {
     },
     {
       id: 'kokoro-82m', label: 'Kokoro 82M · voices (this computer)', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0, voices: kokoroVoices,
-      note: 'Open-weight voices (Apache 2.0) on the CPU, faster than real time. American, British and Japanese voices.',
+      note: 'Open-weight voices (Apache 2.0) on the CPU, faster than real time. American and British English voices.',
     },
     {
       id: 'chatterbox', label: 'Chatterbox · expressive acted voices (your GPU)', operations: ['speech'], sizes: [], qualities: [], maxReferences: 0, voices: kokoroVoices,

@@ -46,6 +46,9 @@ test('smoothing is skipped for twos/threes, holds, and anime shots on auto timin
   assert.equal(skipsSmoothing({ timing: 'threes' }, 'anime'), true);
   assert.equal(skipsSmoothing({ timing: 'auto', holds: [{ start: 0, seconds: 1 }] }, 'cinematic'), true);
   assert.equal(skipsSmoothing({ timing: 'auto', holds: [] }, 'cinematic'), false, 'live action keeps its smoothing');
+  assert.equal(skipsSmoothing({ timing: 'auto' }, 'anime'), true, 'anime auto shots are not smoothed unasked');
+  assert.equal(skipsSmoothing({ timing: 'auto' }, 'anime', true), false, 'the storyboard 30 fps setting smooths anime auto shots');
+  assert.equal(skipsSmoothing({ timing: 'twos' }, 'anime', true), true, 'deliberate twos stay on twos');
   assert.equal(skipsSmoothing({ timing: 'auto' }, 'anime'), true, 'anime keeps its rhythm');
   assert.equal(skipsSmoothing({ timing: 'auto', interpolate: true }, 'anime'), false, 'a shot that asks for smoothing gets it');
   assert.equal(skipsSmoothing({ timing: 'ones' }, 'anime'), false, 'explicit ones may be smoothed');

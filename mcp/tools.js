@@ -26,6 +26,7 @@ MONEY
 
 RULES OF THE ROAD
 - Anime storyboards (look: "anime") are English only. Japanese and other languages are not supported for anime dialogue.
+- Voices: list_voices shows every voice (local Kokoro/Chatterbox voices are free); preview_voice plays a sample; set_character_voice assigns one; voice_dialogue records the lines.
 - Lip sync is OFF by default per storyboard (setting lipSync, chosen at create_storyboard or in the storyboard's Settings in the app). When off, lip_sync_shot is refused. It needs recorded dialogue first (voice_dialogue).
 - Local models are free but slow and share one GPU: run one heavy job at a time. Do not poll; use watch_jobs with waitSeconds to wait for jobs.
 - Replacing work (import_shot_plan replace, plan_storyboard/plan_pages/outline_book replace, draft_bible, bake_character remove) needs the user's OK first.
@@ -51,7 +52,8 @@ const TOOL_META = {
   generate_illustration: ['o', paid, 'generate_cover or export_book'], outline_book: ['do', 'Uses the writer model (may spend credits).', 'draft_chapter'],
   draft_chapter: ['do', 'Uses the writer model (may spend credits).', 'read_chapter'], read_chapter: ['r', free, null],
   revise_chapter: ['o', 'Uses the writer model (may spend credits).', null], edit_chapter: ['i', free, null],
-  generate_cover: ['o', paid, 'export_book'], narrate: ['o', paid, 'export_book'], generate_speech: ['o', paid, null],
+  generate_cover: ['o', paid, 'export_book'], narrate: ['o', paid, 'export_book'], generate_speech: ['o', 'Free with a local voice (Kokoro, Chatterbox); provider voices may spend credits.', null],
+  list_voices: ['r', free, 'preview_voice, then set_character_voice'], preview_voice: ['o', 'Free with a local voice; provider voices may spend a little.', 'set_character_voice or generate_speech'],
   generate_video: ['o', paid, 'get_generation (if wait=false)'], import_manuscript: ['', free, 'read_chapter or revise_chapter'],
   create_storyboard: ['o', 'Planning uses the writer model (a little credit); plan=false is free.', 'film_next_step'],
   import_shot_plan: ['d', free, 'film_next_step'], production_readiness: ['r', free, 'estimate_film_cost'],
@@ -555,12 +557,60 @@ export function registerLuminaTools(server, client) {
     return waitAndShow(generation);
   }));
 
+  // Speech models with their voices; local voices (free, on this computer) first.
+  async function speechModels() {
+    const { providers } = await client.call('GET', '/api/catalog');
+    return providers.flatMap((p) => p.models.filter((m) => m.operations.includes('speech')).map((m) => ({
+      provider: p.id, model: m.id, label: m.label, local: p.id === 'local', ready: Boolean(p.ready && m.available !== false),
+      voices: m.voices ?? [], note: m.note, setup: p.ready && m.available !== false ? undefined : p.id === 'local' ? 'Run scripts/setup-voices.sh (free, about 1 GB), then restart Lumina.' : 'Add this provider\'s key in Lumina → Settings.',
+    }))).sort((a, b) => Number(b.local) - Number(a.local));
+  }
+  async function pickVoice(provider, model) {
+    if (provider && model) return { provider, model };
+    const all = await speechModels();
+    const ready = all.filter((m) => m.ready && (!provider || m.provider === provider) && (!model || m.model === model));
+    const choice = ready.find((m) => m.model === 'kokoro-82m') ?? ready[0];
+    if (!choice) {
+      const named = model && all.find((m) => m.model === model);
+      throw new Error(named ? `${named.label} is not ready. ${named.setup}` : 'No voice is ready. Install the free local voices (scripts/setup-voices.sh) or add a voice provider key in Lumina → Settings.');
+    }
+    return { provider: choice.provider, model: choice.model, voices: choice.voices };
+  }
+  const kokoroVoiceNote = 'Kokoro/Chatterbox voice names: first letter is the accent (a American, b British), second is f female / m male, e.g. af_heart, am_michael, bf_emma, bm_george.';
+
+  tool('list_voices', {
+    title: 'List voices',
+    description: `List every voice model (local and provider) with its voice names, whether it is ready to use, and how to set it up if not. ${kokoroVoiceNote} Chatterbox acts the line with emotion (style text such as "furious" or "whispering"); Kokoro is fast and plain.`,
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  }, safe(async () => ok(text({ models: await speechModels(), tip: 'Try one with preview_voice, then give a character its voice with set_character_voice.' }))));
+
+  tool('preview_voice', {
+    title: 'Preview a voice',
+    description: `Speak a short sample in one voice and return the audio so the user can hear it (also saved to the project library). Without provider/model the local Kokoro voice is used. ${kokoroVoiceNote}`,
+    inputSchema: {
+      projectId: z.string(), voice: z.string().optional().describe('Voice name from list_voices, e.g. "af_heart"'),
+      text: z.string().min(1).max(300).optional().describe('What to say (default: a short test line)'),
+      provider: z.string().optional(), model: z.string().optional(), style: z.string().max(200).optional().describe('Chatterbox / provider voices: how to act the line, e.g. "excited"'),
+    },
+  }, safe(async ({ projectId, voice, text: words, provider, model, style }) => {
+    const { voices, ...choice } = await pickVoice(provider, model);
+    if (voice && voices?.length && !voices.includes(voice)) throw new Error(`${choice.model} has no voice "${voice}". Its voices: ${voices.join(', ')}.`);
+    const line = words ?? 'Hi! This is how I sound. Shall we start the story?';
+    const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'speech', prompt: line, voice, style, ...choice });
+    const done = (await client.call('POST', `/api/generations/${generation.id}/wait`, { timeoutMs: 240_000 })).generation;
+    if (done.status !== 'completed') return { content: [text(summarizeGeneration(done))], isError: done.status === 'failed' };
+    const used = done.params?.voice ?? voice ?? null;
+    const parts = await mediaParts([[done.assetPath, 'audio', `Voice sample (${used ?? 'default voice'})`]]);
+    return ok(text({ ...choice, voice: used, text: line, assetId: done.assetId, file: client.localFile ? client.localFile(done.assetPath) : undefined }), ...parts);
+  }));
+
   tool('generate_speech', {
     title: 'Generate speech',
-    description: 'Turn any text into spoken audio (saved to the project library). Long text is split and joined automatically. Costs money on the voice provider.',
+    description: 'Turn any text into spoken audio (saved to the project library). Long text is split and joined automatically. Without provider/model a local voice (Kokoro) is used when installed. See list_voices for voice names.',
     inputSchema: { projectId: z.string(), text: z.string().min(1).max(200000), provider: z.string().optional(), model: z.string().optional(), voice: z.string().optional(), style: z.string().max(500).optional() },
   }, safe(async ({ projectId, text: words, provider, model, voice, style }) => {
-    const choice = await pickModel('speech', provider, model);
+    const { voices: _voices, ...choice } = await pickVoice(provider, model);
     const { generation } = await client.call('POST', '/api/generate', { projectId, operation: 'speech', prompt: words, voice, style, ...choice });
     return waitAndShow(generation);
   }));
@@ -730,7 +780,8 @@ export function registerLuminaTools(server, client) {
     inputSchema: { shotId: z.string() },
   }, safe(async ({ shotId }) => {
     const result = await client.call('POST', `/api/shots/${shotId}/dialogue`, {});
-    return ok(text({ queued: result.queued.length, missingVoices: result.missingVoices }));
+    const hint = result.missingVoices.length ? 'Give each a voice first: set_character_voice for characters, update_storyboard narratorVoice for the narrator (list_voices; the local Kokoro voices are free, e.g. {"provider":"local","model":"kokoro-82m","voice":"af_heart"}). Then call voice_dialogue again.' : undefined;
+    return ok(text({ queued: result.queued.length, missingVoices: result.missingVoices, next: hint }));
   }));
 
   tool('estimate_film_cost', {
@@ -893,7 +944,7 @@ export function registerLuminaTools(server, client) {
     if (join?.state === 'failed') throw new Error(join.error);
     const file = client.localFile && join?.state === 'completed' && result.sequence.outputPath ? client.localFile(result.sequence.outputPath) : undefined;
     return ok(text({ ...storyboardSummary(result), joined: join?.clips, skipped: join?.skipped, progress: join ? `${join.done}/${join.total}` : undefined, state: join?.state,
-      seconds: join?.duration ? Math.round(join.duration * 10) / 10 : undefined, file }));
+      seconds: join?.duration ? Math.round(join.duration * 10) / 10 : undefined, filmAssetId: join?.state === 'completed' ? result.sequence.outputAssetId ?? undefined : undefined, file }));
   }));
 
   tool('export_book', {

@@ -30,7 +30,9 @@ It looks for `LUMINA_APP_COMMAND`, `~/Applications/Lumina-Studio.AppImage`, `/op
 | `generate_illustration` | Illustrate one page with the bible's character looks and reference images. **Spends money.** |
 | `outline_book` / `draft_chapter` / `read_chapter` / `revise_chapter` / `edit_chapter` | Novels and nonfiction: outline, write, read, revise and edit chapters. |
 | `generate_cover` | Cover art from the brief and bible. **Spends money.** |
-| `narrate` / `generate_speech` | Narrate a page or chapter with the book's voice, or turn any text into audio. **Spends money.** |
+| `narrate` / `generate_speech` | Narrate a page or chapter with the book's voice, or turn any text into audio. Free with a local voice (Kokoro, the default when installed); provider voices spend money. |
+| `list_voices` | Every voice model (local Kokoro/Chatterbox and provider voices) with its voice names, whether it is ready, and how to set it up. Free. |
+| `preview_voice` | Speak a short sample in one voice and play it back inline, so you can pick a voice before `set_character_voice`. Free with a local voice. |
 | `generate_video` | Text-to-video or animate an image. **Spends money; slow.** |
 | `list_characters` / `create_character` / `update_character` | Reusable characters, products and locations (up to 6 reference images, a voice, a lock). Pass their ids as `characterIds` to `generate_image`, `generate_video` or `create_storyboard`. A locked look refuses changes unless `locked: false` is sent. |
 | `make_character_sheet` | Queue a turnaround model sheet (or `expressions: true` for an expression sheet) for a character from its `designTags` (a locked anime tag block, settable in `create_character` / `update_character`) or description. Defaults to the local Animagine model when installed; the finished sheet becomes the first reference image. Poll `get_generation`. |
