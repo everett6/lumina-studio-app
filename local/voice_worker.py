@@ -191,4 +191,13 @@ for line in sys.stdin:
         run(request)
     except Exception as error:  # report every failure to the app instead of dying
         traceback.print_exc()
+        traceback.clear_frames(error.__traceback__)
         send({"id": request.get("id"), "error": f"{type(error).__name__}: {error}"})
+        chatterbox = None
+        conversion = None
+        gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass

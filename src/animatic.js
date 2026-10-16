@@ -41,7 +41,7 @@ export function editTimeline(shots, settings = {}, fps = 24) {
 
 // Lossless pieces from one encoder (stitched later with -c copy). Half the CPU threads: much faster than 2 while
 // leaving the rest of the machine responsive.
-const encode = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '0', '-threads', String(Math.max(2, Math.floor(availableParallelism() / 2))), '-pix_fmt', 'yuv420p'];
+const encode = (threads = Math.max(2, Math.floor(availableParallelism() / 2))) => ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '0', '-threads', String(threads), '-pix_fmt', 'yuv420p'];
 const audio = ['-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2'];
 // Bound decoder threads too: ffmpeg 8 can stall frame-threaded H.264 decoding when
 // sped-up timestamps and atempo share a source. A single decoder thread also caps preview CPU.
@@ -101,7 +101,9 @@ export async function renderEdit(items, { settings = {}, fps = 24, width = 640, 
       const part = path.join(dir, `part-${i}.mov`);
       await ffmpeg([...source, ...(!sound ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'] : []), '-map', '0:v', '-map', sound ? '0:a' : '1:a',
         '-vf', vf, '-af', ['aresample=48000', af, 'aformat=sample_fmts=s16:channel_layouts=stereo', 'asetpts=PTS-STARTPTS', 'apad', `atrim=duration=${length}`].filter(Boolean).join(','),
-        ...encode, ...audio, '-frames:v', String(row.durationFrames + row.transition.frames), '-t', String(length), '-y', part]);
+        // Conservative workaround for an intermittent FFmpeg 8 stall while retiming A/V.
+        // Keep these pieces single-threaded; normal pieces retain the faster parallel encoder.
+        ...encode(row.speed === 1 ? undefined : 1), ...audio, '-frames:v', String(row.durationFrames + row.transition.frames), '-t', String(length), '-y', part]);
       parts.push(part);
     }
     // Render each boundary once, then concatenate with stream copy. Work is linear in runtime,
@@ -112,7 +114,7 @@ export async function renderEdit(items, { settings = {}, fps = 24, width = 640, 
       const incoming = i ? visible[i - 1].row.transition.frames : 0;
       const body = path.join(dir, `body-${i}.mov`);
       await ffmpeg(['-i', parts[i], '-ss', String(incoming / fps), '-t', String((row.durationFrames - incoming) / fps),
-        ...encode, ...audio, '-frames:v', String(row.durationFrames - incoming), '-y', body]);
+        ...encode(), ...audio, '-frames:v', String(row.durationFrames - incoming), '-y', body]);
       pieces.push({ file: body, duration: (row.durationFrames - incoming) / fps });
       const fade = row.transition.seconds;
       if (!fade || i === parts.length - 1) continue;
@@ -120,7 +122,7 @@ export async function renderEdit(items, { settings = {}, fps = 24, width = 640, 
       const transition = ({ crossfade: 'fade', 'fade-black': 'fadeblack', 'fade-white': 'fadewhite' })[row.transition.transition];
       await ffmpeg(['-ss', String(row.duration), '-i', parts[i], '-i', parts[i + 1],
         '-filter_complex', `[0:v]settb=1/${fps},setpts=PTS-STARTPTS[a];[1:v]settb=1/${fps},setpts=PTS-STARTPTS[b];[a][b]xfade=transition=${transition}:duration=${fade}:offset=0[v];[0:a]asetpts=PTS-STARTPTS[x];[1:a]asetpts=PTS-STARTPTS[y];[x][y]acrossfade=d=${fade}[a]`,
-        '-map', '[v]', '-map', '[a]', ...encode, ...audio, '-frames:v', String(row.transition.frames), '-t', String(fade), '-y', blend]);
+        '-map', '[v]', '-map', '[a]', ...encode(), ...audio, '-frames:v', String(row.transition.frames), '-t', String(fade), '-y', blend]);
       pieces.push({ file: blend, duration: fade });
     }
     const list = path.join(dir, 'concat.txt');

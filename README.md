@@ -1,6 +1,6 @@
 # Lumina Studio
 
-**Version 0.9.13** adds 52 MCP production tools: a versioned film canon, visual review with bounded repair, audio and delivery validation, shot and timeline editing with a cheap animatic, and library management (see [docs/MCP.md](docs/MCP.md#production-tools-0913)); 0.9.12 added the AI chat as creative director, a persistent film controller (survives restarts), plan validation (continuity and exact timeline), media tools (upscale, reframe, inpaint, outpaint, URL import, batches, video analysis), custom voices and voice conversion, local-model status tools, sound effects, music per scene and a publish kit; 0.9.11 added background music downloaded from the internet when a film needs it (free CC0 / CC BY tracks, credits kept), one-call voice casting (cast_voices), voice tools for AI chats (list_voices, preview_voice; local Kokoro voices are free), honours "smooth to 30 fps" on anime storyboards, plus Bake character (a per-character LoRA trained on your GPU), a stronger MCP server, and character sheets that keep anime characters on-model and theatrical anime lip sync (five mouth shapes timed to the words). It also asks before spending paid credits (Confirm & spend) and makes Lumina easier to drive from an AI chat (MCP): live previews (frames, clip contact sheets, dialogue audio), a step-by-step film wizard, job progress and cancel, and edit-by-chat tools (shot look, order, trim, character voice). See [docs/MCP.md](docs/MCP.md). Anime production: [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md).
+**Version 0.9.14** fixes local-worker timeouts and GPU cleanup, caches bake redraw models, exposes batch and status errors, and provides a smaller MCP catalog with on-demand full tool help. Version 0.9.13 added 52 MCP production tools: a versioned film canon, visual review with bounded repair, audio and delivery validation, shot and timeline editing with a cheap animatic, and library management (see [docs/MCP.md](docs/MCP.md#production-tools-0913)); 0.9.12 added the AI chat as creative director, a persistent film controller (survives restarts), plan validation (continuity and exact timeline), media tools (upscale, reframe, inpaint, outpaint, URL import, batches, video analysis), custom voices and voice conversion, local-model status tools, sound effects, music per scene and a publish kit; 0.9.11 added background music downloaded from the internet when a film needs it (free CC0 / CC BY tracks, credits kept), one-call voice casting (cast_voices), voice tools for AI chats (list_voices, preview_voice; local Kokoro voices are free), honours "smooth to 30 fps" on anime storyboards, plus Bake character (a per-character LoRA trained on your GPU), a stronger MCP server, and character sheets that keep anime characters on-model and theatrical anime lip sync (five mouth shapes timed to the words). It also asks before spending paid credits (Confirm & spend) and makes Lumina easier to drive from an AI chat (MCP): live previews (frames, clip contact sheets, dialogue audio), a step-by-step film wizard, job progress and cancel, and edit-by-chat tools (shot look, order, trim, character voice). See [docs/MCP.md](docs/MCP.md). Anime production: [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md).
 
 Lumina Studio is an open-source, Linux-first creative workspace for AI images. Bring your own API keys for OpenAI,
 fal.ai, Google Gemini or Replicate. Generate and edit images, keep everything in local projects, build reusable
@@ -52,13 +52,13 @@ npm run dist
 Then install the `.deb`:
 
 ```bash
-sudo apt install ./dist/lumina-studio_0.9.13_amd64.deb
+sudo apt install ./dist/lumina-studio_0.9.14_amd64.deb
 ```
 
 Or run the AppImage directly:
 
 ```bash
-chmod +x "dist/Lumina Studio-0.9.13.AppImage"
+chmod +x "dist/Lumina Studio-0.9.14.AppImage"
 ```
 
 Open **Lumina Studio**, go to **Settings**, paste a key for at least one provider, and press **Test key**.
@@ -149,3 +149,11 @@ New installs enable the strict $12 budget by default. Explicit existing settings
 Local voices (Kokoro and Chatterbox) install with `scripts/setup-voices.sh`, and the anime extras (Animagine, character sheets, Bake character, lip sync) with `scripts/setup-anime.sh`; see [docs/SHIPPING_ANIME.md](docs/SHIPPING_ANIME.md#local-voices).
 
 Finishing measures recorded dialogue from the audio file and pauses if it exceeds its shot, retaining both audio and source clips. Revise the line or extend the shot before resuming; it does not silently cut speech.
+
+### Worker reliability and MCP catalog (0.9.14)
+
+Local workers have an absolute request deadline (20 minutes for generation/voice/lip-sync; two hours for bake training), plus a no-progress deadline (five minutes; ten for baking). A failed or timed-out worker must exit before the shared GPU queue advances. These limits prevent indefinite queue stalls; they do not guarantee that every GPU workload fits available memory. Source assets are retained and no paid fallback is submitted automatically.
+
+Bake redraws reuse their drawing pipeline while the same worker remains alive; starting training, switching to another GPU model, failure or idle shutdown releases it. Temperature telemetry is sampled at most once every five seconds, with repeated cooling checks while hot. Voice and lip-sync error paths drop GPU model references.
+
+MCP lists concise tool descriptions with unchanged input schemas and safety annotations. Call `get_tool_help` for the complete constraints and examples before first using a tool marked “Full help”. All existing tools remain available. Detailed help is fetched on demand rather than repeated in every catalog response.

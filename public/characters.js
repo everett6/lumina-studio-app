@@ -98,9 +98,28 @@ function card(character) {
   // Two phases: the GPU draws training pictures first, then you throw out the bad ones before it learns from them.
   const bakeLabel = h('span.muted', {}, '');
   const bakePanel = h('div.bake-review', { hidden: true });
+  let bakeRequest = 0;
+  const bakeError = (error) => {
+    bakePanel.hidden = false;
+    bakePanel.replaceChildren(h('p.error-text', { role: 'status' }, `Bake status unavailable: ${error.message || 'Could not load bake status.'}`),
+      h('button.button.secondary.small', { onclick: async () => {
+        const request = ++bakeRequest;
+        try { const next = await api(bakeUrl); if (request === bakeRequest) showBake(next); }
+        catch (nextError) { if (request === bakeRequest) bakeError(nextError); }
+      } }, 'Retry status'));
+  };
   const bakeButton = h('button.button.secondary.small', { title: 'Teach the local anime model this exact character from its sheet (free, your GPU, about 15-25 minutes; other GPU work waits). It draws pictures first so you can approve them.' }, 'Bake character');
   const bakeUrl = `/api/characters/${character.id}/bake`;
-  const bakeCall = async (suffix, body) => showBake(await api(`${bakeUrl}${suffix}`, { method: 'POST', body }));
+  const bakeCall = async (suffix, body) => {
+    const request = ++bakeRequest;
+    try {
+      const status = await api(`${bakeUrl}${suffix}`, { method: 'POST', body });
+      if (request === bakeRequest) showBake(status);
+    } catch (error) {
+      if (request === bakeRequest) bakeError(error);
+      return null;
+    }
+  };
   const showBake = (status) => {
     const job = status.job;
     const pictures = status.pictures ?? [];
@@ -109,7 +128,13 @@ function card(character) {
     if (job?.busy) {
       bakeButton.disabled = true;
       bakeLabel.textContent = `Baking: ${job.stage === 'drawing' ? 'drawing pictures' : 'training'} ${job.total ? `${job.done}/${job.total}` : '…'}`;
-      setTimeout(() => api(bakeUrl).then(showBake).catch(() => {}), 4000);
+      setTimeout(async () => {
+        const request = ++bakeRequest;
+        try {
+          const next = await api(bakeUrl);
+          if (request === bakeRequest) showBake(next);
+        } catch (error) { if (request === bakeRequest) bakeError(error); }
+      }, 4000);
     } else {
       bakeButton.disabled = locked || job?.state === 'review';
       bakeButton.textContent = status.baked ? 'Re-bake character' : 'Bake character';
@@ -142,10 +167,13 @@ function card(character) {
   };
   bakeButton.onclick = guard(async () => {
     if (!character.references.length) throw new Error('Make a character sheet first; baking learns the character from it.');
-    await bakeCall('', {});
-    toast('Drawing training pictures on your GPU. You will review them before it trains.');
+    if (await bakeCall('', {})) toast('Drawing training pictures on your GPU. You will review them before it trains.');
   });
-  if (character.kind === 'character') api(bakeUrl).then(showBake).catch(() => {});
+  if (character.kind === 'character') {
+    const request = ++bakeRequest;
+    api(bakeUrl).then((status) => { if (request === bakeRequest) showBake(status); })
+      .catch((error) => { if (request === bakeRequest) bakeError(error); });
+  }
   // A voice for this character's dialogue in storyboards.
   const voices = modelsFor('speech').flatMap(({ provider, model }) => (model.voices?.length ? model.voices : [null])
     .map((voice) => ({ value: JSON.stringify({ provider: provider.id, model: model.id, voice }), label: `${provider.label} · ${model.label}${voice ? ` · ${voice}` : ''}`, ready: provider.ready })));

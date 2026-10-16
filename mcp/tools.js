@@ -38,6 +38,7 @@ MONEY
 - Call estimate_film_cost before produce_film or generate_storyboard_shots for clips. Never loop paid retries or submit a second paid take while one is still running; check the first with get_generation / watch_jobs.
 
 RULES OF THE ROAD
+- Tool listings use concise descriptions. Before first using a tool marked Full help, call get_tool_help(name) for its full constraints and examples; input schemas and safety annotations are unchanged.
 - Anime storyboards (look: "anime") are English only. Japanese and other languages are not supported for anime dialogue.
 - Voices: cast_voices gives the narrator and every character of a storyboard a distinct free local voice in one call (record=true also records the lines); list_voices shows every voice; preview_voice plays a sample; set_character_voice changes one; voice_dialogue records a shot's lines.
 - Lip sync is OFF by default per storyboard (setting lipSync, chosen at create_storyboard or in the storyboard's Settings in the app). When off, lip_sync_shot is refused. It needs recorded dialogue first (voice_dialogue).
@@ -51,6 +52,7 @@ const free = 'Free.';
 const local = 'Free (runs on this computer).';
 const paid = 'May spend credits on the user\'s provider account (budget approvals apply).';
 const TOOL_META = {
+  get_tool_help: ['r', free, null],
   search: ['r', free, 'fetch'], fetch: ['r', free, null],
   list_projects: ['r', free, 'create_project or list_assets'], create_project: ['', free, 'create_character, create_storyboard or generate_image'], update_storyboard: ['i', free, 'film_next_step'],
   list_models: ['ro', free, 'generate_image / create_storyboard'], list_presets: ['r', free, 'generate_image, generate_video or create_storyboard'],
@@ -159,11 +161,21 @@ export function registerLuminaTools(server, client) {
   // The remote endpoint builds its McpServer without options: give it the shared playbook before it connects.
   if (server.server && !server.server._instructions) server.server._instructions = LUMINA_INSTRUCTIONS;
   // Every tool gets annotations and a title; cost and next-step hints from TOOL_META are appended to the description.
+  const help = new Map();
   const tool = (name, config, handler) => {
     const meta = TOOL_META[name];
     const extra = meta && !/\bCost:/.test(config.description) ? ` Cost: ${meta[1]}${meta[2] ? ` Next: ${meta[2]}.` : ''}` : '';
+    const description = `${config.description}${extra}`;
+    help.set(name, { name, title: config.title ?? name.replace(/_/g, ' '), description });
+    // Keep complete sentences, all input constraints and annotations; move detailed examples/workflows
+    // to on-demand help instead of injecting them into every ChatGPT/Claude tools/list response.
+    const lead = config.description.split(/(?<=[.!?])\s+(?=[A-Z])/)[0];
+    const concise = config.description.length > 240;
+    const summary = lead.length <= 320 ? lead : `${config.title ?? name.replace(/_/g, ' ')}.`;
+    const cost = meta && !/\bCost:/.test(summary) ? ` Cost: ${meta[1]}` : '';
     return server.registerTool(name, {
-      ...config, title: config.title ?? name.replace(/_/g, ' '), description: `${config.description}${extra}`,
+      ...config, title: config.title ?? name.replace(/_/g, ' '),
+      description: concise ? `${summary}${cost} Full help: get_tool_help.` : description,
       annotations: { ...toolAnnotations(name), ...config.annotations },
     }, handler);
   };
@@ -181,6 +193,15 @@ export function registerLuminaTools(server, client) {
       return fail(error);
     }
   };
+
+  tool('get_tool_help', {
+    title: 'Read full tool instructions',
+    description: 'Get complete constraints, examples, costs and next steps for a tool before first using it. Free; read-only.',
+    inputSchema: { name: z.string().describe('Exact tool name from tools/list') },
+  }, safe(async ({ name }) => {
+    if (!help.has(name)) throw new Error(`Unknown tool: ${name}. Use a name from tools/list.`);
+    return ok(text(help.get(name)));
+  }));
 
   function summarizeGeneration(g) {
     return {

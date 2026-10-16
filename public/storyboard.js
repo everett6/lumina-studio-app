@@ -1,7 +1,8 @@
 import { $, api, describeTotal, downloadAsset, emit, estimateCost, h, modelsFor, on, state, sumCosts, toast, askText } from './lib.js';
+import { batchFailureSummary, runBatch } from './batch-actions.js';
 
 // Storyboard: an idea becomes a shot list; each shot gets a still frame, then a clip; clips join into one video.
-const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, pollUntil: 0, faces: null, tools: null, mouthFor: null };
+const ui = { list: [], detail: null, options: null, presets: [], timer: null, busy: '', estimate: null, estimateError: '', estimateRequest: 0, pollUntil: 0, faces: null, tools: null, mouthFor: null, batchMessage: '' };
 const jobActive = (job) => job && ['queued', 'running'].includes(job.status);
 const statusText = { queued: 'Queued', running: 'Generating…', failed: 'Failed', interrupted: 'Interrupted' };
 const defaultLengths = [4, 5, 6, 8, 10];
@@ -33,14 +34,25 @@ const guard = (fn) => async (...args) => {
 const call = (path, method = 'POST', body = {}) => api(path, { method, body: method === 'GET' ? undefined : body });
 
 function show(detail) {
+  if (ui.detail?.sequence.id !== detail.sequence.id) {
+    ui.estimate = null;
+    ui.estimateError = '';
+    ui.batchMessage = '';
+  }
   ui.detail = detail;
+  const estimateRequest = ++ui.estimateRequest;
   // What finishing the film would still cost (still shots are free), worked out by the app.
   api(`/api/storyboards/${detail.sequence.id}/estimate`).then((estimate) => {
-    if (ui.detail?.sequence.id !== detail.sequence.id) return;
+    if (ui.estimateRequest !== estimateRequest || ui.detail?.sequence.id !== detail.sequence.id) return;
+    ui.estimateError = '';
     const changed = JSON.stringify(estimate) !== JSON.stringify(ui.estimate);
     ui.estimate = estimate;
     if (changed && !$('#sb-editor').contains(document.activeElement)) render();
-  }).catch(() => {});
+  }).catch((error) => {
+    if (ui.estimateRequest !== estimateRequest || ui.detail?.sequence.id !== detail.sequence.id) return;
+    ui.estimateError = error.message || 'Could not estimate remaining cost.';
+    render();
+  });
   const option = [...$('#sb-select').options].find((o) => o.value === detail.sequence.id);
   if (option) option.textContent = `${detail.sequence.title} (${detail.shots.length} shots)`;
   render();
@@ -168,14 +180,22 @@ function settingsPanel() {
       if (shots.length && !confirm('Replace the current shots with a new plan? Frames and clips stay in the library.')) return;
       await work('plan', async () => show(await call(`/api/storyboards/${sequence.id}/plan`, 'POST', { replace: true })));
     }) }, busy(shots.length ? 'Re-plan shots' : 'Plan shots', 'plan')),
-    h('button.button.secondary.small', { disabled: !withFrames.length, onclick: guard(async () => {
-      for (const shot of withFrames) await call(`/api/shots/${shot.id}/frame`);
-      show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
+    h('button.button.secondary.small', { disabled: !withFrames.length || Boolean(ui.busy), onclick: guard(async () => {
+      await work('frames-batch', async () => {
+        const result = await runBatch(withFrames, (shot) => call(`/api/shots/${shot.id}/frame`));
+        if (ui.detail?.sequence.id !== sequence.id) return;
+        ui.batchMessage = batchFailureSummary('Frame generation', result);
+        show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
+      });
     }) }, 'Make all frames'),
-    h('button.button.secondary.small', { disabled: !withFrames.length, onclick: guard(async () => {
+    h('button.button.secondary.small', { disabled: !withFrames.length || Boolean(ui.busy), onclick: guard(async () => {
       if (!confirm(`Generate ${withFrames.length} video clip(s)? Video takes several minutes each and costs more than images.${clipCost ? `\n\nAt list prices: ${clipCost}.` : ''}`)) return;
-      for (const shot of withFrames) await call(`/api/shots/${shot.id}/animate`);
-      show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
+      await work('clips-batch', async () => {
+        const result = await runBatch(withFrames, (shot) => call(`/api/shots/${shot.id}/animate`));
+        if (ui.detail?.sequence.id !== sequence.id) return;
+        ui.batchMessage = batchFailureSummary('Animation', result);
+        show(await call(`/api/storyboards/${sequence.id}`, 'GET'));
+      });
     }) }, 'Animate all'),
     h('span.toolbar-sep'),
     sequence.production?.state === 'running'
@@ -205,6 +225,8 @@ function settingsPanel() {
       h('label', {}, h('span.field-label', {}, 'SHOTS'), count),
       h('label', {}, h('span.field-label', {}, 'FRAME'), aspect)),
     characters,
+    ui.batchMessage ? h('p.error-text', { role: 'status' }, ui.batchMessage) : null,
+    ui.estimateError ? h('p.error-text', { role: 'status' }, `Cost estimate unavailable: ${ui.estimateError}`) : null,
     h('div.sb-section-head', {}, h('h2', {}, 'Models and look'), h('span.muted', {}, 'Which models make the frames and clips, and how the shots fit together.')),
     h('div.sb-grid', {},
       modelPicker('image', 'generate', 'IMAGE MODEL (FRAMES)'),

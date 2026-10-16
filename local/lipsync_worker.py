@@ -586,6 +586,7 @@ def find_mouth(request):
         face = detect_face(image)
     except Exception:
         traceback.print_exc()
+            traceback.clear_frames(error.__traceback__)
         face = None
     if face:
         width, cx, cy = face
@@ -741,7 +742,16 @@ def main():
             run(request)
         except Exception as error:  # report every failure to the app instead of dying
             traceback.print_exc()
+            traceback.clear_frames(error.__traceback__)
             send({"id": request.get("id"), "error": f"{type(error).__name__}: {error}"})
+            if torch is not None:
+                import gc
+                models.clear()
+                gc.collect()
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

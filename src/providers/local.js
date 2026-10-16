@@ -106,7 +106,8 @@ const kokoroVoices = ['af_heart', 'af_bella', 'af_nicole', 'af_aoede', 'af_kore'
   'am_michael', 'am_fenrir', 'am_puck', 'am_echo', 'am_eric', 'am_liam', 'am_onyx', 'am_santa', 'am_adam',
   'bf_emma', 'bf_isabella', 'bf_alice', 'bf_lily', 'bm_george', 'bm_fable', 'bm_lewis', 'bm_daniel'];
 
-export function createWorker(workerFile, python = findPython) {
+export function createWorker(workerFile, python = findPython, { timeoutMs = 20 * 60_000, inactivityMs = 5 * 60_000 } = {}) {
+  for (const value of [timeoutMs, inactivityMs]) if (!Number.isFinite(value) || value <= 0) throw new Error('Worker timeouts must be positive finite milliseconds.');
   let child = null;
   let buffer = '';
   let idleTimer = null;
@@ -156,7 +157,7 @@ export function createWorker(workerFile, python = findPython) {
         try { message = JSON.parse(line); } catch { continue; }
         const job = waiting.get(message.id);
         if (!job) continue;
-        if (message.progress) job.onProgress?.(message.progress, message.total, message);
+        if (message.progress != null) { job.heartbeat?.(); job.onProgress?.(message.progress, message.total, message); }
         else if (message.notice) console.info(`[local] ${message.notice}`);
         else if (message.done) { waiting.delete(message.id); job.resolve(message); }
         else if (message.error) { waiting.delete(message.id); job.reject(new ProviderError('provider', message.error)); }
@@ -176,13 +177,31 @@ export function createWorker(workerFile, python = findPython) {
     if (stopping) await stopping;
     await start();
     const id = `job-${++counter}`;
-    const result = new Promise((resolve, reject) => waiting.set(id, { resolve, reject, onProgress }));
-    child.stdin.write(`${JSON.stringify({ id, ...payload })}\n`);
+    let deadline, silence;
+    const result = new Promise((resolve, reject) => {
+      const expire = (kind) => {
+        waiting.delete(id);
+        reject(new ProviderError('timeout', `The local ${path.basename(workerFile)} worker timed out (${kind}); it will be stopped before the next GPU job. Original assets are retained.`));
+      };
+      const heartbeat = () => { clearTimeout(silence); silence = setTimeout(() => expire('no progress'), inactivityMs); };
+      waiting.set(id, { resolve, reject, onProgress, heartbeat });
+      deadline = setTimeout(() => expire('maximum runtime'), timeoutMs);
+      heartbeat();
+    });
     try {
+      child.stdin.write(`${JSON.stringify({ ...payload, id })}\n`);
       return await result;
+    } catch (error) {
+      // A rejection does not release the GPU lease until the process really exits. This also drops
+      // tensors held by a Python traceback after a model error. Never overlap a timed-out model.
+      await stop();
+      throw error;
     } finally {
-      idleTimer = setTimeout(() => { stop().catch((error) => console.error('Local model shutdown failed', { detail: error.message })); }, idleMs);
-      idleTimer.unref?.();
+      clearTimeout(deadline); clearTimeout(silence); waiting.delete(id);
+      if (!waiting.size) {
+        idleTimer = setTimeout(() => { stop().catch((error) => console.error('Local model shutdown failed', { detail: error.message })); }, idleMs);
+        idleTimer.unref?.();
+      }
     }
   }
 
@@ -192,7 +211,7 @@ export function createWorker(workerFile, python = findPython) {
 const workers = {
   wan: createWorker(workerPath('wan_worker.py')), anime: createWorker(workerPath('sdxl_worker.py')),
   voice: createWorker(workerPath('voice_worker.py'), voicePython), lipsync: createWorker(workerPath('lipsync_worker.py'), voicePython),
-  train: createWorker(workerPath('train_lora.py')),
+  train: createWorker(workerPath('train_lora.py'), findPython, { timeoutMs: 2 * 60 * 60_000, inactivityMs: 10 * 60_000 }),
 };
 const animeFace = () => process.env.LUMINA_ANIME_FACE || path.join(os.homedir(), '.local', 'share', 'lumina-studio', 'anime-face', 'lbpcascade_animeface.xml');
 // Lip sync: anime mouth flaps need the anime image model (to draw the mouths) and the anime face detector;

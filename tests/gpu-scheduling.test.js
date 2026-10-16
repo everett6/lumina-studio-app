@@ -72,3 +72,52 @@ test('Python discovery keeps timers and HTTP work responsive during dependency i
     assert.equal(await discovery,executable);
   } finally {if(previous===undefined)delete process.env.LUMINA_PYTHON;else process.env.LUMINA_PYTHON=previous;rmSync(root,{recursive:true,force:true});}
 });
+
+test('a hung worker times out, exits before the GPU lease is released, and can restart', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'lumina-worker-watchdog-'));
+  const script = path.join(root, 'worker.cjs');
+  writeFileSync(script, `const readline=require('node:readline');
+    process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),100));
+    readline.createInterface({input:process.stdin}).on('line',line=>{
+      const {id,hang}=JSON.parse(line); if(!hang)console.log(JSON.stringify({id,done:true,pid:process.pid}));
+    });`);
+  const worker = createWorker(script, () => process.execPath, { timeoutMs: 400, inactivityMs: 1500 });
+  const queue = createGpuQueue();
+  let guard;
+  try {
+    const original = await worker.request({});
+    const started = Date.now();
+    const first = queue.run(() => worker.request({hang:true}));
+    const second = queue.run(() => worker.request({}));
+    await assert.rejects(Promise.race([first, new Promise((_, reject) => { guard = setTimeout(() => reject(Error('watchdog missing')), 1800); })]), /timed out/i);
+    clearTimeout(guard);
+    const restarted = await second;
+    assert.notEqual(restarted.pid, original.pid);
+    assert.ok(Date.now() - started >= 480, 'queue must await timed-out process exit');
+  } finally { clearTimeout(guard); await worker.stop(); await queue.idle(); rmSync(root, {recursive:true,force:true}); }
+});
+
+test('worker progress cannot extend the absolute deadline indefinitely', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'lumina-worker-progress-'));
+  const script = path.join(root, 'worker.cjs');
+  writeFileSync(script, `require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+    const {id}=JSON.parse(line);setInterval(()=>console.log(JSON.stringify({id,progress:1,total:2})),30);
+  });`);
+  const worker = createWorker(script, () => process.execPath, {timeoutMs:650,inactivityMs:300});
+  try { await assert.rejects(worker.request({}), /maximum runtime/); }
+  finally { await worker.stop(); rmSync(root,{recursive:true,force:true}); }
+});
+
+test('worker-reported errors unload the process before another request starts', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'lumina-worker-error-'));
+  const script = path.join(root, 'worker.cjs');
+  writeFileSync(script, `require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+    const {id,fail}=JSON.parse(line);console.log(JSON.stringify(fail?{id,error:'injected OOM'}:{id,done:true,pid:process.pid}));
+  });`);
+  const worker = createWorker(script, () => process.execPath);
+  try {
+    const first = await worker.request({});
+    await assert.rejects(worker.request({fail:true}), /injected OOM/);
+    assert.notEqual((await worker.request({})).pid, first.pid);
+  } finally { await worker.stop(); rmSync(root,{recursive:true,force:true}); }
+});

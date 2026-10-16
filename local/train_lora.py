@@ -59,6 +59,9 @@ VARIETY = [
 
 out = sys.stdout
 sys.stdout = sys.stderr  # library chatter goes to stderr; stdout carries only our JSON lines
+draw_pipe = None
+draw_pipe_has_adapter = False
+last_temperature_check = 0.0
 
 
 def send(message):
@@ -67,21 +70,30 @@ def send(message):
 
 
 def drawing(request, rid, only=None, seeds=None):
-    # The training pictures, steered by the sheet; the pipeline is freed afterwards.
+    # Keep the large base pipeline across review redraws; the IP-Adapter is installed only when needed.
+    global draw_pipe, draw_pipe_has_adapter
     # `only` redraws just those picture numbers (with `seeds`, same order); the rest of the folder stays as it is.
     count = max(8, min(len(VARIETY), int(request.get("images") or 16)))
     folder = os.path.join(request["out"], "pictures")
     os.makedirs(folder, exist_ok=True)
-    pipe = StableDiffusionXLPipeline.from_pretrained(MODEL, torch_dtype=torch.float16, local_files_only=True)
-    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
     refs = [Image.open(path).convert("RGB") for path in request.get("refs", [])[:2] if os.path.exists(path)]
-    extra = {}
-    if refs:
+    if draw_pipe is None:
+        draw_pipe = StableDiffusionXLPipeline.from_pretrained(MODEL, torch_dtype=torch.float16, local_files_only=True)
+        draw_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(draw_pipe.scheduler.config)
+        draw_pipe.to("cuda")
+    pipe = draw_pipe
+    if refs and not draw_pipe_has_adapter:
         pipe.load_ip_adapter("h94/IP-Adapter", subfolder="sdxl_models", weight_name="ip-adapter-plus_sdxl_vit-h.safetensors",
                              image_encoder_folder="models/image_encoder", local_files_only=True)
+        draw_pipe_has_adapter = True
+    if draw_pipe_has_adapter and not refs:
+        # A loaded adapter still requires image embeddings even at scale zero. Remove it for
+        # unconditioned draws instead of retaining an adapter with missing image inputs.
+        pipe.unload_ip_adapter()
+        draw_pipe_has_adapter = False
+    if draw_pipe_has_adapter:
         pipe.set_ip_adapter_scale(0.5)
-        extra["ip_adapter_image"] = [refs]
-    pipe.to("cuda")
+    extra = {"ip_adapter_image": [refs]} if refs else {}
     pipe.vae.enable_tiling()
     seed = int(request.get("seed") or 0)
     pictures = []
@@ -97,10 +109,19 @@ def drawing(request, rid, only=None, seeds=None):
         pictures.append((path, framing))
         send({"id": rid, "progress": done + 1, "total": len(wanted), "stage": "drawing"})
         ease_off()
-    del pipe
-    gc.collect()
-    torch.cuda.empty_cache()
+    for ref in refs:
+        ref.close()
     return pictures
+
+
+def clear_drawing_pipeline():
+    global draw_pipe, draw_pipe_has_adapter
+    pipe, draw_pipe = draw_pipe, None
+    draw_pipe_has_adapter = False
+    if pipe is not None:
+        del pipe
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def write_pictures(request, drawn):
@@ -172,6 +193,11 @@ def ease_off():
     # its spikes, and a hot card cools down before it continues (some systems drop a GPU that is pushed too hard).
     time.sleep(float(os.environ.get("LUMINA_TRAIN_REST", "0.12")))
     hot = float(os.environ.get("LUMINA_TRAIN_MAX_TEMP", "75"))
+    global last_temperature_check
+    now = time.monotonic()
+    if now - last_temperature_check < float(os.environ.get("LUMINA_TRAIN_TEMP_INTERVAL", "5")):
+        return
+    last_temperature_check = now
     temperature = gpu_temperature()
     while temperature is not None and temperature >= hot:
         time.sleep(2)
@@ -235,26 +261,34 @@ def run(request):
     else:
         pictures = drawing(request, rid)
         mirrors = [request.get("mirror", True) is not False] * len(pictures)  # one-shot bake: whole-character switch
+    clear_drawing_pipeline()
     unet, scheduler, samples = prepare(request, pictures, rid, mirrors)
-    lora = train(request, unet, scheduler, samples, rid)
-    del unet
-    gc.collect()
-    torch.cuda.empty_cache()
+    try:
+        lora = train(request, unet, scheduler, samples, rid)
+    finally:
+        del unet, scheduler, samples
+        gc.collect()
+        torch.cuda.empty_cache()
     send({"id": rid, "done": True, "out": request["out"], "lora": lora, "samples": [path for path, _ in pictures],
           "seconds": round(time.time() - started, 1)})
 
 
 send({"ready": True, "model": MODEL, "cuda": torch.cuda.is_available()})
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    request = json.loads(line)
-    try:
-        run(request)
-    except Exception as error:  # report every failure to the app instead of dying
-        traceback.print_exc()
-        message = "The GPU ran out of memory while baking. Close other programs using the GPU and try again." if "out of memory" in str(error).lower() else f"{type(error).__name__}: {error}"
-        send({"id": request.get("id"), "error": message})
-        gc.collect()
-        torch.cuda.empty_cache()
+try:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        request = json.loads(line)
+        try:
+            run(request)
+        except Exception as error:  # report every failure to the app instead of dying
+            clear_drawing_pipeline()
+            traceback.print_exc()
+            traceback.clear_frames(error.__traceback__)
+            message = "The GPU ran out of memory while baking. Close other programs using the GPU and try again." if "out of memory" in str(error).lower() else f"{type(error).__name__}: {error}"
+            send({"id": request.get("id"), "error": message})
+            gc.collect()
+            torch.cuda.empty_cache()
+finally:
+    clear_drawing_pipeline()

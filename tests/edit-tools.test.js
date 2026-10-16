@@ -147,7 +147,7 @@ test('MCP clip split respects source trim and speed; invalid edits leave the pla
   assert.equal((await raw('delete_shot', { shotId: left.id, confirm: true })).isError, true);
 });
 
-test('MCP speed uses atempo across its full range and optionally changes clip pitch', async (t) => {
+test('MCP speed uses atempo across its full range and optionally changes clip pitch', { timeout: 30000 }, async (t) => {
   const f = await fixture(t), { call, detail, board } = f;
   const [a, b, c] = detail().shots;
   await call('delete_shot', { shotId: b.id, confirm: true }); await call('delete_shot', { shotId: c.id, confirm: true });

@@ -573,3 +573,7 @@ Five more groups of tools (52 in all); each has its own page with every tool, it
 - [Audio and delivery](tools/audio.md): delivery validation (-16 LUFS ±1, ≤ -1 dBTP, stereo, picture/sound length, missing or clipped dialogue), loudness, waveform, silence, mix preview, stems and trims.
 - [Editing and animatic](tools/edit.md): insert, duplicate, split and delete shots, a transition per cut, speed, text overlays, scene reorder, the shot timeline, and a cheap low-resolution animatic.
 - [Library](tools/library.md): tags, search, lineage, storage use, unused assets (deleting needs confirm: true and refuses anything in use), duplicating a storyboard, JSON export/import and generation history.
+
+### Compact tool discovery (0.9.14)
+
+`tools/list` keeps the full set of tools, parameter schemas and safety annotations. Long descriptions use a short summary and cost hint. Before first invoking a tool marked `Full help`, call `get_tool_help` with its exact `name` to retrieve the original complete description, constraints, examples and next steps. This applies equally to local stdio and remote HTTPS; it does not change permissions, spending approvals or backend validation.
