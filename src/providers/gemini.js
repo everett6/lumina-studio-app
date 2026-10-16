@@ -1,5 +1,5 @@
 import { joinAudio, splitForSpeech } from '../audio.js';
-import { ProviderError, downloadBytes, request, requestJson, requireKey, sleep, aspectFor } from './http.js';
+import { ProviderError, assertResumable, downloadBytes, request, requestJson, requireKey, sleep, aspectFor } from './http.js';
 
 const base = 'https://generativelanguage.googleapis.com/v1beta';
 const sizes = ['1024x1024', '1536x1024', '1024x1536'];
@@ -35,38 +35,44 @@ export default {
       note: 'Video with native audio; optional start image',
     })),
   ],
-  async speak({ key, model, text, voice, style }) {
+  async speak({ key, model, text, voice, style, resumeJob, onSubmitting, onSubmitted, onRequestId, onCompleted }) {
     const headers = { 'x-goog-api-key': requireKey(key), 'content-type': 'application/json' };
+    assertResumable(resumeJob, false);
     const clips = [];
     for (const chunk of splitForSpeech(text, 3800)) {
       const content = { type: 'text', text: chunk, ...(style ? { annotations: [{ type: 'speech_metadata', style }] } : {}) };
       const interaction = await requestJson(`${base}/interactions`, {
-        method: 'POST', headers, timeoutMs: 300_000,
+        method: 'POST', onSubmitting, onSubmitted, onRequestId, headers, timeoutMs: 300_000,
         body: JSON.stringify({
           model, input: [{ type: 'user_input', content: [content] }], response_format: { type: 'audio' },
           generation_config: { speech_config: [{ voice: voices.includes(voice) ? voice : 'Kore' }] },
         }),
       });
+      if (interaction.id) onSubmitted?.({ id: interaction.id, resumable: false });
+      onCompleted?.({ resumable: false });
       const audio = findPart(interaction, (node) => node.type === 'audio' || /^audio\//.test(node.mime_type ?? ''));
       if (!audio) throw new ProviderError('provider', 'Gemini returned no audio');
       clips.push(Buffer.from(audio.data, 'base64'));
     }
+    onCompleted?.({ resumable: false });
     return { bytes: joinAudio(clips, 'audio/wav'), usage: { characters: text.length } };
   },
   // Veo runs as a long-running operation; its name is saved so a restart polls it instead of starting again.
   resumable: true,
-  async video({ key, model, prompt, image, duration, aspect, resumeJob, onSubmitted }) {
+  async video({ key, model, prompt, image, duration, aspect, resumeJob, onSubmitting, onSubmitted, onRequestId, onCompleted, onDownloadFailed }) {
     const headers = { 'x-goog-api-key': requireKey(key), 'content-type': 'application/json' };
+    if (resumeJob?.downloadUrl) return { bytes: await downloadBytes(resumeJob.downloadUrl, { headers: { 'x-goog-api-key': key }, onCompleted, onDownloadFailed }), usage: null };
+    assertResumable(resumeJob, Boolean(resumeJob?.name && /^[A-Za-z0-9/_.-]+$/.test(resumeJob.name)));
     let operation;
     if (resumeJob?.name && /^[A-Za-z0-9/_.-]+$/.test(resumeJob.name)) {
       operation = { name: resumeJob.name, done: false };
     } else {
       const instance = { prompt, ...(image ? { image: { inlineData: { mimeType: image.mime, data: image.bytes.toString('base64') } } } : {}) };
       operation = await requestJson(`${base}/models/${model}:predictLongRunning`, {
-        method: 'POST', headers, timeoutMs: 120_000,
+        method: 'POST', onSubmitting, onSubmitted, onRequestId, headers, timeoutMs: 120_000,
         body: JSON.stringify({ instances: [instance], parameters: { aspectRatio: aspect, durationSeconds: duration, numberOfVideos: 1 } }),
       });
-      if (operation?.name) onSubmitted?.({ id: operation.name, name: operation.name });
+      if (operation?.name) onSubmitted?.({ id: operation.name, name: operation.name, resumable: true });
     }
     const deadline = Date.now() + 900_000;
     while (!operation.done) {
@@ -77,19 +83,21 @@ export default {
     if (operation.error) throw new ProviderError(/safety|policy|block/i.test(operation.error.message) ? 'policy' : 'provider', 'Veo failed', { detail: operation.error.message });
     const uri = operation.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri;
     if (!uri) throw new ProviderError('policy', 'Veo returned no video (often a safety filter)');
-    return { bytes: await downloadBytes(uri, { headers: { 'x-goog-api-key': key }, timeoutMs: 300_000 }), usage: null };
+    return { bytes: await downloadBytes(uri, { headers: { 'x-goog-api-key': key }, timeoutMs: 300_000, onCompleted, onDownloadFailed }), usage: null };
   },
   async validateKey(key) {
     await request(`${base}/models?pageSize=1`, { headers: { 'x-goog-api-key': key }, timeoutMs: 20_000 });
     return { ok: true, verified: true };
   },
-  async run({ key, model, prompt, size, images }) {
+  async run({ key, model, prompt, size, images, resumeJob, onSubmitting, onSubmitted, onRequestId, onCompleted }) {
     const headers = { 'x-goog-api-key': requireKey(key), 'content-type': 'application/json' };
     const input = [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image', mime_type: image.mime, data: image.bytes.toString('base64') }))];
-    let interaction = await requestJson(`${base}/interactions`, {
-      method: 'POST', headers, timeoutMs: 300_000,
+    assertResumable(resumeJob, Boolean(resumeJob?.id && resumeJob.kind === 'interaction'));
+    let interaction = resumeJob ? await requestJson(`${base}/interactions/${encodeURIComponent(resumeJob.id)}`, { headers }) : await requestJson(`${base}/interactions`, {
+      method: 'POST', onSubmitting, onSubmitted, onRequestId, headers, timeoutMs: 300_000,
       body: JSON.stringify({ model, input, response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: aspectFor(size) } }),
     });
+    if (interaction.id) onSubmitted?.({ id: interaction.id, kind: 'interaction', resumable: true });
     const deadline = Date.now() + 300_000;
     while (['queued', 'in_progress'].includes(interaction?.status) && interaction.id) {
       if (Date.now() > deadline) throw new ProviderError('timeout', 'Gemini interaction timed out');
@@ -100,6 +108,7 @@ export default {
       const detail = JSON.stringify(interaction.errors ?? interaction.error ?? '').slice(0, 300);
       throw new ProviderError(/safety|block|policy/i.test(detail) ? 'policy' : 'provider', 'Gemini interaction failed', { detail });
     }
+    onCompleted?.({ usage: interaction.usage ?? null, resumable: Boolean(interaction.id) });
     const image = findImage(interaction);
     if (!image) throw new ProviderError('policy', 'Gemini returned no image (often a safety refusal)');
     return { bytes: Buffer.from(image.data, 'base64'), usage: interaction.usage ?? null };

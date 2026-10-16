@@ -1,4 +1,4 @@
-import { ProviderError, downloadBytes, request, requestJson, requireKey, sleep, toDataUrl, aspectFor } from './http.js';
+import { ProviderError, assertResumable, downloadBytes, request, requestJson, requireKey, sleep, toDataUrl, aspectFor } from './http.js';
 
 const base = 'https://api.replicate.com/v1';
 const sizes = ['1024x1024', '1536x1024', '1024x1536'];
@@ -22,18 +22,25 @@ export default {
     await request(`${base}/account`, { headers: { authorization: `Bearer ${key}` }, timeoutMs: 20_000 });
     return { ok: true, verified: true };
   },
-  async run({ key, model, prompt, size, images }) {
+  resumable: true,
+  async run({ key, model, prompt, size, images, resumeJob, onSubmitting, onSubmitted, onRequestId, onCompleted, onDownloadFailed }) {
+    if (resumeJob?.downloadUrl) return { bytes: await downloadBytes(resumeJob.downloadUrl, { onCompleted, onDownloadFailed, usage: resumeJob.usage }), usage: resumeJob.usage ?? null };
     const headers = { authorization: `Bearer ${requireKey(key)}`, 'content-type': 'application/json' };
     const build = inputs[model];
     if (!build) throw new ProviderError('invalid_request', 'Unknown Replicate model', { detail: model });
-    let prediction = await requestJson(`${base}/models/${model}/predictions`, {
-      method: 'POST', headers: { ...headers, prefer: 'wait=60' }, body: JSON.stringify({ input: build({ prompt, size, images }) }), timeoutMs: 90_000,
+    const onReplicate = (url) => /^https:\/\/api\.replicate\.com\/v1\/predictions\//.test(String(url ?? ''));
+    assertResumable(resumeJob, onReplicate(resumeJob?.pollUrl));
+    let prediction = resumeJob ? await requestJson(resumeJob.pollUrl, { headers }) : await requestJson(`${base}/models/${model}/predictions`, {
+      method: 'POST', onSubmitting, onSubmitted, onRequestId, headers: { ...headers, prefer: 'wait=60' }, body: JSON.stringify({ input: build({ prompt, size, images }) }), timeoutMs: 90_000,
     });
+    if (prediction.id || prediction.urls?.get) onSubmitted?.({ id: prediction.id ?? resumeJob?.id ?? null, pollUrl: prediction.urls?.get ?? resumeJob?.pollUrl, resumable: onReplicate(prediction.urls?.get ?? resumeJob?.pollUrl) });
     const deadline = Date.now() + 300_000;
     while (['starting', 'processing'].includes(prediction.status)) {
       if (Date.now() > deadline) throw new ProviderError('timeout', 'Replicate prediction timed out');
       await sleep(1500);
-      prediction = await requestJson(prediction.urls.get, { headers });
+      const pollUrl = prediction.urls?.get ?? resumeJob?.pollUrl;
+      if (!onReplicate(pollUrl)) throw new ProviderError('provider', 'Replicate returned an unexpected polling address');
+      prediction = await requestJson(pollUrl, { headers });
     }
     if (prediction.status !== 'succeeded' && prediction.status !== 'successful') {
       const detail = String(prediction.error ?? prediction.status);
@@ -41,6 +48,6 @@ export default {
     }
     const url = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output;
     if (typeof url !== 'string') throw new ProviderError('provider', 'Replicate returned no image');
-    return { bytes: await downloadBytes(url), usage: prediction.metrics ?? null };
+    return { bytes: await downloadBytes(url, { onCompleted, onDownloadFailed, usage: prediction.metrics }), usage: prediction.metrics ?? null };
   },
 };

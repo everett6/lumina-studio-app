@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 //
 // The check and the reservation happen synchronously in one database transaction, so requests arriving together
 // (several MCP calls at once) cannot jointly overspend: Node runs them one after another.
-// A missing price is never treated as zero: it needs an approval and is reserved at the per-request limit.
+// Paid execution without a bounded estimate is refused by the generation service.
 
 export const defaultBudget = {
   enabled: true, // new installs start with the requested $12 protections
@@ -45,6 +45,31 @@ export function requestSignature(parts) {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
 }
 
+// Accounting metadata uses the existing JSON columns. Legacy scalar fields remain readable.
+export function billingState(generation) {
+  if (generation?.providerJob?.billingState) return generation.providerJob.billingState;
+  if (generation?.providerJob?.phase === 'submitting') return 'billing_unknown';
+  if (generation?.providerJob && ['id', 'name', 'statusUrl', 'pollUrl', 'downloadUrl'].some((k) => generation.providerJob[k])) return 'submitted';
+  if (generation?.billing === 'none') return 'confirmed_unbilled';
+  if (generation?.billing === 'charged') return 'charged';
+  if (generation?.billing === 'unknown') return 'billing_unknown';
+  return generation?.params?.accounting?.billingState ?? generation?.billingState ?? 'not_submitted';
+}
+
+export function submissionStarted(generation) {
+  const marker = generation?.providerJob;
+  return Boolean(marker && (marker.phase || marker.submittedAt || marker.requestIds?.length
+    || ['id', 'name', 'statusUrl', 'pollUrl', 'downloadUrl'].some((key) => marker[key])))
+    || ['submitted', 'completed_remote', 'download_failed', 'billing_unknown', 'charged'].includes(billingState(generation));
+}
+
+export function updateBilling(repo, id, state, fields = {}) {
+  const current = repo.generations.get(id);
+  if (!current) return null;
+  return repo.generations.update(id, { ...fields,
+    providerJob: { ...current.providerJob, ...fields.providerJob, billingState: state } });
+}
+
 export function createBudget({ repo }) {
   const settings = () => ({ ...defaultBudget, ...repo.settings.get('budget', {}) });
 
@@ -74,10 +99,22 @@ export function createBudget({ repo }) {
     const s = settings();
     const spent = repo.spend.total({ since: s.since });
     return {
+      ...repo.spend.breakdown?.({ since: s.since }),
       settings: s, spentUsd: spent.usd, requests: spent.count, todayUsd: repo.spend.total({ since: s.since && s.since > startOfToday() ? s.since : startOfToday() }).usd,
       remainingUsd: Math.max(0, Math.round((s.totalUsd - spent.usd) * 100) / 100),
       byModel: repo.spend.byModel(), recent: repo.spend.list(30), approvals: repo.approvals.list('pending'),
     };
+  }
+
+  // Repository totals are rounded for display. Authorization must retain sub-cent precision.
+  function countedUsd(options = {}) {
+    const displayed = repo.spend.total(options).usd;
+    const exact = repo.spend.list?.(Number.MAX_SAFE_INTEGER).filter((row) =>
+      ['reserved', 'charged', 'unknown'].includes(row.status)
+      && (!options.since || row.createdAt >= options.since)
+      && (!options.projectId || row.projectId === options.projectId))
+      .reduce((sum, row) => sum + (row.actualUsd ?? row.estimatedUsd ?? 0), 0) ?? displayed;
+    return Math.max(displayed, exact);
   }
 
   // Throws BudgetError when the request may not start; otherwise returns the amount to reserve.
@@ -95,17 +132,17 @@ export function createBudget({ repo }) {
     if (s.perRequestUsd != null && estimateUsd != null && estimateUsd > s.perRequestUsd) {
       throw new BudgetError(`This request is estimated at ${money(estimateUsd)}, over the ${money(s.perRequestUsd)} per-request limit.`, { estimateUsd });
     }
-    const spent = repo.spend.total({ since: s.since }).usd;
+    const spent = countedUsd({ since: s.since });
     const ceiling = s.totalUsd - (isRetry ? 0 : s.retryReserveUsd ?? 0);
     if (spent + reserveUsd > ceiling + 1e-9) {
       throw new BudgetError(`Budget: ${money(spent)} of ${money(s.totalUsd)} is spent or reserved; this request needs ${money(reserveUsd)}${!isRetry && s.retryReserveUsd ? ` and ${money(s.retryReserveUsd)} is kept back for retries` : ''}.`, { spentUsd: spent, estimateUsd: reserveUsd });
     }
     if (s.dailyUsd != null) {
-      const today = repo.spend.total({ since: startOfToday() }).usd;
+      const today = countedUsd({ since: startOfToday() });
       if (today + reserveUsd > s.dailyUsd + 1e-9) throw new BudgetError(`Daily limit: ${money(today)} of ${money(s.dailyUsd)} used today.`, { todayUsd: today });
     }
     if (s.projectUsd != null) {
-      const project = repo.spend.total({ since: s.since, projectId }).usd;
+      const project = countedUsd({ since: s.since, projectId });
       if (project + reserveUsd > s.projectUsd + 1e-9) throw new BudgetError(`Project limit: ${money(project)} of ${money(s.projectUsd)} used in this project.`, { projectUsd: project });
     }
     const needsApproval = unpriced || (s.approvalAboveUsd != null && reserveUsd > s.approvalAboveUsd);
@@ -131,22 +168,31 @@ export function createBudget({ repo }) {
 
   // After a job ends: settle its reservation. `usage.cost` is the provider's own figure when it gives one.
   function settle(generation, { outcome, usage }) {
-    if (!repo.spend.get(generation.id)) return null;
+    const row = repo.spend.get(generation.id);
+    if (!row) return null;
+    // Explicit reconciliation is authoritative, including across late poll/download callbacks.
+    if (row.status === 'released') return row;
+    if (row.status === 'charged') return row;
+    if (outcome === 'refused' && billingState(repo.generations.get(generation.id)) !== 'confirmed_unbilled'
+      && submissionStarted(repo.generations.get(generation.id))) outcome = 'unknown';
     const rawCost = usage?.cost;
     const cost = rawCost == null || rawCost === '' ? NaN : Number(rawCost);
-    if (Number.isFinite(cost) && cost >= 0) return repo.spend.settle(generation.id, { status: 'charged', actualUsd: cost, note: 'Provider-reported charge' });
+    if (outcome === 'completed' && Number.isFinite(cost) && cost >= 0) return repo.spend.settle(generation.id, { status: 'charged', actualUsd: cost, note: 'Provider-reported charge' });
     if (outcome === 'completed') return repo.spend.settle(generation.id, { status: 'charged', note: 'Provider gave no charge; counted at the estimate' });
     if (outcome === 'refused') return repo.spend.settle(generation.id, { status: 'released', actualUsd: 0, note: 'The provider refused the request before running it' });
-    return repo.spend.settle(generation.id, { status: 'unknown', note: 'Lumina cannot tell whether this was billed; still counted. Check the provider\'s activity page, then mark it.' });
+    return repo.spend.settle(generation.id, { status: 'unknown', actualUsd: Math.max(row.estimatedUsd ?? 0, row.actualUsd ?? 0, Number.isFinite(cost) && cost >= 0 ? cost : 0), note: 'Lumina cannot tell whether this was billed; still counted. Check the provider\'s activity page, then mark it.' });
   }
 
   // The user checked the provider's records and says what the job really cost (0 = not billed).
   function resolve(generationId, actualUsd) {
     const row = repo.spend.get(generationId);
     if (!row) throw Object.assign(new Error('No spending record for that generation.'), { status: 404 });
-    const usd = Number(actualUsd);
+    const usd = actualUsd == null || String(actualUsd).trim() === '' ? NaN : Number(actualUsd);
     if (!Number.isFinite(usd) || usd < 0) throw Object.assign(new Error('Enter what the provider charged (0 if nothing).'), { status: 400 });
-    return repo.spend.settle(generationId, usd === 0 ? { status: 'released', actualUsd: 0, note: 'Marked not billed' } : { status: 'charged', actualUsd: usd, note: 'Charge entered by you' });
+    return repo.transaction(() => {
+      updateBilling(repo, generationId, usd === 0 ? 'confirmed_unbilled' : 'charged', { billing: usd === 0 ? 'none' : 'charged' });
+      return repo.spend.settle(generationId, usd === 0 ? { status: 'released', actualUsd: 0, note: 'Marked not billed' } : { status: 'charged', actualUsd: usd, note: 'Charge entered by you' });
+    });
   }
 
   return { settings, update, status, authorize, decide, settle, resolve };

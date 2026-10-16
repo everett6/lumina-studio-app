@@ -1,10 +1,8 @@
 import { EventEmitter } from 'node:events';
+import { billingState, submissionStarted, updateBilling } from './budget.js';
 import { providerPrompt, toolOperations } from './generation.js';
-import { userMessage } from './providers/http.js';
+import { retryRead, userMessage } from './providers/http.js';
 import { requestContext } from './context.js';
-
-// Errors that mean the provider turned the request away before doing any paid work.
-const refusedCategories = new Set(['missing_key', 'auth', 'invalid_request', 'rate_limit', 'policy', 'credit_limit', 'budget_limit']);
 
 // Durable job runner. Generation rows are the queue: 'queued' rows survive restarts and resume. Long provider
 // jobs (video) save the provider's job id as soon as it is accepted, so after a restart Lumina keeps polling the
@@ -35,8 +33,10 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
 
   async function execute(id) {
     const job = repo.generations.get(id);
-    if (!job || job.status !== 'queued') return;
+    if (!job || job.status !== 'queued' || !repo.generations.claim(id)) return;
     const started = Date.now();
+    let dispatched = submissionStarted(job);
+    let accepted = dispatched && job.providerJob?.phase !== 'submitting';
     const abort = new AbortController();
     // Jobs on this computer can be stopped from the start (also during preflight); paid jobs keep running once sent.
     const stoppable = Boolean(providers.get(job.provider)?.cancellable);
@@ -46,18 +46,26 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     events.emit('update', repo.generations.get(id));
     try {
       const provider = providers.get(job.provider);
+      if (submissionStarted(job) && (!job.providerJob || !provider?.resumable || job.providerJob?.resumable === false || job.providerJob?.phase === 'submitting')) {
+        throw new Error('Saved paid submission cannot be resumed safely. Check provider billing before explicitly confirming another request.');
+      }
       if (!provider) throw Object.assign(new Error('Provider unavailable'), { category: 'invalid_request' });
-      const allowanceKey = job.provider === 'openrouter' && !job.providerJob ? keys.get('openrouter') : null;
-      if (job.provider === 'openrouter' && !job.providerJob) {
+      if (!provider.keyless && !submissionStarted(job)) {
+        const held = repo.spend.get(id)?.estimatedUsd;
+        if (!Number.isFinite(held) || held < 0) throw Object.assign(new Error('This queued paid request has no bounded estimate. Choose a local model.'), { category: 'budget_limit' });
+      }
+      const allowanceKey = job.provider === 'openrouter' && !submissionStarted(job) ? keys.get('openrouter') : null;
+      if (job.provider === 'openrouter' && !submissionStarted(job)) {
         if (!credits) throw Object.assign(new Error('OpenRouter credit monitor is unavailable.'), { category: 'credit_limit' });
         await credits.preflight({ repo, generationId: id,
           reserveUsd: budget?.settings().enabled ? budget.settings().retryReserveUsd ?? 0 : 0 });
       }
       let prompt = job.finalPrompt || providerPrompt(job);
-      if (job.director && job.operation !== 'speech' && !job.providerJob && !job.finalPrompt) {
+      if (job.director && job.operation !== 'speech' && !submissionStarted(job) && !job.finalPrompt) {
         const [directorId, model] = job.director.split(':');
         const director = directors.get(directorId);
         if (!director) throw Object.assign(new Error('Director unavailable'), { category: 'invalid_request' });
+        if (!director.keyless) throw Object.assign(new Error('Paid prompt refinement has no bounded estimate. Choose a local model.'), { category: 'budget_limit' });
         prompt = await director.refine({ key: director.keyless ? null : keys.get(director.keyProvider), model, idea: prompt });
         repo.generations.update(id, { finalPrompt: prompt });
       }
@@ -79,9 +87,36 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       if (allowanceKey !== null && key !== allowanceKey) throw Object.assign(new Error('The OpenRouter key changed during preflight. No paid request was submitted; check the new key allowance before retrying.'), { category: 'credit_limit' });
       const { params } = job;
       const submission = {
-        resumeJob: job.providerJob ?? null,
-        onSubmitted: (info) => repo.generations.update(id, { providerJob: { ...info, submittedAt: new Date().toISOString() } }),
+        resumeJob: submissionStarted(job) ? job.providerJob : null,
+        onSubmitting: () => {
+          dispatched = true;
+          const current = repo.generations.get(id);
+          updateBilling(repo, id, 'billing_unknown', { providerJob: {
+            ...current.providerJob, phase: 'submitting', resumable: false,
+          } });
+        },
+        onRequestId: ({ id: requestId }) => {
+          const current = repo.generations.get(id);
+          const requestIds = [...new Set([...(current.providerJob?.requestIds ?? []), requestId])];
+          updateBilling(repo, id, billingState(current), { providerJob: { id: requestId, requestIds } });
+        },
+        onSubmitted: (info = {}) => {
+          dispatched = true; accepted = true;
+          const current = repo.generations.get(id);
+          const requestIds = [...new Set([...(current.providerJob?.requestIds ?? []), info.id].filter(Boolean))];
+          updateBilling(repo, id, 'submitted', { providerJob: {
+            ...current.providerJob, ...info, requestIds, phase: 'submitted', resumable: info.resumable ?? false,
+            submittedAt: current.providerJob?.submittedAt ?? new Date().toISOString(),
+          } });
+        },
+        onCompleted: (info = {}) => {
+          accepted = true;
+          updateBilling(repo, id, 'completed_remote', { providerJob: info });
+        },
+        onDownloadFailed: () => updateBilling(repo, id, 'download_failed'),
       };
+      // Persist intent before entering an adapter: a crash or a timeout without a response id is ambiguous.
+      if (!provider.keyless && !submissionStarted(job)) submission.onSubmitting();
       let output;
       if (toolOperations.includes(job.operation)) {
         if (typeof provider.tool !== 'function') throw Object.assign(new Error('This provider has no image tools'), { category: 'invalid_request' });
@@ -92,7 +127,7 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
           mask: maskAsset ? await assetStore.read(maskAsset) : null, onProgress, signal, ...submission,
         });
       } else if (job.operation === 'speech') {
-        output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style, onProgress, signal });
+        output = await provider.speak({ key, model: job.model, text: prompt, voice: params.voice, style: params.style, onProgress, signal, ...submission });
       } else if (job.operation === 'video') {
         const endAsset = params.endFrameAssetId ? repo.assets.get(params.endFrameAssetId) : null;
         if (params.endFrameAssetId && !endAsset) throw Object.assign(new Error('The end frame was deleted.'), { category: 'invalid_request' });
@@ -108,17 +143,18 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
           .map((lora) => (lora.scale === 0.8 ? { ...lora, scale: 0.6 } : lora));
         output = await provider.run({ key, model: job.model, prompt, size: params.size, quality: params.quality, images, seed: params.seed, loras, onProgress, signal, ...submission });
       }
+      submission.onCompleted({ usage: output.usage ?? null });
       cancelled();
       cancellers.delete(id); // saving the result: too late to cancel
-      const asset = await assetStore.save({
+      const asset = await retryRead(() => assetStore.save({
         bytes: output.bytes, projectId: job.projectId, kind: 'generation', generationId: id, parentAssetId: job.inputAssetIds[0] ?? null,
-      });
+      }), { onFailure: submission.onDownloadFailed });
       repo.generations.update(id, {
         status: 'completed', finalPrompt: prompt, outputAssetId: asset.id, usage: output.usage,
         completedAt: new Date().toISOString(), durationMs: Date.now() - started,
       });
       const ledger = budget?.settle(job, { outcome: 'completed', usage: output.usage });
-      if (ledger) repo.generations.update(id, { billing: 'charged' });
+      updateBilling(repo, id, ledger?.status === 'released' ? 'confirmed_unbilled' : ledger ? 'charged' : 'completed', { billing: ledger?.status === 'released' ? 'none' : ledger ? 'charged' : null });
     } catch (caught) {
       const error = abort.signal.aborted ? Object.assign(new Error('Cancelled.'), { category: 'cancelled' }) : caught;
       const category = error.category || 'provider';
@@ -127,10 +163,15 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       if (repo.generations.get(id)) {
         // Was this billed? A refusal before any provider job existed was not; anything after the provider
         // accepted the job, or a lost connection, may have been.
-        const submitted = Boolean(repo.generations.get(id).providerJob);
-        const outcome = category === 'cancelled' && (!submitted || stoppable) ? 'refused' : !submitted && refusedCategories.has(category) && (error.status == null || error.status < 500) ? 'refused' : 'unknown';
-        const ledger = budget?.settle(job, { outcome, usage: error.usage });
-        repo.generations.update(id, {
+        const current = repo.generations.get(id);
+        const submitted = accepted;
+        const refused = !submitted && (!dispatched || error.confirmedUnbilled === true);
+        const outcome = refused ? 'refused' : 'unknown';
+        if (refused) updateBilling(repo, id, 'confirmed_unbilled');
+        const ledger = budget?.settle(job, { outcome, usage: error.usage ?? current.providerJob?.usage });
+        const state = ledger?.status === 'charged' ? 'charged' : ledger?.status === 'released' || refused ? 'confirmed_unbilled'
+          : ['completed_remote', 'download_failed'].includes(billingState(current)) ? billingState(current) : 'billing_unknown';
+        updateBilling(repo, id, state, {
           status: 'failed', errorCategory: category, userError: ['credit_limit', 'budget_limit', 'cancelled'].includes(category) ? error.message : error.category ? userMessage(error) : error.message,
           completedAt: new Date().toISOString(), durationMs: Date.now() - started,
           billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : null,
@@ -163,8 +204,11 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
       if (job.status === 'queued') {
         const at = queue.indexOf(id);
         if (at >= 0) queue.splice(at, 1);
-        const ledger = budget?.settle(job, { outcome: job.providerJob ? 'unknown' : 'refused' });
-        repo.generations.update(id, { status: 'failed', errorCategory: 'cancelled', userError: job.providerJob ? 'Stopped tracking this job; the provider may still run and charge it.' : 'Cancelled before it started.', completedAt: new Date().toISOString(),
+        const submitted = submissionStarted(job);
+        if (!submitted) updateBilling(repo, id, 'confirmed_unbilled');
+        const ledger = budget?.settle(job, { outcome: submitted ? 'unknown' : 'refused' });
+        const state = ledger?.status === 'released' ? 'confirmed_unbilled' : ledger?.status === 'charged' ? 'charged' : submitted ? 'billing_unknown' : 'confirmed_unbilled';
+        updateBilling(repo, id, state, { status: 'failed', errorCategory: 'cancelled', userError: submitted ? 'Stopped tracking this job; the provider may still run and charge it.' : 'Cancelled before it started.', completedAt: new Date().toISOString(),
           billing: ledger ? (ledger.status === 'released' ? 'none' : ledger.status) : job.billing });
         const final = repo.generations.get(id);
         events.emit('update', final);
@@ -184,13 +228,13 @@ export function createJobRunner({ repo, assetStore, providers, directors, keys, 
     recover() {
       const running = repo.generations.idsWithStatus('running').map((id) => repo.generations.get(id));
       // Provider jobs that were accepted before Lumina stopped: poll them again.
-      const resumable = running.filter((g) => g.providerJob && providers.get(g.provider)?.resumable);
+      const resumable = running.filter((g) => g.providerJob && g.providerJob.resumable !== false && g.providerJob.phase !== 'submitting' && providers.get(g.provider)?.resumable);
       for (const g of resumable) repo.generations.update(g.id, { status: 'queued' });
       const lost = running.filter((g) => !resumable.includes(g));
       const interrupted = repo.generations.markInterrupted(lost.map((g) => g.id));
       for (const g of lost) {
         const ledger = budget?.settle(g, { outcome: 'unknown' });
-        if (ledger) repo.generations.update(g.id, { billing: ledger.status });
+        updateBilling(repo, g.id, ledger?.status === 'released' ? 'confirmed_unbilled' : ledger?.status === 'charged' ? 'charged' : 'billing_unknown', { billing: ledger?.status === 'released' ? 'none' : ledger?.status ?? g.billing });
       }
       const queued = repo.generations.idsWithStatus('queued');
       queued.forEach((id) => queue.push(id));

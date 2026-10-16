@@ -1,4 +1,4 @@
-import { ProviderError, downloadBytes, requestJson, requireKey, sleep, toDataUrl } from './http.js';
+import { ProviderError, assertResumable, downloadBytes, requestJson, requireKey, sleep, toDataUrl } from './http.js';
 
 // OpenRouter: one key for many image, video and text models.
 // Images: POST /api/v1/images (base64 in data[].b64_json). Video: POST /api/v1/videos, poll the job, download
@@ -47,12 +47,15 @@ export default {
     const left = body?.data?.limit_remaining;
     return { ok: true, verified: true, message: left == null ? 'Key works.' : `Key works. Credit left on this key: $${Number(left).toFixed(2)}.` };
   },
-  async run({ key, model, prompt, size, quality, images, seed }) {
+  async run({ key, model, prompt, size, quality, images, seed, resumeJob, onSubmitting, onSubmitted, onRequestId, onCompleted }) {
+    assertResumable(resumeJob, false);
     const body = { model, prompt, aspect_ratio: ratio[size] ?? '1:1', n: 1 };
     if (quality) body.quality = quality;
     if (Number.isInteger(seed)) body.seed = seed;
     if (images.length) body.input_references = images.map((img) => ({ type: 'image_url', image_url: { url: toDataUrl(img) } }));
-    const result = await requestJson(`${api}/images`, { method: 'POST', headers: headers(key), body: JSON.stringify(body), timeoutMs: 300_000 });
+    const result = await requestJson(`${api}/images`, { method: 'POST', onSubmitting, onSubmitted, onRequestId, headers: headers(key), body: JSON.stringify(body), timeoutMs: 300_000 });
+    if (result.id) onSubmitted?.({ id: result.id, resumable: false });
+    onCompleted?.({ usage: result.usage ?? null, resumable: false });
     const first = result?.data?.[0];
     if (!first?.b64_json) throw new ProviderError('provider', 'OpenRouter returned no image');
     return { bytes: Buffer.from(first.b64_json, 'base64'), usage: result.usage ?? null };
@@ -60,7 +63,10 @@ export default {
   // Video jobs are asynchronous. `onSubmitted` receives the job id the moment OpenRouter accepts it (Lumina saves
   // it), and `resumeJob` continues polling a saved job after a restart instead of submitting (and paying) again.
   resumable: true,
-  async video({ key, model, prompt, image: start, endImage = null, duration, aspect, resolution, seed, resumeJob = null, onSubmitted }) {
+  async video({ key, model, prompt, image: start, endImage = null, duration, aspect, resolution, seed, resumeJob = null, onSubmitting, onSubmitted, onRequestId, onCompleted, onDownloadFailed }) {
+    const download = (url, usage) => downloadBytes(url, { timeoutMs: 300_000, headers: { authorization: `Bearer ${requireKey(key)}` }, onCompleted, onDownloadFailed, usage });
+    if (resumeJob?.downloadUrl) return { bytes: await download(resumeJob.downloadUrl, resumeJob.usage), usage: resumeJob.usage ?? null };
+    assertResumable(resumeJob, Boolean(resumeJob?.id));
     let job = resumeJob;
     if (!job?.id) {
       const body = { model, prompt, generate_audio: true };
@@ -75,10 +81,10 @@ export default {
       if (endImage) frames.push({ type: 'image_url', image_url: { url: toDataUrl(endImage) }, frame_type: 'last_frame' });
       if (frames.length) body.frame_images = frames;
       if (Number.isInteger(seed)) body.seed = seed;
-      const submitted = await requestJson(`${api}/videos`, { method: 'POST', headers: headers(key), body: JSON.stringify(body), timeoutMs: 120_000 });
+      const submitted = await requestJson(`${api}/videos`, { method: 'POST', onSubmitting, onSubmitted, onRequestId, headers: headers(key), body: JSON.stringify(body), timeoutMs: 120_000 });
       if (!submitted?.id) throw new ProviderError('provider', 'OpenRouter did not start the video job');
-      job = { id: String(submitted.id), pollUrl: submitted.polling_url };
-      onSubmitted?.(job);
+      job = { id: String(submitted.id), pollUrl: submitted.polling_url, resumable: true };
+      onSubmitted?.({ ...job, resumable: true });
     }
     const onOpenRouter = (url) => /^https:\/\/openrouter\.ai\//.test(String(url ?? ''));
     const poll = onOpenRouter(job.pollUrl) ? job.pollUrl : `${api}/videos/${encodeURIComponent(job.id)}`;
@@ -90,7 +96,7 @@ export default {
         const listed = status.unsigned_urls?.[0];
         // The key only goes to OpenRouter's own content endpoint.
         const url = onOpenRouter(listed) ? listed : `${api}/videos/${encodeURIComponent(job.id)}/content?index=0`;
-        return { bytes: await downloadBytes(url, { timeoutMs: 300_000, headers: { authorization: `Bearer ${key}` } }), usage: status.usage ?? null };
+        return { bytes: await download(url, status.usage), usage: status.usage ?? null };
       }
       if (['failed', 'cancelled', 'expired'].includes(status.status)) {
         const reason = String(status.error ?? status.status);

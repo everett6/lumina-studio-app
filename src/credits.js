@@ -19,7 +19,7 @@ export function createCreditMonitor({ keys, get = requestJson, now = () => Date.
         const data = result.data ?? {};
         const remaining = number(data.limit_remaining);
         const value = {
-          configured: true, status: 'available', checkedAt, cached: false,
+          configured: true, status: remaining === null ? 'unavailable' : 'available', checkedAt, cached: false,
           keyLimitUsd: number(data.limit), keyRemainingUsd: remaining === null ? null : Math.max(0, remaining),
           keyUsageUsd: number(data.usage), dailyUsageUsd: number(data.usage_daily), monthlyUsageUsd: number(data.usage_monthly),
           limitReset: typeof data.limit_reset === 'string' ? data.limit_reset : null,

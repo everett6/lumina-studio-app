@@ -4,13 +4,18 @@ import { startTestApp } from './helpers.js';
 
 // A total budget of $0 makes every paid request stop at the budget check, so nothing here can reach a provider.
 const noMoney = { enabled: true, strictPrices: false, totalUsd: 0, retryReserveUsd: 0, perRequestUsd: 2, confirmPaid: true };
-const paid = (projectId) => ({ projectId, operation: 'generate', prompt: 'a lighthouse', provider: 'openai', model: 'gpt-image-2.5-flare', size: '1024x1024', quality: 'low' });
+const paid = (projectId) => ({ projectId, operation: 'generate', prompt: 'a lighthouse', provider: 'fal', model: 'fal-ai/flux/schnell', size: '1024x1024' });
 
 test('confirm spend: app clicks on paid models need confirmation; free models, MCP and confirmed requests do not', async () => {
   const t = await startTestApp({ budgetSettings: noMoney });
   try {
     const project = (await t.call('POST', '/api/projects', { name: 'Confirm' })).body.project;
-    await t.call('PUT', '/api/settings/keys/openai', { key: 'test-not-a-real-key' }); // saved locally only; the $0 budget stops every request
+    await t.call('PUT', '/api/settings/keys/fal', { key: 'test-not-a-real-key' }); // saved locally only; the $0 budget stops every request
+    await t.call('PUT', '/api/settings/keys/openai', { key: 'test-not-a-real-key' });
+    // A paid model whose cost cannot be bounded in advance (billed per token) is refused outright, before any question.
+    const unbounded = await t.call('POST', '/api/generate', { projectId: project.id, operation: 'generate', prompt: 'a lighthouse', provider: 'openai', model: 'gpt-image-2.5-flare', size: '1024x1024', quality: 'low' });
+    assert.equal(unbounded.status, 402);
+    assert.match(unbounded.body.error, /no bounded price/);
     const asked = await t.call('POST', '/api/generate', paid(project.id));
     assert.equal(asked.status, 428);
     assert.equal(asked.body.needsSpendConfirm, true);
@@ -38,10 +43,10 @@ test('confirm spend: a canvas with paid nodes asks before the run starts', async
   const t = await startTestApp({ budgetSettings: noMoney });
   try {
     const project = (await t.call('POST', '/api/projects', { name: 'Canvas' })).body.project;
-    await t.call('PUT', '/api/settings/keys/openai', { key: 'test-not-a-real-key' });
+    await t.call('PUT', '/api/settings/keys/fal', { key: 'test-not-a-real-key' });
     const graph = { nodes: [
       { id: 'p1', type: 'prompt', x: 0, y: 0, data: { text: 'a lighthouse' } },
-      { id: 'g1', type: 'generate', x: 200, y: 0, data: { provider: 'openai', model: 'gpt-image-2.5-flare' } },
+      { id: 'g1', type: 'generate', x: 200, y: 0, data: { provider: 'fal', model: 'fal-ai/flux/schnell' } },
     ], edges: [{ id: 'e1', from: { node: 'p1', port: 'text' }, to: { node: 'g1', port: 'prompt' } }] };
     const canvas = (await t.call('POST', `/api/projects/${project.id}/canvases`, { name: 'Paid' })).body.canvas;
     const saved = await t.call('PUT', `/api/canvases/${canvas.id}`, { graph, version: canvas.version });

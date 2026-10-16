@@ -15,7 +15,7 @@ const userMessages = {
   rate_limit: 'The provider is rate limiting requests or the account is out of credit. Wait, then try again.',
   policy: 'The provider declined this prompt or image. Try changing the wording.',
   invalid_request: 'The provider rejected these settings for this model.',
-  timeout: 'The provider took too long to respond. Try again.',
+  timeout: 'The provider took too long to respond. Billing may be uncertain; check its activity page before confirming another paid request.',
   provider: 'The provider could not complete this request. Try again.',
 };
 
@@ -42,30 +42,60 @@ function extractMessage(text) {
   }
 }
 
-export async function request(url, { timeoutMs = 120_000, ...options } = {}) {
+export async function request(url, { timeoutMs = 120_000, onSubmitting, onSubmitted, onRequestId, ...options } = {}) {
   let response;
+  onSubmitting?.();
   try {
     response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new ProviderError('timeout', 'Request timed out');
     throw new ProviderError('provider', `Network error: ${error.message}`);
   }
+  const requestId = response.headers.get('x-request-id') ?? response.headers.get('request-id');
+  if (requestId) onRequestId?.({ id: requestId });
   if (!response.ok) {
     const text = await response.text();
     const detail = extractMessage(text);
-    throw new ProviderError(categorize(response.status, text), `HTTP ${response.status}`, { status: response.status, detail: typeof detail === 'string' ? detail : JSON.stringify(detail) });
+    throw Object.assign(new ProviderError(categorize(response.status, text), `HTTP ${response.status}`, { status: response.status, detail: typeof detail === 'string' ? detail : JSON.stringify(detail) }), { confirmedUnbilled: options.method === 'POST' && [400, 401, 402, 403, 404, 422, 429].includes(response.status) });
   }
+  onSubmitted?.({ id: requestId ?? null, resumable: false });
   return response;
 }
 
 export async function requestJson(url, options) {
-  return (await request(url, options)).json();
+  const read = async () => {
+    const body = await (await request(url, options)).json();
+    const id = body?.id ?? body?.name ?? body?.request_id;
+    if (id) options?.onSubmitted?.({ id: String(id), resumable: false });
+    return body;
+  };
+  return options?.method && options.method !== 'GET' ? read() : retryRead(read);
 }
 
-export async function downloadBytes(url, { timeoutMs = 120_000, headers } = {}) {
-  if (!/^https:\/\//.test(url)) throw new ProviderError('provider', 'Provider returned a non-HTTPS result URL.');
-  const response = await request(url, { timeoutMs, headers });
-  return Buffer.from(await response.arrayBuffer());
+// Only reads are retried. A paid POST is deliberately never retried after a network/parse timeout.
+export async function retryRead(read, { onFailure } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await read(); }
+    catch (error) {
+      onFailure?.(error);
+      if (attempt >= 2) throw error;
+      await sleep(100 * 2 ** attempt);
+    }
+  }
+}
+
+export async function downloadBytes(url, { timeoutMs = 120_000, headers, onCompleted, onDownloadFailed, usage } = {}) {
+  return retryRead(async () => {
+    onCompleted?.({ downloadUrl: url, usage: usage ?? null, resumable: true });
+    if (!/^https:\/\//.test(url)) throw new ProviderError('provider', 'Provider returned a non-HTTPS result URL.');
+    const response = await request(url, { timeoutMs, headers });
+    return Buffer.from(await response.arrayBuffer());
+  }, { onFailure: onDownloadFailed });
+}
+
+// Refuse an unusable recovery marker instead of falling back to another paid submission.
+export function assertResumable(resumeJob, valid) {
+  if (resumeJob && !valid) throw new ProviderError('provider', 'Saved provider request cannot be resumed safely. Check its billing; choose a local model.');
 }
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
