@@ -5,6 +5,7 @@ import path from 'node:path';
 import { isIP } from 'node:net';
 import { sniffMedia } from './assets.js';
 import { RequestError } from './generation.js';
+import { privateAddress, safeFetch } from './safefetch.js';
 import { run } from './video.js';
 
 // Background music from the internet, found and downloaded when a film needs it. The catalogue is Openverse
@@ -17,16 +18,8 @@ const licences = 'cc0,pdm,by';
 const maxBytes = 40 * 1024 * 1024;
 export const creditKey = (assetId) => `music-credit:${assetId}`;
 
-// Downloads go only to public https hosts: no plain http, no loopback, private, link-local or unique-local addresses.
-export function privateAddress(address) {
-  if (isIP(address) === 4) {
-    const [a, b] = address.split('.').map(Number);
-    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) || a >= 224;
-  }
-  const v6 = address.toLowerCase();
-  if (v6.startsWith('::ffff:')) return privateAddress(v6.slice(7));
-  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith('ff');
-}
+// Downloads go only to public https hosts (src/safefetch.js pins the connection to the checked address).
+export { privateAddress } from './safefetch.js';
 
 const track = (r) => ({
   id: r.id, title: r.title || 'Untitled', creator: r.creator || 'Unknown artist', source: r.source ?? r.provider ?? null,
@@ -36,7 +29,7 @@ const track = (r) => ({
   credit: r.attribution ?? `"${r.title}" by ${r.creator} (${r.license})`,
 });
 
-export function createMusicService({ repo, assetStore, fetchImpl = globalThis.fetch, lookupImpl = (host) => lookup(host, { all: true }), userAgent = 'LuminaStudio (https://github.com/everett6/lumina-studio-app)', log = console }) {
+export function createMusicService({ repo, assetStore, fetchImpl = safeFetch, lookupImpl = (host) => lookup(host, { all: true }), userAgent = 'LuminaStudio (https://github.com/everett6/lumina-studio-app)', log = console }) {
   async function checkHost(url) {
     if (url.protocol !== 'https:') throw new RequestError(502, 'The music link is not https; pick another track.');
     const host = url.hostname.replace(/^\[|\]$/g, '');

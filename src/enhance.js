@@ -235,6 +235,27 @@ export function createEnhancer({ binDir, workDir, log = console }) {
   }
 
   // Background enhancement jobs, one per source video: { state, done, total, mode, error, assetId }.
+  // Still-image variant: use only an installed binary, and keep photo x4plus at its native 4x
+  // before resizing to 2x. Like video/RIFE this takes the shared GPU lease; no downloads here.
+  async function upscaleImageInner(file, { scale = 2, engine = 'local-anime', preparedTool } = {}) {
+    if (![2, 4].includes(scale) || !['local-anime', 'local-photo'].includes(engine)) throw Object.assign(new Error('Choose scale 2 or 4 and local-anime or local-photo.'), { status: 400 });
+    const info = await probe(file);
+    const width = info.width * scale, height = info.height * scale;
+    if (width > 16384 || height > 16384 || width * height > 32_000_000) throw Object.assign(new Error('Upscaled image exceeds the 32 million pixel / 16384 per-side limit.'), { status: 400 });
+    const tool = preparedTool ?? await aiTool({ allowDownload: false });
+    mkdirSync(workDir ?? path.dirname(file), { recursive: true });
+    const dir = await mkdtemp(path.join(workDir ?? path.dirname(file), 'lumina-image-upscale-'));
+    try {
+      const input = path.join(dir, 'input.png'), enlarged = path.join(dir, 'enlarged.png'), out = path.join(dir, 'output.png');
+      // Decode JPEG/WebP first: the NCNN program's image support varies between releases.
+      await run('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-threads', '1', '-y', input], 60_000);
+      const anime = engine === 'local-anime';
+      await exec(tool.binary, ['-i', input, '-o', enlarged, '-n', anime ? 'realesr-animevideov3' : 'realesrgan-x4plus', '-s', String(anime ? scale : 4), '-f', 'png', ...(tool.models ? ['-m', tool.models] : [])], { timeout: 600_000 });
+      await run('ffmpeg', ['-v', 'error', '-i', enlarged, '-vf', `scale=${width}:${height}:flags=lanczos`, '-frames:v', '1', '-threads', '1', '-y', out], 60_000);
+      return { bytes: await readFile(out), width, height };
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+
   const jobs = new Map();
   const pending = new Set();
   function track(promise) {
@@ -279,5 +300,6 @@ export function createEnhancer({ binDir, workDir, log = console }) {
 
   const interpolate = (...args) => withGpuLease(() => interpolateInner(...args));
   const enhanceVideo = (...args) => withGpuLease(() => enhanceVideoInner(...args));
-  return { enhanceVideo, interpolate, aiTool, rifeTool, tools, start, idle, status: (assetId) => jobs.get(assetId) ?? null, targetSize };
+  const upscaleImage = (...args) => withGpuLease(() => upscaleImageInner(...args));
+  return { enhanceVideo, upscaleImage, interpolate, aiTool, rifeTool, tools, start, idle, status: (assetId) => jobs.get(assetId) ?? null, targetSize };
 }

@@ -96,3 +96,10 @@ test('sound effect search uses the sound_effect category and a maximum length', 
   await music.search('sword', { kind: 'sound', minSeconds: 0, maxSeconds: 100 });
   assert.equal(new URL(calls[0]).searchParams.get('category'), 'sound_effect');
 });
+
+test('safe downloads refuse hosts that resolve to private addresses at connect time, and plain http', async () => {
+  const { safeFetch } = await import('../src/safefetch.js');
+  await assert.rejects(safeFetch('https://localhost:9/x.mp3'), /private address/);
+  await assert.rejects(safeFetch('https://127.0.0.1:9/x.mp3'), /private address/);
+  await assert.rejects(safeFetch('http://example.org/x.mp3'), /only https/);
+});
