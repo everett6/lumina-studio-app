@@ -11,7 +11,12 @@ import { probe, run } from './video.js';
 // is cut off for the rest of the film.
 // The picture is copied untouched, so mixing never costs picture quality, and the sound can be remixed any time
 // (new music, a re-recorded line) without touching the footage.
-export async function mixSoundtrack(videoFile, outFile, { lines = [], music = null, ambience = null, clipVolume = 1, duration = null } = {}) {
+// `music` is one bed for the whole film, or a list of segments [{ file, volume, start, end }] (music per scene):
+// each segment loops its track over its own span and crossfades (1.5 s) into the next. `effects` are sound
+// effects [{ file, at, volume }], mixed on their own bus: not loudness-normalised with the voices, and they
+// do not duck the music.
+const crossfade = 1.5;
+export async function mixSoundtrack(videoFile, outFile, { lines = [], music = null, ambience = null, effects = [], clipVolume = 1, duration = null } = {}) {
   const info = await probe(videoFile);
   const length = duration ?? info.duration;
   const inputs = ['-i', videoFile];
@@ -38,14 +43,42 @@ export async function mixSoundtrack(videoFile, outFile, { lines = [], music = nu
     filters.push(`${labels}amix=inputs=${placed.length}:normalize=0:dropout_transition=0,loudnorm=I=-16:TP=-2:LRA=11,${fmt},asplit=2[dia][key]`);
     bus.push('[dia]');
   }
-  for (const [name, bed] of [['mus', music], ['amb', ambience]]) {
-    if (!bed?.file) continue;
-    inputs.push('-stream_loop', '-1', '-i', bed.file);
-    const raw = `[${index}:a]${fmt},atrim=0:${length.toFixed(3)},volume=${Number(bed.volume ?? 0.3).toFixed(3)}`;
+  // Music: one or more segments, each looped over its span, faded in/out where it meets another segment.
+  const segments = (Array.isArray(music) ? music : music?.file ? [{ ...music, start: 0, end: length }] : [])
+    .filter((m) => m?.file && m.end > m.start && m.start < length).map((m) => ({ ...m, end: Math.min(m.end, length) }));
+  if (segments.length) {
+    const parts = [];
+    for (const [n, m] of segments.entries()) {
+      inputs.push('-stream_loop', '-1', '-i', m.file);
+      const fadeIn = m.start > 0 ? crossfade : 0;
+      const fadeOut = m.end < length - 0.001 ? crossfade : 0;
+      const from = Math.max(0, m.start - fadeIn / 2);
+      const span = Math.min(length, m.end + fadeOut / 2) - from;
+      const ms = Math.round(from * 1000);
+      filters.push(`[${index}:a]${fmt},atrim=0:${span.toFixed(3)},volume=${Number(m.volume ?? 0.3).toFixed(3)}`
+        + `${fadeIn ? `,afade=t=in:d=${fadeIn}` : ''}${fadeOut ? `,afade=t=out:st=${(span - fadeOut).toFixed(3)}:d=${fadeOut}` : ''},adelay=${ms}|${ms}[m${n}]`);
+      parts.push(`[m${n}]`);
+      index += 1;
+    }
+    const joined = parts.length > 1 ? `${parts.join('')}amix=inputs=${parts.length}:normalize=0:duration=longest:dropout_transition=0,${fmt}` : `${parts[0]}anull`;
+    filters.push(`${joined},apad,atrim=0:${length.toFixed(3)}[mraw]`);
+    if (placed.length) filters.push('[key]apad[keypad]', '[mraw][keypad]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[mus]');
+    else filters.push('[mraw]anull[mus]');
+    bus.push('[mus]');
+  }
+  if (ambience?.file) {
+    inputs.push('-stream_loop', '-1', '-i', ambience.file);
+    filters.push(`[${index}:a]${fmt},atrim=0:${length.toFixed(3)},volume=${Number(ambience.volume ?? 0.3).toFixed(3)}[amb]`);
     index += 1;
-    if (name === 'mus' && placed.length) filters.push(`${raw}[mraw]`, '[key]apad[keypad]', '[mraw][keypad]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[mus]');
-    else filters.push(`${raw}[${name}]`);
-    bus.push(`[${name}]`);
+    bus.push('[amb]');
+  }
+  const hits = effects.filter((e) => e?.file && Number.isFinite(e.at) && e.at < length);
+  for (const [n, e] of hits.entries()) {
+    inputs.push('-i', e.file);
+    const ms = Math.max(0, Math.round(e.at * 1000));
+    filters.push(`[${index}:a]${fmt},volume=${Number(e.volume ?? 0.8).toFixed(3)},adelay=${ms}|${ms}[x${n}]`);
+    bus.push(`[x${n}]`);
+    index += 1;
   }
   if (placed.length && !bus.includes('[mus]')) filters.push('[key]anullsink');
   filters.push(`${bus.join('')}amix=inputs=${bus.length}:normalize=0:duration=first:dropout_transition=0,alimiter=limit=0.89:level=false,${fmt}[out]`);

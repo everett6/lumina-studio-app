@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { createMusicService, creditKey, privateAddress } from '../src/music.js';
 
@@ -71,4 +72,27 @@ test('music download re-reads the record, checks the file and keeps the credit',
 test('private and loopback addresses are refused', () => {
   for (const a of ['127.0.0.1', '10.1.2.3', '192.168.1.9', '172.20.0.1', '169.254.169.254', '::1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1']) assert.equal(privateAddress(a), true, a);
   for (const a of ['93.184.216.34', '2606:4700::1111']) assert.equal(privateAddress(a), false, a);
+});
+
+test('a preview is a short MP3 sample and nothing is saved', async () => {
+  const real = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=f=440:d=40', '-f', 'wav', '-'], { maxBuffer: 1 << 26 }).stdout;
+  const settings = new Map();
+  const saved = [];
+  const music = createMusicService({
+    repo: { settings: { get: (k, d) => settings.get(k) ?? d, set: (k, v) => settings.set(k, v) } }, assetStore: { save: async (a) => { saved.push(a); return a; } },
+    fetchImpl: async (url) => (url.includes('/v1/audio/') ? Response.json(records[id(1)]) : new Response(real)), lookupImpl: async () => [{ address: '93.184.216.34' }], log: {},
+  });
+  const { bytes, track } = await music.preview(id(1), { seconds: 5 });
+  assert.equal(track.title, 'Quiet Dawn');
+  assert.ok(bytes.length > 1000 && bytes.length < 200_000, `a small sample (${bytes.length} bytes)`);
+  const seconds = Number(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', '-'], { input: bytes, encoding: 'utf8' }).stdout);
+  assert.ok(Math.abs(seconds - 5) < 0.2, `5 s long (${seconds})`);
+  assert.equal(saved.length, 0);
+});
+
+test('sound effect search uses the sound_effect category and a maximum length', async () => {
+  const calls = [];
+  const { music } = service(calls);
+  await music.search('sword', { kind: 'sound', minSeconds: 0, maxSeconds: 100 });
+  assert.equal(new URL(calls[0]).searchParams.get('category'), 'sound_effect');
 });

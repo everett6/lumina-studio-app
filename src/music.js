@@ -1,7 +1,11 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { lookup } from 'node:dns/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { isIP } from 'node:net';
 import { sniffMedia } from './assets.js';
 import { RequestError } from './generation.js';
+import { run } from './video.js';
 
 // Background music from the internet, found and downloaded when a film needs it. The catalogue is Openverse
 // (api.openverse.org, run by WordPress; no key needed), which indexes openly licensed music from Jamendo,
@@ -77,33 +81,50 @@ export function createMusicService({ repo, assetStore, fetchImpl = globalThis.fe
   }
 
   // Tracks for a mood or style, e.g. "calm piano", "epic orchestral battle", "lofi". minSeconds drops short clips.
-  async function search(query, { minSeconds = 30, limit = 10 } = {}) {
+  // kind 'music' (beds and cues) or 'sound' (sound effects: short, any length up to maxSeconds).
+  async function search(query, { minSeconds = 30, maxSeconds = null, limit = 10, kind = 'music' } = {}) {
     const q = String(query ?? '').trim().slice(0, 200);
     if (!q) throw new RequestError(400, 'Describe the music to look for, e.g. "calm piano" or "epic orchestral".');
     // The "music" category first; Openverse files most Freesound music under sound effects, so fall back to all audio.
     const page = async (extra) => (await (await get(`${api}?${new URLSearchParams({ q, license: licences, page_size: '20', ...extra })}`, 20_000)).json()).results ?? [];
-    let results = await page({ category: 'music' });
+    let results = await page({ category: kind === 'sound' ? 'sound_effect' : 'music' });
     if (!results.length) results = await page({});
     return results
-      .filter((r) => r.url && (minSeconds > 0 ? r.duration >= minSeconds * 1000 : true) && ['cc0', 'pdm', 'by'].includes(r.license))
+      .filter((r) => r.url && (minSeconds > 0 ? r.duration >= minSeconds * 1000 : true) && (maxSeconds ? r.duration > 0 && r.duration <= maxSeconds * 1000 : true) && ['cc0', 'pdm', 'by'].includes(r.license))
       .slice(0, Math.min(20, Math.max(1, limit))).map(track);
   }
 
   // Downloads one track (by its id from search) into the project library. The record is fetched again from the
   // catalogue, so the file always comes from the catalogue's own link and its licence is re-checked.
-  async function download(projectId, trackId) {
+  async function fetchTrack(trackId) {
     if (!/^[0-9a-f-]{36}$/i.test(String(trackId ?? ''))) throw new RequestError(400, 'Pass a track id from the music search.');
     const record = await (await get(`${api}${trackId}/`, 20_000)).json();
     if (!['cc0', 'pdm', 'by'].includes(record.license)) throw new RequestError(400, 'That track\'s licence does not allow use in a film without conditions Lumina cannot meet.');
-    const info = track(record);
     const bytes = await readCapped(await get(record.url, 120_000));
     if (!sniffMedia(bytes)?.startsWith('audio/')) throw new RequestError(502, 'The download was not an audio file Lumina can use; pick another track.');
-    const asset = await assetStore.save({ bytes, projectId, kind: 'audio', label: `Music: ${info.title} — ${info.creator}`.slice(0, 120) });
+    return { info: track(record), bytes };
+  }
+
+  // A short MP3 sample (default the first 20 s) to listen to before choosing; nothing is saved.
+  async function preview(trackId, { seconds = 20, start = 0 } = {}) {
+    const { info, bytes } = await fetchTrack(trackId);
+    const dir = await mkdtemp(path.join(tmpdir(), 'lumina-preview-'));
+    try {
+      await writeFile(path.join(dir, 'in'), bytes);
+      await run('ffmpeg', ['-v', 'error', '-ss', String(Math.max(0, start)), '-t', String(Math.min(30, Math.max(3, seconds))), '-i', path.join(dir, 'in'),
+        '-vn', '-ac', '2', '-ar', '44100', '-c:a', 'libmp3lame', '-b:a', '96k', '-af', 'afade=t=out:st=' + (Math.min(30, Math.max(3, seconds)) - 1) + ':d=1', '-y', path.join(dir, 'out.mp3')], 60_000);
+      return { track: info, bytes: await readFile(path.join(dir, 'out.mp3')) };
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+
+  async function download(projectId, trackId, { kind = 'music' } = {}) {
+    const { info, bytes } = await fetchTrack(trackId);
+    const asset = await assetStore.save({ bytes, projectId, kind: 'audio', label: `${kind === 'sound' ? 'Sound' : 'Music'}: ${info.title} — ${info.creator}`.slice(0, 120) });
     repo.settings.set(creditKey(asset.id), info);
     log.info?.('Downloaded music', { title: info.title, source: info.source, license: info.license });
     return { asset, track: info };
   }
 
   const credit = (assetId) => (assetId ? repo.settings.get(creditKey(assetId), null) : null);
-  return { search, download, credit };
+  return { search, download, preview, credit };
 }
