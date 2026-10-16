@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { cleanSceneState, validateContinuity } from '../src/continuity.js';
 import { lineTimes } from '../src/soundtrack.js';
 import { startTestApp, tinyPngDataUrl } from './helpers.js';
 
@@ -298,4 +299,133 @@ test('recorded dialogue that exceeds the shot pauses finishing without truncatin
     assert.ok(t.app.repo.shots.get(shot.id).videoAssetId,'source clip retained');
     assert.equal(t.app.repo.sequences.get(id).outputAssetId,null);
   } finally { await t.close(); }
+});
+
+const person = (extra = {}) => ({ id: 'hero', position: 'left', facing: 'right', wardrobe: 'jacket-red', props: { held: ['sword'], worn: [] }, injuries: [], knows: [], ...extra });
+const state = (extra = {}) => ({ characters: [person()], location: 'bridge', timeOfDay: 'dusk', events: [], transitions: [], ...extra });
+const planned = (id, start = state(), end = start, extra = {}) => ({ id, start, end, ...extra });
+const blocking = (findings) => findings.filter((f) => f.severity === 'blocking');
+const contradiction = (rule, next) => {
+  const findings = validateContinuity([planned('one'), planned('two', next)]);
+  const finding = findings.find((f) => f.rule === rule);
+  assert.ok(finding, JSON.stringify(findings));
+  assert.equal(finding.shotId, 'two');
+  assert.equal(finding.previousShotId, 'one');
+  assert.equal(finding.kind, 'deterministic');
+  assert.equal(finding.severity, 'blocking');
+  assert.ok(finding.id && finding.message && finding.evidence);
+};
+
+test('structured continuity normalizes without sharing or mutating input', () => {
+  const input = state({ characters: [person({ id: ' hero ', position: 'invalid', props: { held: ['sword', 'sword', 4], worn: [] } })] });
+  const before = structuredClone(input);
+  const result = cleanSceneState(input);
+  assert.equal(result.characters[0].id, 'hero');
+  assert.equal(result.characters[0].position, null);
+  assert.deepEqual(result.characters[0].props.held, ['sword']);
+  result.characters[0].props.held.push('bow');
+  assert.deepEqual(input, before);
+  assert.deepEqual(cleanSceneState(null), cleanSceneState());
+});
+
+test('structured continuity traces a vanishing sword', () => contradiction('prop-lost', state({ characters: [person({ props: { held: [], worn: [] } })] })));
+test('structured continuity traces an unexplained jacket change', () => contradiction('wardrobe-change', state({ characters: [person({ wardrobe: 'jacket-blue' })] })));
+test('structured continuity traces dusk becoming day', () => contradiction('time-change', state({ timeOfDay: 'day' })));
+test('structured continuity traces an unexplained location change', () => contradiction('location-change', state({ location: 'forest' })));
+test('structured continuity traces an unexplained character entrance', () => contradiction('character-presence', state({ characters: [person(), person({ id: 'friend', props: { held: [], worn: [] } })] })));
+
+test('structured continuity checks both endpoints and within-shot changes', () => {
+  const end = state({ characters: [person({ props: { held: [], worn: [] } })] });
+  assert.ok(validateContinuity([planned('one', state(), end)]).some((f) => f.rule === 'prop-lost' && f.evidence.boundary === 'within-shot'));
+});
+
+test('structured continuity refuses duplicate props and undeclared transfers', () => {
+  const friend = person({ id: 'friend', props: { held: [], worn: [] } });
+  const start = state({ characters: [person(), friend] });
+  const duplicate = state({ characters: [person(), { ...friend, props: { held: ['sword'] } }] });
+  assert.ok(blocking(validateContinuity([planned('dup', duplicate)])).some((f) => f.rule === 'prop-duplicate'));
+  const end = state({ characters: [person({ props: { held: [], worn: [] } }), { ...friend, props: { held: ['sword'], worn: [] } }] });
+  assert.ok(blocking(validateContinuity([planned('transfer', start, end)])).some((f) => f.rule === 'prop-transfer'));
+  end.transitions = [{ type: 'prop-transfer', who: 'hero', to: 'friend', what: 'sword', reason: 'Hands it over' }];
+  assert.equal(blocking(validateContinuity([planned('transfer', start, end)])).length, 0);
+});
+
+test('structured continuity requires a present speaker or explicit voice-over', () => {
+  const findings = validateContinuity([planned('speech', state(), state(), { dialogue: [{ speaker: 'ghost', text: 'Hello' }] })]);
+  assert.ok(findings.some((f) => f.rule === 'speaker-presence' && f.evidence.speaker === 'ghost'));
+  assert.equal(blocking(validateContinuity([planned('vo', state(), state(), { dialogue: [{ speaker: 'ghost', text: 'Hello', voiceOver: true }] })])).length, 0);
+  assert.equal(blocking(validateContinuity([planned('os', state({ characters: [person({ position: 'offscreen' })] }), undefined, { dialogue: [{ speaker: 'hero', text: 'Hello' }] })])).length, 0);
+});
+
+test('structured continuity keeps injuries across cuts and character absences', () => {
+  const hurt = state({ characters: [person({ injuries: ['cut'] })] });
+  const findings = validateContinuity([planned('hurt', hurt), planned('later')]);
+  assert.ok(findings.some((f) => f.rule === 'injury-persistence' && f.evidence.what === 'cut'));
+  const absent = state({ characters: [], transitions: [{ type: 'character-exit', who: 'hero', reason: 'Leaves' }, { type: 'prop-lost', who: 'hero', what: 'sword', reason: 'Leaves with hero' }] });
+  const back = state({ transitions: [{ type: 'character-enter', who: 'hero', reason: 'Returns' }, { type: 'prop-appears', who: 'hero', what: 'sword', reason: 'Returns with hero' }] });
+  assert.ok(validateContinuity([planned('hurt', hurt), planned('away', absent), planned('back', back)]).some((f) => f.rule === 'injury-persistence' && f.shotId === 'back'));
+});
+
+test('structured continuity rejects use of a fact learned only later', () => {
+  const early = planned('early', state(), state({ events: [{ type: 'use', who: 'hero', what: 'password' }] }));
+  const learned = state({ characters: [person({ knows: ['password'] })], events: [{ type: 'learn', who: 'hero', what: 'password' }] });
+  const findings = validateContinuity([early, planned('learns', state(), learned)]);
+  assert.ok(findings.some((f) => f.rule === 'knowledge-before-use' && f.shotId === 'early' && f.evidence.what === 'password'));
+  const ordered = state({ characters: [person({ knows: ['password'] })], events: [{ type: 'learn', who: 'hero', what: 'password' }, { type: 'use', who: 'hero', what: 'password' }] });
+  assert.equal(blocking(validateContinuity([planned('ordered', state(), ordered)])).length, 0);
+});
+
+test('structured continuity reports unpaid setups with their required payoff ids', () => {
+  const findings = validateContinuity([planned('plant')], { setups: [{ setup: 'plant', payoff: 'reveal' }] });
+  assert.ok(findings.some((f) => f.rule === 'setup-payoff' && f.shotId === 'plant' && f.evidence.payoff === 'reveal'));
+});
+
+test('structured continuity treats screen flips and visual judgements as review only', () => {
+  const next = state({ characters: [person({ position: 'right', facing: 'left' })] });
+  const findings = validateContinuity([planned('one'), planned('two', next)]);
+  assert.ok(findings.some((f) => f.rule === 'screen-direction' && f.kind === 'needs-review' && f.severity === 'warning'));
+  assert.ok(findings.some((f) => f.rule === 'review-scope' && f.evidence.notCheckable.includes('eyelines')));
+  next.transitions = [{ type: 'crossing', who: 'hero', reason: 'Crosses the axis' }];
+  assert.ok(!validateContinuity([planned('one'), planned('two', next)]).some((f) => f.rule === 'screen-direction'));
+});
+
+test('structured continuity clean plan explains changes and is deterministic and pure', () => {
+  const next = state({ location: 'forest', timeOfDay: 'day', characters: [person({ wardrobe: 'jacket-blue' })], transitions: [
+    { type: 'wardrobe-change', who: 'hero', what: 'jacket-blue', reason: 'Changes coat' },
+    { type: 'location-change', what: 'forest', reason: 'Travels' },
+    { type: 'time-skip', what: 'day', reason: 'Next day' },
+  ] });
+  const shots = [planned('plant'), planned('reveal', next)];
+  const before = structuredClone(shots);
+  const findings = validateContinuity(shots, { setups: [{ setup: 'plant', payoff: 'reveal' }] });
+  assert.equal(blocking(findings).length, 0);
+  assert.deepEqual(findings, validateContinuity(shots, { setups: [{ setup: 'plant', payoff: 'reveal' }] }));
+  assert.deepEqual(shots, before);
+  assert.equal(new Set(findings.map((f) => f.id)).size, findings.length);
+});
+
+test('structured continuity incomplete states are reviewable rather than silent passes', () => {
+  assert.ok(validateContinuity([{ id: 'unknown', start: {}, end: {} }]).some((f) => f.rule === 'incomplete-state' && f.kind === 'needs-review'));
+});
+
+test('structured continuity does not infer disappearances from missing endpoint data', () => {
+  const findings = validateContinuity([planned('known'), { id: 'unknown', start: {}, end: {} }]);
+  assert.equal(blocking(findings).length, 0);
+  const missingProps = state({ characters: [person({ props: undefined, injuries: undefined, knows: undefined })] });
+  const hurt = state({ characters: [person({ injuries: ['cut'] })] });
+  const partial = validateContinuity([planned('hurt', hurt), planned('partial', missingProps)]);
+  assert.ok(!partial.some((f) => ['prop-lost', 'injury-persistence'].includes(f.rule)));
+  assert.ok(partial.some((f) => f.rule === 'incomplete-state'));
+});
+
+test('structured continuity requires payoffs after their setup within an event sequence', () => {
+  const endpoint = state({ events: [{ type: 'payoff', id: 'reveal' }, { type: 'setup', id: 'plant' }] });
+  const canon = { setups: [{ setup: 'plant', payoff: 'reveal' }] };
+  assert.ok(blocking(validateContinuity([planned('scene', state(), endpoint)], canon)).some((f) => f.rule === 'setup-payoff'));
+  const paid = state({ events: [{ type: 'setup', id: 'plant' }, { type: 'payoff', id: 'reveal' }] });
+  assert.equal(blocking(validateContinuity([planned('scene', state(), paid)], canon)).length, 0);
+});
+
+test('structured continuity offscreen flags must be explicit booleans', () => {
+  assert.ok(blocking(validateContinuity([planned('speech', state(), state(), { dialogue: [{ speaker: 'ghost', text: 'Hello', voiceOver: 'false' }] })])).some((f) => f.rule === 'speaker-presence'));
 });
