@@ -203,3 +203,14 @@ export async function animeChecks(file) {
   }
   return checks;
 }
+
+// Pure, low-resolution pixel comparison. These are visual measurements, never identity verdicts.
+export function frameDifference(a, b) {
+  if (!a?.length || a.length !== b?.length || a.length % 3) throw new TypeError('Equal nonempty RGB24 frames are required.');
+  let absolute = 0;
+  const meanA = [0, 0, 0], meanB = [0, 0, 0];
+  for (let i = 0; i < a.length; i += 1) { absolute += Math.abs(a[i] - b[i]); meanA[i % 3] += a[i]; meanB[i % 3] += b[i]; }
+  const pixels = a.length / 3;
+  const delta = meanA.map((v, i) => (v - meanB[i]) / pixels);
+  return { difference: absolute / a.length, colourJump: Math.hypot(...delta) / Math.sqrt(3), brightnessJump: Math.abs(delta[0] * 0.2126 + delta[1] * 0.7152 + delta[2] * 0.0722) };
+}
