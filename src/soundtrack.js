@@ -16,14 +16,15 @@ import { probe, run } from './video.js';
 // effects [{ file, at, volume }], mixed on their own bus: not loudness-normalised with the voices, and they
 // do not duck the music.
 const crossfade = 1.5;
-export async function mixSoundtrack(videoFile, outFile, { lines = [], music = null, ambience = null, effects = [], clipVolume = 1, duration = null } = {}) {
-  const info = await probe(videoFile);
+export async function mixSoundtrack(videoFile, outFile, { lines = [], music = null, ambience = null, effects = [], clipVolume = 1, duration = null, dialogueGainDb = 0, musicDuckDb = null, sfxGainDb = 0, audioOnly = false, from = 0, seconds = null, stems = null } = {}) {
+  const info = audioOnly ? { duration, hasAudio: true } : await probe(videoFile);
   const length = duration ?? info.duration;
   const inputs = ['-i', videoFile];
   const filters = [];
   const fmt = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo';
   let index = 1;
   const bus = [];
+  const groups = { dialogue: [], music: [], effects: [], clip: info.hasAudio ? ['[clip]'] : [] };
   if (info.hasAudio) {
     filters.push(`[0:a]${fmt},volume=${Number(clipVolume).toFixed(3)}[clip]`);
     bus.push('[clip]');
@@ -40,8 +41,9 @@ export async function mixSoundtrack(videoFile, outFile, { lines = [], music = nu
   }
   if (placed.length) {
     const labels = placed.map((_, n) => `[l${n}]`).join('');
-    filters.push(`${labels}amix=inputs=${placed.length}:normalize=0:dropout_transition=0,loudnorm=I=-16:TP=-2:LRA=11,${fmt},asplit=2[dia][key]`);
+    filters.push(`${labels}amix=inputs=${placed.length}:normalize=0:dropout_transition=0,loudnorm=I=-16:TP=-2:LRA=11,${fmt}${dialogueGainDb ? `,volume=${dialogueGainDb}dB` : ''},asplit=2[dia][key]`);
     bus.push('[dia]');
+    groups.dialogue.push('[dia]');
   }
   // Music: one or more segments, each looped over its span, faded in/out where it meets another segment.
   const segments = (Array.isArray(music) ? music : music?.file ? [{ ...music, start: 0, end: length }] : [])
@@ -62,28 +64,47 @@ export async function mixSoundtrack(videoFile, outFile, { lines = [], music = nu
     }
     const joined = parts.length > 1 ? `${parts.join('')}amix=inputs=${parts.length}:normalize=0:duration=longest:dropout_transition=0,${fmt}` : `${parts[0]}anull`;
     filters.push(`${joined},apad,atrim=0:${length.toFixed(3)}[mraw]`);
-    if (placed.length) filters.push('[key]apad[keypad]', '[mraw][keypad]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[mus]');
+    if (placed.length && musicDuckDb === 0) filters.push('[mraw]anull[mus]', '[key]anullsink');
+    else if (placed.length) filters.push('[key]apad[keypad]', `[mraw][keypad]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350${musicDuckDb == null ? '' : `:mix=${(1 - 10 ** (-musicDuckDb / 20)).toFixed(4)}`}[mus]`);
     else filters.push('[mraw]anull[mus]');
     bus.push('[mus]');
+    groups.music.push('[mus]');
   }
   if (ambience?.file) {
     inputs.push('-stream_loop', '-1', '-i', ambience.file);
     filters.push(`[${index}:a]${fmt},atrim=0:${length.toFixed(3)},volume=${Number(ambience.volume ?? 0.3).toFixed(3)}[amb]`);
     index += 1;
     bus.push('[amb]');
+    groups.music.push('[amb]');
   }
   const hits = effects.filter((e) => e?.file && Number.isFinite(e.at) && e.at < length);
   for (const [n, e] of hits.entries()) {
     inputs.push('-i', e.file);
     const ms = Math.max(0, Math.round(e.at * 1000));
-    filters.push(`[${index}:a]${fmt},volume=${Number(e.volume ?? 0.8).toFixed(3)},adelay=${ms}|${ms}[x${n}]`);
+    filters.push(`[${index}:a]${fmt},volume=${(sfxGainDb ? Number((e.volume ?? 0.8) * 10 ** (sfxGainDb / 20)).toFixed(6) : Number(e.volume ?? 0.8).toFixed(3))},adelay=${ms}|${ms}[x${n}]`);
     bus.push(`[x${n}]`);
+    groups.effects.push(`[x${n}]`);
     index += 1;
   }
   if (placed.length && !bus.includes('[mus]')) filters.push('[key]anullsink');
+  if (stems) {
+    for (const [name, labels] of Object.entries(groups)) {
+      const copies = labels.map((label, i) => {
+        filters.push(`${label}asplit=2[stem_${name}_${i}][mix_${name}_${i}]`);
+        bus[bus.indexOf(label)] = `[mix_${name}_${i}]`;
+        return `[stem_${name}_${i}]`;
+      });
+      filters.push(copies.length
+        ? `${copies.join('')}amix=inputs=${copies.length}:normalize=0:duration=longest:dropout_transition=0,apad,atrim=0:${length.toFixed(3)}[stem_${name}]`
+        : `anullsrc=r=48000:cl=stereo,atrim=0:${length.toFixed(3)}[stem_${name}]`);
+    }
+  }
   filters.push(`${bus.join('')}amix=inputs=${bus.length}:normalize=0:duration=first:dropout_transition=0,alimiter=limit=0.89:level=false,${fmt}[out]`);
-  await run('ffmpeg', ['-v', 'error', ...inputs, '-filter_complex', filters.join(';'), '-map', '0:v:0', '-map', '[out]',
-    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-t', length.toFixed(3), '-movflags', '+faststart', '-y', outFile], 1_800_000);
+  const output = audioOnly
+    ? ['-map', '[out]', '-vn', ...(outFile.endsWith('.mp3') ? ['-c:a', 'libmp3lame', '-b:a', '192k'] : ['-c:a', 'pcm_f32le']), '-ar', '48000', '-ss', String(from), '-t', String(seconds ?? length - from), '-y', outFile]
+    : ['-map', '0:v:0', '-map', '[out]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-t', length.toFixed(3), '-movflags', '+faststart', '-y', outFile];
+  if (stems) for (const name of Object.keys(groups)) output.push('-map', `[stem_${name}]`, '-c:a', 'pcm_f32le', '-ar', '48000', '-t', length.toFixed(3), '-y', stems[name]);
+  await run('ffmpeg', ['-v', 'error', ...inputs, '-filter_complex', filters.join(';'), ...output], 1_800_000);
 }
 
 // Where each dialogue line of a shot starts: its own `start` (seconds into the shot) when set, otherwise one after
